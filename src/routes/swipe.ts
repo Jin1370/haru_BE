@@ -3,7 +3,16 @@ import { supabase } from '../config/supabase';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
 import { swipeBodySchema, discoverQuerySchema, quotaQuerySchema } from '../schemas/swipe';
-import { AuthRequest } from '../types';
+import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
+
+// 시청자 언어 → 보이스 인트로 슬롯 매핑 (mig 011).
+// ko/ja/en 활성. th/hi/그 외/null 은 'en' 폴백 (FE 의 영문 강제 정책과 일관).
+export function pickViewerSlot(viewerLanguage: string | null | undefined): VoiceIntroSlotLanguage {
+  if (viewerLanguage === 'ko' || viewerLanguage === 'ja' || viewerLanguage === 'en') {
+    return viewerLanguage;
+  }
+  return 'en';
+}
 
 const router = Router();
 
@@ -143,9 +152,11 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   // 점수 계산을 위해 넉넉히 가져옴 (limit의 5배, 최대 200)
   const fetchLimit = Math.min(limit * 5, 200);
 
+  // mig 011: voice_intro_audio_urls (jsonb) 가 시청자 언어 슬롯의 source. 단일
+  // voice_intro_audio_url 은 응답에 미러로 출력하기 위해 슬롯에서 추출.
   let query = supabase
     .from('profiles')
-    .select('id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_url, interests, photos, created_at')
+    .select('id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, photos, created_at')
     .eq('is_active', true);
 
   if (uniqueExcludeIds.length > 0) {
@@ -228,11 +239,19 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   // 보안 경계: discover 는 잠금 해제 대상이 아니므로 서버에서 photos 배열을 메인 1장으로 잘라
   //            본인 프로필 외 추가 사진 URL 노출을 원천 차단한다.
   //            photo_access 는 정책상 항상 false/false 고정 (FE 는 forceBlur 정책을 적용).
-  const results = scored.slice(0, limit).map(({ _tier, _intra, created_at, photos, ...rest }) => ({
-    ...rest,
-    photos: (photos ?? []).slice(0, 1),
-    photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
-  }));
+  // mig 011: voice_intro_audio_urls (jsonb 3슬롯) 에서 시청자 언어 슬롯만 추출해
+  //          단일 voice_intro_audio_url 키에 미러 (FE SwipeCard 변경 0). 시청자 언어
+  //          슬롯이 NULL/failed/미존재면 null — 카드는 노출되지만 재생 버튼만 비활성.
+  const slot = pickViewerSlot(viewerLanguage);
+  const results = scored.slice(0, limit).map(({ _tier, _intra, created_at, photos, voice_intro_audio_urls, ...rest }) => {
+    const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<Record<VoiceIntroSlotLanguage, string | null>>;
+    return {
+      ...rest,
+      voice_intro_audio_url: (slotUrls[slot] as string | null | undefined) ?? null,
+      photos: (photos ?? []).slice(0, 1),
+      photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
+    };
+  });
 
   res.json(results);
 });

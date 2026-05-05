@@ -60,6 +60,14 @@ describe('Profile Routes', () => {
       expect(res.body.display_name).toBe('Profile Test');
       expect(res.body.voice_intro).toBe('Hello world');
       expect(res.body.interests).toEqual(['music', 'travel']);
+      // mig 011: voice intro 다국어 슬롯 컬럼이 응답에 노출되어야 함.
+      // voice_clone 미보유 사용자라 파이프라인은 트리거되지 않지만,
+      // PUT 의 upsertPayload 가 빈 객체로 리셋했으므로 응답에는 빈 객체.
+      expect(res.body.voice_intro_translations).toEqual({});
+      expect(res.body.voice_intro_audio_urls).toEqual({});
+      expect(res.body.voice_intro_audio_status).toEqual({});
+      // 단일 컬럼 호환 — voice_clone 없으니 NULL 잔존.
+      expect(res.body.voice_intro_audio_url).toBeNull();
     });
 
     it('프로필 수정 성공', async () => {

@@ -7,6 +7,7 @@ import {
   computeIntraScore,
   matchesLanguage,
   matchesNationality,
+  pickViewerSlot,
 } from '../src/routes/swipe';
 
 const EMAIL1 = 'apitest_swipe1@testmail.com';
@@ -290,6 +291,32 @@ describe('Swipe Routes', () => {
       ];
       list.sort(cmp);
       expect(list.map((x) => x.id)).toEqual(['b', 'c', 'a']);
+    });
+  });
+
+  // mig 011: voice intro 다국어 슬롯 분기 단위 테스트.
+  // 디스커버 hot path 의 시청자 언어 → ko/ja/en 슬롯 매핑 + 폴백 정책을 잠근다.
+  describe('pickViewerSlot (voice intro multi-lang viewer mapping)', () => {
+    it('viewer language ko → ko slot', () => {
+      expect(pickViewerSlot('ko')).toBe('ko');
+    });
+    it('viewer language ja → ja slot', () => {
+      expect(pickViewerSlot('ja')).toBe('ja');
+    });
+    it('viewer language en → en slot', () => {
+      expect(pickViewerSlot('en')).toBe('en');
+    });
+    it('viewer language th → en (영문 폴백)', () => {
+      expect(pickViewerSlot('th')).toBe('en');
+    });
+    it('viewer language hi → en (영문 폴백)', () => {
+      expect(pickViewerSlot('hi')).toBe('en');
+    });
+    it('viewer language null → en (안전 폴백)', () => {
+      expect(pickViewerSlot(null)).toBe('en');
+    });
+    it('viewer language undefined → en (안전 폴백)', () => {
+      expect(pickViewerSlot(undefined)).toBe('en');
     });
   });
 

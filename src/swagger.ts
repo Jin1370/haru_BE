@@ -39,7 +39,27 @@ export const swaggerDocument = {
           elevenlabs_voice_id: { type: 'string', nullable: true },
           voice_sample_url: { type: 'string', nullable: true },
           voice_clone_status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
-          voice_intro_audio_url: { type: 'string', format: 'uri', nullable: true, description: '보이스 한마디 음성 (본인 목소리 TTS)' },
+          voice_intro_audio_url: {
+            type: 'string',
+            format: 'uri',
+            nullable: true,
+            description: '작성자 언어 슬롯 URL 의 미러. 호환용 — voice_intro_audio_urls 로 마이그레이션 권장 (mig 011).',
+          },
+          voice_intro_translations: {
+            type: 'object',
+            additionalProperties: { type: 'string' },
+            description: '보이스 인트로 다국어 텍스트. 키 ko/ja/en. 작성자 입력 슬롯은 원문, 나머지는 Gemini 번역문.',
+          },
+          voice_intro_audio_urls: {
+            type: 'object',
+            additionalProperties: { type: 'string', format: 'uri', nullable: true },
+            description: '보이스 인트로 다국어 음성 URL. 키 ko/ja/en. 슬롯이 ready 상태일 때 URL, 미합성/실패 시 키 없음 또는 null.',
+          },
+          voice_intro_audio_status: {
+            type: 'object',
+            additionalProperties: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
+            description: '슬롯별 합성 상태. 키 ko/ja/en. 키 없음 = 미시도.',
+          },
           is_active: { type: 'boolean' },
           created_at: { type: 'string', format: 'date-time' },
           updated_at: { type: 'string', format: 'date-time' },

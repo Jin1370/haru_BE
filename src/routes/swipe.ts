@@ -48,12 +48,16 @@ function hashJitter(candidateId: string, viewerId: string, max: number): number 
 // 후보가 viewer 의 선호(언어 + 국가)에 모두 부합하는지 판정.
 // 각 차원의 선호가 비어있으면 그 차원은 무조건 부합 처리(=제약 없음).
 function matchesPreference(candidate: Candidate, prefs: ViewerPrefs): boolean {
-  // 1) 언어: code 일치 + level ≥ 요구 level 인 항목이 후보의 languages JSONB 안에
-  //    하나라도 있어야 부합. 빈 선호는 항상 부합.
+  // 1) 언어: 채팅은 후보의 주 언어(`languages[0]`)로 진행되고 번역 파이프라인의
+  //    source/target 도 primary 기준이므로, 선호 언어는 후보의 primary 와만 비교한다.
+  //    secondary 언어는 채팅 경험에 영향이 없으므로 부합 판정에서 제외.
+  //    빈 선호는 항상 부합. 후보 primary 미존재(스키마상 있을 수 없음)면 미부합.
+  const candidatePrimary = candidate.languages[0];
   const langOk = prefs.preferred_languages_detail.length === 0
-    || prefs.preferred_languages_detail.some((req) =>
-      candidate.languages.some((cl) => cl.code === req.code && cl.level >= req.level),
-    );
+    || (candidatePrimary != null
+      && prefs.preferred_languages_detail.some((req) =>
+        candidatePrimary.code === req.code && candidatePrimary.level >= req.level,
+      ));
   if (!langOk) return false;
 
   // 2) 국가: 후보의 nationality 가 선호 목록에 포함되면 부합. 빈 선호는 항상 부합.

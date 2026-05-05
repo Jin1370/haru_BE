@@ -39,7 +39,27 @@ export const swaggerDocument = {
           elevenlabs_voice_id: { type: 'string', nullable: true },
           voice_sample_url: { type: 'string', nullable: true },
           voice_clone_status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
-          voice_intro_audio_url: { type: 'string', format: 'uri', nullable: true, description: '보이스 한마디 음성 (본인 목소리 TTS)' },
+          voice_intro_audio_url: {
+            type: 'string',
+            format: 'uri',
+            nullable: true,
+            description: '작성자 언어 슬롯 URL 의 미러. 호환용 — voice_intro_audio_urls 로 마이그레이션 권장 (mig 011).',
+          },
+          voice_intro_translations: {
+            type: 'object',
+            additionalProperties: { type: 'string' },
+            description: '보이스 인트로 다국어 텍스트. 키 ko/ja/en. 작성자 입력 슬롯은 원문, 나머지는 Gemini 번역문.',
+          },
+          voice_intro_audio_urls: {
+            type: 'object',
+            additionalProperties: { type: 'string', format: 'uri', nullable: true },
+            description: '보이스 인트로 다국어 음성 URL. 키 ko/ja/en. 슬롯이 ready 상태일 때 URL, 미합성/실패 시 키 없음 또는 null.',
+          },
+          voice_intro_audio_status: {
+            type: 'object',
+            additionalProperties: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
+            description: '슬롯별 합성 상태. 키 ko/ja/en. 키 없음 = 미시도.',
+          },
           is_active: { type: 'boolean' },
           created_at: { type: 'string', format: 'date-time' },
           updated_at: { type: 'string', format: 'date-time' },
@@ -159,17 +179,10 @@ export const swaggerDocument = {
           min_age: { type: 'integer', minimum: 18, maximum: 100 },
           max_age: { type: 'integer', minimum: 18, maximum: 100 },
           preferred_genders: { type: 'array', items: { type: 'string', enum: ['male', 'female', 'other'] } },
-          preferred_languages_detail: {
+          preferred_languages: {
             type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                code: { type: 'string', minLength: 2, maxLength: 5 },
-                level: { type: 'integer', minimum: 1, maximum: 3 },
-              },
-              required: ['code', 'level'],
-            },
-            description: 'level: 1=초보, 2=중급(일상회화), 3=원어민. 빈 배열이면 언어 제약 없음.',
+            items: { type: 'string', minLength: 2, maxLength: 5 },
+            description: '선호 언어 코드 (ko/ja/en/th/hi). 빈 배열이면 언어 제약 없음. mig 009 에서 level 차원 제거.',
           },
           preferred_nationalities: {
             type: 'array',
@@ -541,16 +554,9 @@ export const swaggerDocument = {
                   min_age: { type: 'integer', minimum: 18, maximum: 100, default: 18 },
                   max_age: { type: 'integer', minimum: 18, maximum: 100, default: 100 },
                   preferred_genders: { type: 'array', items: { type: 'string', enum: ['male', 'female', 'other'] } },
-                  preferred_languages_detail: {
+                  preferred_languages: {
                     type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        code: { type: 'string', minLength: 2, maxLength: 5 },
-                        level: { type: 'integer', minimum: 1, maximum: 3 },
-                      },
-                      required: ['code', 'level'],
-                    },
+                    items: { type: 'string', minLength: 2, maxLength: 5 },
                   },
                   preferred_nationalities: {
                     type: 'array',

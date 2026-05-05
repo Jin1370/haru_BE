@@ -4,10 +4,12 @@ export interface AuthRequest extends Request {
   userId?: string;
 }
 
-export interface LanguageProficiency {
-  code: string;
-  level: 1 | 2 | 3;
-}
+// mig 011: voice intro 다국어 슬롯 도입. 작성자 1개 언어 입력 → BE 가 Gemini 로
+// 누락 2개 언어 번역 → ElevenLabs voice clone 으로 각각 TTS. 슬롯은 ko/ja/en 만.
+// th/hi 작성자는 영문 강제 정책에 따라 'en' 슬롯으로 정규화.
+export type VoiceIntroSlotLanguage = 'ko' | 'ja' | 'en';
+export const VOICE_INTRO_SLOT_LANGUAGES: VoiceIntroSlotLanguage[] = ['ko', 'ja', 'en'];
+export type VoiceIntroAudioStatus = 'pending' | 'processing' | 'ready' | 'failed';
 
 export interface Profile {
   id: string;
@@ -15,17 +17,22 @@ export interface Profile {
   birth_date: string;
   gender: 'male' | 'female' | 'other';
   nationality: string;
-  // Derived from languages[0].code on the response. The DB column was dropped
-  // in migration 008; the API still exposes this for backwards compatibility.
+  // Single primary language (mig 009 reintroduced this as a scalar after the
+  // multi-language model was simplified away).
   language: string;
-  languages: LanguageProficiency[];
   voice_intro: string | null;
   interests: string[];
   photos: string[];
   elevenlabs_voice_id: string | null;
   voice_sample_url: string | null;
   voice_clone_status: 'pending' | 'processing' | 'ready' | 'failed';
+  // 호환 유지(deprecate 후보) — 작성자 언어 슬롯 URL 의 미러.
+  // FE chat 파트너 detail 이 supabase 직접 select 로 RLS 통과 중이라 drop 보류.
   voice_intro_audio_url: string | null;
+  // mig 011 신규. 슬롯은 ko/ja/en 만. 키 미존재 가능.
+  voice_intro_translations: Partial<Record<VoiceIntroSlotLanguage, string>>;
+  voice_intro_audio_urls: Partial<Record<VoiceIntroSlotLanguage, string | null>>;
+  voice_intro_audio_status: Partial<Record<VoiceIntroSlotLanguage, VoiceIntroAudioStatus>>;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -95,7 +102,7 @@ export interface UserPreference {
   min_age: number;
   max_age: number;
   preferred_genders: string[];
-  preferred_languages_detail: LanguageProficiency[];
+  preferred_languages: string[];
   preferred_nationalities: string[];
   updated_at: string;
 }

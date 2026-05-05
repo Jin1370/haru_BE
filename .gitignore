@@ -33,3 +33,6 @@ coverage/
 
 # Claude Code
 .claude/
+
+# Supabase CLI scratch (auto-managed)
+supabase/.temp/

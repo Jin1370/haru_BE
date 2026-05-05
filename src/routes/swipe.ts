@@ -3,7 +3,16 @@ import { supabase } from '../config/supabase';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
 import { swipeBodySchema, discoverQuerySchema, quotaQuerySchema } from '../schemas/swipe';
-import { AuthRequest } from '../types';
+import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
+
+// 시청자 언어 → 보이스 인트로 슬롯 매핑 (mig 011).
+// ko/ja/en 활성. th/hi/그 외/null 은 'en' 폴백 (FE 의 영문 강제 정책과 일관).
+export function pickViewerSlot(viewerLanguage: string | null | undefined): VoiceIntroSlotLanguage {
+  if (viewerLanguage === 'ko' || viewerLanguage === 'ja' || viewerLanguage === 'en') {
+    return viewerLanguage;
+  }
+  return 'en';
+}
 
 const router = Router();
 
@@ -13,11 +22,9 @@ export const DISCOVER_MAX_PER_DAY = 50;
 
 router.use(authMiddleware);
 
-type LanguageProficiency = { code: string; level: number };
-
 type Candidate = {
   id: string;
-  languages: LanguageProficiency[];
+  language: string;
   nationality: string;
   interests: string[];
   photos: string[];
@@ -30,7 +37,7 @@ type Viewer = {
 };
 
 type ViewerPrefs = {
-  preferred_languages_detail: LanguageProficiency[];
+  preferred_languages: string[];
   preferred_nationalities: string[];
 };
 
@@ -45,34 +52,36 @@ function hashJitter(candidateId: string, viewerId: string, max: number): number 
   return (Math.abs(hash) % (max * 100)) / 100;
 }
 
-// 후보가 viewer 의 선호(언어 + 국가)에 모두 부합하는지 판정.
-// 각 차원의 선호가 비어있으면 그 차원은 무조건 부합 처리(=제약 없음).
-function matchesPreference(candidate: Candidate, prefs: ViewerPrefs): boolean {
-  // 1) 언어: code 일치 + level ≥ 요구 level 인 항목이 후보의 languages JSONB 안에
-  //    하나라도 있어야 부합. 빈 선호는 항상 부합.
-  const langOk = prefs.preferred_languages_detail.length === 0
-    || prefs.preferred_languages_detail.some((req) =>
-      candidate.languages.some((cl) => cl.code === req.code && cl.level >= req.level),
-    );
-  if (!langOk) return false;
-
-  // 2) 국가: 후보의 nationality 가 선호 목록에 포함되면 부합. 빈 선호는 항상 부합.
-  const natOk = prefs.preferred_nationalities.length === 0
-    || prefs.preferred_nationalities.includes(candidate.nationality);
-  return natOk;
+// 차원별 선호 부합 판정. 각 차원의 선호가 비어있으면 그 차원은 무조건 부합(=제약 없음).
+export function matchesLanguage(candidate: Candidate, prefs: ViewerPrefs): boolean {
+  return prefs.preferred_languages.length === 0
+    || (candidate.language !== '' && prefs.preferred_languages.includes(candidate.language));
 }
 
-// 2-단계 티어. 작을수록 상위 노출.
-// 주 언어 동일 후보는 사전 필터에서 이미 제거되므로 언어 차원은 티어 분기에서 제외.
-//   1: 선호 부합
-//   2: 선호 미부합
-function computeTier(candidate: Candidate, prefs: ViewerPrefs): number {
-  return matchesPreference(candidate, prefs) ? 1 : 2;
+export function matchesNationality(candidate: Candidate, prefs: ViewerPrefs): boolean {
+  return prefs.preferred_nationalities.length === 0
+    || prefs.preferred_nationalities.includes(candidate.nationality);
+}
+
+// 4-단계 티어. 작을수록 상위 노출. 국가 부합을 언어 부합보다 우선.
+//   1: 선호 국가 + 선호 언어 둘 다 부합
+//   2: 선호 국가만 부합
+//   3: 선호 언어만 부합
+//   4: 둘 다 미부합
+// 각 차원 선호가 비어있을 땐 해당 차원이 항상 부합으로 처리되므로
+// 결과적으로 비어있는 차원은 티어 분기에서 무력화된다.
+export function computeTier(candidate: Candidate, prefs: ViewerPrefs): number {
+  const langOk = matchesLanguage(candidate, prefs);
+  const natOk = matchesNationality(candidate, prefs);
+  if (langOk && natOk) return 1;
+  if (natOk) return 2;
+  if (langOk) return 3;
+  return 4;
 }
 
 // 동일 티어 안에서의 2차 정렬 점수. 합산 최대치는 65 로 묶여 있어
 // 어떤 가산도 티어 경계를 넘지 않는다.
-function computeIntraScore(candidate: Candidate, viewer: Viewer): number {
+export function computeIntraScore(candidate: Candidate, viewer: Viewer): number {
   let score = 0;
 
   // 관심사 겹침 (최대 30점)
@@ -101,10 +110,10 @@ function computeIntraScore(candidate: Candidate, viewer: Viewer): number {
 router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res: Response) => {
   const limit = req.query.limit as unknown as number;
 
-  // 조회자 프로필 — primary language 는 languages[0].code 로 derive
+  // 조회자 프로필 — mig 009 이후 단일 scalar `language` 컬럼이 source of truth.
   const { data: viewerProfile } = await supabase
     .from('profiles')
-    .select('languages, interests')
+    .select('language, interests')
     .eq('id', req.userId!)
     .single();
 
@@ -113,8 +122,7 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     return;
   }
 
-  const viewerLangs = (viewerProfile.languages as LanguageProficiency[] | null) ?? [];
-  const viewerPrimaryLang = viewerLangs[0]?.code ?? '';
+  const viewerLanguage = (viewerProfile.language as string | null) ?? '';
   const viewer: Viewer = {
     id: req.userId!,
     interests: (viewerProfile.interests as string[] | null) ?? [],
@@ -144,19 +152,21 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   // 점수 계산을 위해 넉넉히 가져옴 (limit의 5배, 최대 200)
   const fetchLimit = Math.min(limit * 5, 200);
 
+  // mig 011: voice_intro_audio_urls (jsonb) 가 시청자 언어 슬롯의 source. 단일
+  // voice_intro_audio_url 은 응답에 미러로 출력하기 위해 슬롯에서 추출.
   let query = supabase
     .from('profiles')
-    .select('id, display_name, birth_date, gender, nationality, languages, voice_intro, voice_intro_audio_url, interests, photos, created_at')
+    .select('id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, photos, created_at')
     .eq('is_active', true);
 
   if (uniqueExcludeIds.length > 0) {
     query = query.not('id', 'in', `(${uniqueExcludeIds.join(',')})`);
   }
 
-  // 주 언어 일치 하드 제외: 본인 primary language(`languages[0].code`)와 같은 후보는 후보 풀에서 제거.
-  // 본인 primary 언어가 비어있으면(=세팅 미완료) 필터 적용 안 함.
-  if (viewerPrimaryLang) {
-    query = query.not('languages->0->>code', 'eq', viewerPrimaryLang);
+  // 본인 언어 동일 후보 하드 제외 — 크로스언어 매칭이 본 앱 핵심 정책.
+  // 본인 언어가 비어있으면(=세팅 미완료) 필터 적용 안 함.
+  if (viewerLanguage) {
+    query = query.not('language', 'eq', viewerLanguage);
   }
 
   query = query.limit(fetchLimit);
@@ -188,31 +198,26 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   }
 
   const viewerPrefs: ViewerPrefs = {
-    preferred_languages_detail: (prefs?.preferred_languages_detail as LanguageProficiency[] | null) ?? [],
+    preferred_languages: (prefs?.preferred_languages as string[] | null) ?? [],
     preferred_nationalities: (prefs?.preferred_nationalities as string[] | null) ?? [],
   };
 
   // 사진이 한 장도 없는 미완성 프로필은 후보에서 제외.
   // step1 placeholder upsert 직후 사진/보이스 등록 전 일시 상태가 다른 사용자 디스커버에 노출되지 않게 한다.
-  // 또한 본인 primary 언어와 동일한 후보를 한 번 더 거른다 — SQL 단의 `languages->0->>code` 필터는
-  // PostgREST 가 배열 인덱스 `0` 을 text key 로 해석하는 케이스에서 무력화될 수 있어, JS 단에서
-  // 명시적으로 한 번 더 검증한다 (cross-language 매칭이 본 앱의 핵심 정책).
+  // 본인 언어 일치 후보는 SQL 단에서 이미 제거됐지만, 마이그레이션 직후 NULL 인 행이
+  // 일치 비교에서 빠지지 않도록 JS 단에서 빈 language 행도 함께 차단한다.
   const visible = (data ?? []).filter((row: any) => {
     if (!Array.isArray(row.photos) || row.photos.length === 0) return false;
-    if (viewerPrimaryLang) {
-      const langs = (row.languages as LanguageProficiency[] | null) ?? [];
-      const candidatePrimary = langs[0]?.code;
-      if (candidatePrimary === viewerPrimaryLang) return false;
-    }
+    if (!row.language) return false;
+    if (viewerLanguage && row.language === viewerLanguage) return false;
     return true;
   });
 
   // 티어 + 동일 티어 내 2차 점수 계산 → (tier ASC, intra DESC) 정렬.
   const scored = visible.map((row: any) => {
-    const langs = (row.languages as LanguageProficiency[] | null) ?? [];
     const candidate: Candidate = {
       id: row.id,
-      languages: langs,
+      language: row.language ?? '',
       nationality: row.nationality,
       interests: row.interests ?? [],
       photos: row.photos ?? [],
@@ -220,9 +225,6 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     };
     return {
       ...row,
-      // FE 호환: 응답에 단일 language 필드를 채워 보낸다 (DB 컬럼은 mig 008 에서 삭제됨).
-      // primary 는 languages[0].code.
-      language: langs[0]?.code ?? '',
       _tier: computeTier(candidate, viewerPrefs),
       _intra: computeIntraScore(candidate, viewer),
     };
@@ -233,15 +235,23 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     return b._intra - a._intra;
   });
 
-  // 프론트에 반환할 때 내부 정렬 키와 created_at, languages 를 제외.
+  // 프론트에 반환할 때 내부 정렬 키와 created_at 을 제외.
   // 보안 경계: discover 는 잠금 해제 대상이 아니므로 서버에서 photos 배열을 메인 1장으로 잘라
   //            본인 프로필 외 추가 사진 URL 노출을 원천 차단한다.
   //            photo_access 는 정책상 항상 false/false 고정 (FE 는 forceBlur 정책을 적용).
-  const results = scored.slice(0, limit).map(({ _tier, _intra, created_at, languages, photos, ...rest }) => ({
-    ...rest,
-    photos: (photos ?? []).slice(0, 1),
-    photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
-  }));
+  // mig 011: voice_intro_audio_urls (jsonb 3슬롯) 에서 시청자 언어 슬롯만 추출해
+  //          단일 voice_intro_audio_url 키에 미러 (FE SwipeCard 변경 0). 시청자 언어
+  //          슬롯이 NULL/failed/미존재면 null — 카드는 노출되지만 재생 버튼만 비활성.
+  const slot = pickViewerSlot(viewerLanguage);
+  const results = scored.slice(0, limit).map(({ _tier, _intra, created_at, photos, voice_intro_audio_urls, ...rest }) => {
+    const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<Record<VoiceIntroSlotLanguage, string | null>>;
+    return {
+      ...rest,
+      voice_intro_audio_url: (slotUrls[slot] as string | null | undefined) ?? null,
+      photos: (photos ?? []).slice(0, 1),
+      photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
+    };
+  });
 
   res.json(results);
 });

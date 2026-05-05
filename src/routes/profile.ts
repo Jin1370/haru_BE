@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import multer from 'multer';
 import { supabase } from '../config/supabase';
 import { uploadFile, deleteFile, extractPath } from '../services/storage';
-import { synthesizeSpeech } from '../services/elevenlabs';
+import { generateVoiceIntroAudios } from '../services/voiceIntro';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
 import { profileUpsertSchema } from '../schemas/profile';
@@ -12,19 +12,6 @@ const router = Router();
 const upload = multer({ limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB
 
 router.use(authMiddleware);
-
-const VOICE_INTRO_BUCKET = 'voice-intro-audio';
-
-// languages JSONB 의 첫 항목 코드를 단일 `language` 필드로 응답에 채워넣는 헬퍼.
-// 마이그레이션 008 이후 DB에는 scalar `language` 컬럼이 없지만, FE/외부 클라이언트
-// 호환성을 위해 응답 스키마는 그대로 유지한다.
-function withDerivedLanguage<T extends { languages?: { code: string; level: number }[] | null } | null>(
-  row: T,
-): T extends null ? null : T & { language: string | null } {
-  if (!row) return row as any;
-  const langs = row.languages ?? [];
-  return { ...(row as object), language: langs[0]?.code ?? null } as any;
-}
 
 // 내 프로필 조회
 router.get('/me', async (req: AuthRequest, res: Response) => {
@@ -39,25 +26,12 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  res.json(withDerivedLanguage(data));
+  res.json(data);
 });
 
 // 내 프로필 수정 (생성 포함 - upsert)
 router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, res: Response) => {
-  const { display_name, birth_date, gender, nationality, language, languages, voice_intro, interests } = req.body;
-
-  // 다중 언어 입력이 들어오면 첫 항목 코드를 primary `language` 로 도출한다.
-  // 번역/TTS 파이프라인은 단일 코드 기준으로 동작하므로 둘을 항상 동기화한다.
-  const normalizedLanguages: { code: string; level: number }[] | null = Array.isArray(languages) && languages.length > 0
-    ? languages
-    : (typeof language === 'string' ? [{ code: language, level: 3 }] : null);
-
-  if (!normalizedLanguages) {
-    res.status(400).json({ error: 'language or languages required' });
-    return;
-  }
-
-  const primaryLanguage = normalizedLanguages[0].code;
+  const { display_name, birth_date, gender, nationality, language, voice_intro, interests } = req.body;
 
   // 기존 voice_intro를 조회해 변경 여부 판단. 바뀌지 않았으면 TTS 재생성을 건너뛰어
   // 불필요한 ElevenLabs 호출을 막는다.
@@ -76,13 +50,20 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
     birth_date,
     gender,
     nationality,
-    languages: normalizedLanguages,
+    language,
     voice_intro,
     interests: interests || [],
     updated_at: new Date().toISOString(),
   };
-  // voice_intro가 바뀌면 FE 폴링이 재합성 구간을 감지할 수 있도록 오디오 URL을 먼저 null로 리셋한다.
-  if (voiceIntroChanged) upsertPayload.voice_intro_audio_url = null;
+  // voice_intro 가 바뀌면 FE 폴링이 재합성 구간을 감지할 수 있도록 오디오 URL을 먼저 리셋한다.
+  // mig 011: 단일 컬럼뿐 아니라 신규 다국어 슬롯 3컬럼도 빈 객체로 리셋해야 디스커버 응답에
+  // 옛 슬롯 URL 이 잔존하지 않는다. 신규 파이프라인이 비동기로 다시 채운다.
+  if (voiceIntroChanged) {
+    upsertPayload.voice_intro_audio_url = null;
+    upsertPayload.voice_intro_translations = {};
+    upsertPayload.voice_intro_audio_urls = {};
+    upsertPayload.voice_intro_audio_status = {};
+  }
 
   const { data, error } = await supabase
     .from('profiles')
@@ -95,56 +76,15 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
     return;
   }
 
-  // voice_intro가 실제로 바뀐 경우에만 오디오 처리
+  // voice_intro 가 실제로 바뀐 경우에만 다국어 오디오 파이프라인 트리거.
+  // voice_clone 미보유면 스킵 (FE 폴링이 단일 컬럼/status fallback 으로 처리).
   if (voiceIntroChanged && voice_intro && data.elevenlabs_voice_id) {
-    generateVoiceIntroAudio(req.userId!, voice_intro, data.elevenlabs_voice_id, primaryLanguage)
-      .catch((err) => console.error('[Voice intro audio generation failed]', err));
+    generateVoiceIntroAudios(req.userId!, voice_intro, data.elevenlabs_voice_id, language)
+      .catch((err) => console.error('[Voice intro audios generation failed]', err));
   }
 
-  res.json(withDerivedLanguage(data));
+  res.json(data);
 });
-
-async function generateVoiceIntroAudio(
-  userId: string,
-  voiceIntro: string,
-  voiceId: string,
-  _language: string
-): Promise<void> {
-  try {
-    const audio = await synthesizeSpeech(voiceIntro, voiceId);
-    // Unique path per generation. A stable path with upsert:true left the
-    // public URL identical between saves, and Supabase's CDN was returning
-    // the previous audio (query-string cache-busters were not respected),
-    // so every edit played the prior intro. A unique filename forces a brand
-    // new URL the CDN has never seen. Old files are orphaned but cleaned
-    // up by deleting the previous object.
-    const { data: prev } = await supabase
-      .from('profiles')
-      .select('voice_intro_audio_url')
-      .eq('id', userId)
-      .maybeSingle();
-    const path = `${userId}/voice-intro-${Date.now()}.mp3`;
-    const audioUrl = await uploadFile(VOICE_INTRO_BUCKET, path, audio, 'audio/mpeg');
-
-    await supabase
-      .from('profiles')
-      .update({ voice_intro_audio_url: audioUrl })
-      .eq('id', userId);
-
-    if (prev?.voice_intro_audio_url) {
-      try {
-        const oldPath = extractPath(VOICE_INTRO_BUCKET, prev.voice_intro_audio_url.split('?')[0]);
-        if (oldPath !== path) {
-          await deleteFile(VOICE_INTRO_BUCKET, oldPath);
-        }
-      } catch (cleanupErr) {
-        console.error('[Voice intro audio cleanup failed]', cleanupErr);
-      }
-    }
-  } catch (error) {
-    console.error(`[Voice intro Audio Error] userId=${userId}:`, error);
-  }
-}
 
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 

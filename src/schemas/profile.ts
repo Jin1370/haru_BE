@@ -4,7 +4,7 @@ import { z } from 'zod';
 // review — adding a new country requires product + i18n + safety sign-off.
 // Keep in sync with FE `src/constants/nationalities.ts`.
 export const NATIONALITY_CODES = [
-  'KR', 'JP', 'US', 'GB', 'CA', 'AU', 'NZ', 'IE', 'TH', 'IN',
+  'KR', 'JP', 'US', 'GB', 'CA', 'AU', 'PH', 'SG', 'TH', 'IN',
 ] as const;
 
 // Whitelisted spoken languages (BCP-47 short codes). Drives both profile

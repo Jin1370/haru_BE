@@ -43,32 +43,36 @@ function hashJitter(candidateId: string, viewerId: string, max: number): number 
   return (Math.abs(hash) % (max * 100)) / 100;
 }
 
-// 후보가 viewer 의 선호(언어 + 국가)에 모두 부합하는지 판정.
-// 각 차원의 선호가 비어있으면 그 차원은 무조건 부합 처리(=제약 없음).
-function matchesPreference(candidate: Candidate, prefs: ViewerPrefs): boolean {
-  // 1) 언어: mig 009 이후 단순 코드 일치. 후보의 단일 language 가 선호 코드 배열에
-  //    포함되어 있으면 부합. 빈 선호는 항상 부합.
-  const langOk = prefs.preferred_languages.length === 0
+// 차원별 선호 부합 판정. 각 차원의 선호가 비어있으면 그 차원은 무조건 부합(=제약 없음).
+export function matchesLanguage(candidate: Candidate, prefs: ViewerPrefs): boolean {
+  return prefs.preferred_languages.length === 0
     || (candidate.language !== '' && prefs.preferred_languages.includes(candidate.language));
-  if (!langOk) return false;
-
-  // 2) 국가: 후보의 nationality 가 선호 목록에 포함되면 부합. 빈 선호는 항상 부합.
-  const natOk = prefs.preferred_nationalities.length === 0
-    || prefs.preferred_nationalities.includes(candidate.nationality);
-  return natOk;
 }
 
-// 2-단계 티어. 작을수록 상위 노출.
-// 본인 언어 동일 후보는 사전 필터에서 이미 제거되므로 언어 차원은 티어 분기에서 제외.
-//   1: 선호 부합
-//   2: 선호 미부합
-function computeTier(candidate: Candidate, prefs: ViewerPrefs): number {
-  return matchesPreference(candidate, prefs) ? 1 : 2;
+export function matchesNationality(candidate: Candidate, prefs: ViewerPrefs): boolean {
+  return prefs.preferred_nationalities.length === 0
+    || prefs.preferred_nationalities.includes(candidate.nationality);
+}
+
+// 4-단계 티어. 작을수록 상위 노출. 국가 부합을 언어 부합보다 우선.
+//   1: 선호 국가 + 선호 언어 둘 다 부합
+//   2: 선호 국가만 부합
+//   3: 선호 언어만 부합
+//   4: 둘 다 미부합
+// 각 차원 선호가 비어있을 땐 해당 차원이 항상 부합으로 처리되므로
+// 결과적으로 비어있는 차원은 티어 분기에서 무력화된다.
+export function computeTier(candidate: Candidate, prefs: ViewerPrefs): number {
+  const langOk = matchesLanguage(candidate, prefs);
+  const natOk = matchesNationality(candidate, prefs);
+  if (langOk && natOk) return 1;
+  if (natOk) return 2;
+  if (langOk) return 3;
+  return 4;
 }
 
 // 동일 티어 안에서의 2차 정렬 점수. 합산 최대치는 65 로 묶여 있어
 // 어떤 가산도 티어 경계를 넘지 않는다.
-function computeIntraScore(candidate: Candidate, viewer: Viewer): number {
+export function computeIntraScore(candidate: Candidate, viewer: Viewer): number {
   let score = 0;
 
   // 관심사 겹침 (최대 30점)

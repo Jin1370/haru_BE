@@ -4,21 +4,15 @@ export interface AuthRequest extends Request {
   userId?: string;
 }
 
-export interface LanguageProficiency {
-  code: string;
-  level: 1 | 2 | 3;
-}
-
 export interface Profile {
   id: string;
   display_name: string;
   birth_date: string;
   gender: 'male' | 'female' | 'other';
   nationality: string;
-  // Derived from languages[0].code on the response. The DB column was dropped
-  // in migration 008; the API still exposes this for backwards compatibility.
+  // Single primary language (mig 009 reintroduced this as a scalar after the
+  // multi-language model was simplified away).
   language: string;
-  languages: LanguageProficiency[];
   voice_intro: string | null;
   interests: string[];
   photos: string[];
@@ -95,7 +89,7 @@ export interface UserPreference {
   min_age: number;
   max_age: number;
   preferred_genders: string[];
-  preferred_languages_detail: LanguageProficiency[];
+  preferred_languages: string[];
   preferred_nationalities: string[];
   updated_at: string;
 }

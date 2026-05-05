@@ -93,16 +93,16 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
     return;
   }
 
-  // 발신자, 수신자 프로필 조회 (languages JSONB 에서 primary 코드 추출)
+  // 발신자/수신자 프로필 조회 (mig 009 이후 단일 scalar `language` 사용)
   const [senderResult, recipientResult] = await Promise.all([
-    supabase.from('profiles').select('languages, elevenlabs_voice_id').eq('id', req.userId!).single(),
-    supabase.from('profiles').select('languages').eq('id', recipientId).single(),
+    supabase.from('profiles').select('language, elevenlabs_voice_id').eq('id', req.userId!).single(),
+    supabase.from('profiles').select('language').eq('id', recipientId).single(),
   ]);
 
   const sender = senderResult.data;
   const recipient = recipientResult.data;
-  const senderLang = (sender?.languages as { code: string; level: number }[] | null)?.[0]?.code;
-  const recipientLang = (recipient?.languages as { code: string; level: number }[] | null)?.[0]?.code;
+  const senderLang = (sender?.language as string | null) ?? null;
+  const recipientLang = (recipient?.language as string | null) ?? null;
 
   if (!sender || !recipient || !senderLang || !recipientLang) {
     res.status(404).json({ error: 'Profile not found' });
@@ -201,7 +201,7 @@ router.post('/:messageId/retry', async (req: AuthRequest, res: Response) => {
 
   const { data: sender } = await supabase
     .from('profiles')
-    .select('elevenlabs_voice_id, languages')
+    .select('elevenlabs_voice_id, language')
     .eq('id', req.userId!)
     .single();
 

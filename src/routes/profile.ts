@@ -15,17 +15,6 @@ router.use(authMiddleware);
 
 const VOICE_INTRO_BUCKET = 'voice-intro-audio';
 
-// languages JSONB 의 첫 항목 코드를 단일 `language` 필드로 응답에 채워넣는 헬퍼.
-// 마이그레이션 008 이후 DB에는 scalar `language` 컬럼이 없지만, FE/외부 클라이언트
-// 호환성을 위해 응답 스키마는 그대로 유지한다.
-function withDerivedLanguage<T extends { languages?: { code: string; level: number }[] | null } | null>(
-  row: T,
-): T extends null ? null : T & { language: string | null } {
-  if (!row) return row as any;
-  const langs = row.languages ?? [];
-  return { ...(row as object), language: langs[0]?.code ?? null } as any;
-}
-
 // 내 프로필 조회
 router.get('/me', async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabase
@@ -39,25 +28,12 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  res.json(withDerivedLanguage(data));
+  res.json(data);
 });
 
 // 내 프로필 수정 (생성 포함 - upsert)
 router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, res: Response) => {
-  const { display_name, birth_date, gender, nationality, language, languages, voice_intro, interests } = req.body;
-
-  // 다중 언어 입력이 들어오면 첫 항목 코드를 primary `language` 로 도출한다.
-  // 번역/TTS 파이프라인은 단일 코드 기준으로 동작하므로 둘을 항상 동기화한다.
-  const normalizedLanguages: { code: string; level: number }[] | null = Array.isArray(languages) && languages.length > 0
-    ? languages
-    : (typeof language === 'string' ? [{ code: language, level: 3 }] : null);
-
-  if (!normalizedLanguages) {
-    res.status(400).json({ error: 'language or languages required' });
-    return;
-  }
-
-  const primaryLanguage = normalizedLanguages[0].code;
+  const { display_name, birth_date, gender, nationality, language, voice_intro, interests } = req.body;
 
   // 기존 voice_intro를 조회해 변경 여부 판단. 바뀌지 않았으면 TTS 재생성을 건너뛰어
   // 불필요한 ElevenLabs 호출을 막는다.
@@ -76,7 +52,7 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
     birth_date,
     gender,
     nationality,
-    languages: normalizedLanguages,
+    language,
     voice_intro,
     interests: interests || [],
     updated_at: new Date().toISOString(),
@@ -97,11 +73,11 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
 
   // voice_intro가 실제로 바뀐 경우에만 오디오 처리
   if (voiceIntroChanged && voice_intro && data.elevenlabs_voice_id) {
-    generateVoiceIntroAudio(req.userId!, voice_intro, data.elevenlabs_voice_id, primaryLanguage)
+    generateVoiceIntroAudio(req.userId!, voice_intro, data.elevenlabs_voice_id, language)
       .catch((err) => console.error('[Voice intro audio generation failed]', err));
   }
 
-  res.json(withDerivedLanguage(data));
+  res.json(data);
 });
 
 async function generateVoiceIntroAudio(

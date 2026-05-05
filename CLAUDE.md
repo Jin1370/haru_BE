@@ -18,13 +18,13 @@ Express 5 + Supabase + ElevenLabs 기반 크로스언어 소개팅 API 서버.
 
 **인증 흐름**: Google OAuth id_token → Supabase `signInWithIdToken` → JWT 발급. 이후 요청은 `authMiddleware`에서 Supabase JWT secret으로 검증하여 `req.userId`(= `sub` claim) 세팅.
 
-**메시지 파이프라인**: 텍스트 메시지를 즉시 저장/응답한 뒤, 발신자에게 ElevenLabs voice clone이 있으면 비동기로 번역 → TTS → Storage 업로드 처리. 송수신자 언어가 다르면 Vertex AI Gemini 2.5 Flash로 번역(존댓말/초면 컨텍스트 시스템 프롬프트, `BLOCK_ONLY_HIGH` safety, `temperature=0.3`) → `translated_text`에 저장, 이후 ElevenLabs `eleven_v3` TTS(`stability=0.4`, emotion 프리픽스 지원)로 발신자 클론 보이스 합성. 같은 언어면 번역 생략하고 원문 그대로 TTS. `audio_status` 필드로 진행 상태 추적. 차단된 유저 간 메시지 전송은 403 차단.
+**메시지 파이프라인**: 텍스트 메시지를 즉시 저장/응답한 뒤, 발신자에게 ElevenLabs voice clone이 있으면 비동기로 번역 → TTS → Storage 업로드 처리. 송수신자의 `profiles.language` 값이 다르면 Vertex AI Gemini 2.5 Flash로 번역(존댓말/초면 컨텍스트 시스템 프롬프트, `BLOCK_ONLY_HIGH` safety, `temperature=0.3`) → `translated_text`에 저장, 이후 ElevenLabs `eleven_v3` TTS(`stability=0.4`, emotion 프리픽스 지원)로 발신자 클론 보이스 합성. 같은 언어면 번역 생략하고 원문 그대로 TTS. `audio_status` 필드로 진행 상태 추적. 차단된 유저 간 메시지 전송은 403 차단.
 
 **Voice intro 오디오** (구 bio): 프로필의 `voice_intro` 텍스트 작성/수정 시 voice clone이 있으면 비동기로 TTS 생성하여 `voice_intro_audio_url`에 저장. 프로필 조회 시 추가 API 호출 없이 URL 반환. 버킷은 `voice-intro-audio` (mig 007).
 
-**언어 모델링**: `profiles.languages` (JSONB, `[{code, level}]`) 가 단일 source of truth. mig 008 에서 옛 scalar `profiles.language` 컬럼 삭제. primary 언어는 `languages[0].code` 컨벤션으로 정함 — FE에서 사용자가 "주 언어로 설정" 클릭 시 그 항목이 배열의 0번 index로 이동. BE는 응답에 호환을 위해 `language: string` 필드를 derive 해서 채워 보냄. 메시지 번역 파이프라인의 source/target 도 `languages[0].code` 기준.
+**언어 모델링**: `profiles.language` (TEXT scalar, ko/ja/en/th/hi 화이트리스트) 가 단일 source of truth. mig 009 에서 multi-language + level 모델(`profiles.languages` JSONB / `user_preferences.preferred_languages_detail`)을 모두 삭제하고 단순화 — 프로필 등록은 단일 언어 강제, proficiency level UI 도 제거. 메시지 번역 파이프라인의 source/target 은 송수신자의 `profiles.language` 직접 사용. mig 008 컨텍스트 주의: 008 에서 옛 scalar `profiles.language` 와 codes-only `user_preferences.preferred_languages` 를 drop 했고, 009 가 동일 이름을 단순화된 의미로 재도입한 것 (rollback 아님).
 
-**추천 알고리즘**: 디스커버에서 스와이프/차단/선호도를 병렬 조회 후, 후보를 limit×5개(최대 200) 가져옴. 사전 SQL 필터는 (a) 성별/연령 (b) **viewer primary 언어(`languages[0].code`)와 동일한 후보를 하드 제외** — 크로스언어 매칭 차별점을 알고리즘 차원에서 강제. viewer primary 언어가 비어있으면 이 필터는 적용 안 함. 국가 선호와 추가 언어 선호는 SQL 단계에서 거르지 않고 티어 정렬 신호로만 사용. 서버에서 2-단계 티어 + 동일 티어 내 2차 점수 계산 → `(tier ASC, intra DESC)` 정렬 → limit개 반환. `src/routes/swipe.ts`의 `computeTier()` + `computeIntraScore()` + `matchesPreference()` + `hashJitter()`. 티어는 (1) 선호 부합 (2) 선호 미부합 — 주 언어 동일 후보는 사전 필터에서 이미 빠졌으므로 언어 차원은 티어 분기에서 제외. "선호 부합"은 **언어 부합 AND 국가 부합 둘 다 만족**할 때 true: 언어는 `preferred_languages_detail` 의 각 `{code, level}` 요구 중 하나라도 후보의 **primary 언어(`languages[0]`)** 와 동일 코드 + level≥요구로 만족시키면 부합 — 채팅·번역이 primary 기준이므로 secondary 언어는 부합 판정에서 제외, 국가는 후보 `profiles.nationality` 가 `preferred_nationalities` 안에 있으면 부합. 각 차원별로 빈 선호는 무조건 부합으로 처리. 동일 티어 내 2차 점수는 관심사 겹침(최대 +30), 사진 3장+ (+10), 신규 가입 7일 이내 (+10), 결정적 jitter (0~15) 합산이며 합산 상한이 65로 묶여 티어 경계를 절대 넘지 않는다. jitter는 같은 viewer-candidate 쌍에 대해 결정적이므로 페이지네이션 시 순서 안정.
+**추천 알고리즘**: 디스커버에서 스와이프/차단/선호도를 병렬 조회 후, 후보를 limit×5개(최대 200) 가져옴. 사전 SQL 필터는 (a) 성별/연령 (b) **viewer 의 `profiles.language` 와 동일한 후보를 하드 제외** — 크로스언어 매칭 차별점을 알고리즘 차원에서 강제. viewer 언어가 비어있으면 이 필터는 적용 안 함. 국가 선호와 언어 선호는 SQL 단계에서 거르지 않고 티어 정렬 신호로만 사용. 서버에서 2-단계 티어 + 동일 티어 내 2차 점수 계산 → `(tier ASC, intra DESC)` 정렬 → limit개 반환. `src/routes/swipe.ts`의 `computeTier()` + `computeIntraScore()` + `matchesPreference()` + `hashJitter()`. 티어는 (1) 선호 부합 (2) 선호 미부합 — 자국어 동일 후보는 사전 필터에서 이미 빠졌으므로 언어 차원은 티어 분기에서 제외. "선호 부합"은 **언어 부합 AND 국가 부합 둘 다 만족**할 때 true: 언어는 `user_preferences.preferred_languages` (TEXT[]) 가 비어있거나 후보의 `profiles.language` 를 포함하면 부합 (level 차원은 mig 009 에서 제거됨), 국가는 후보 `profiles.nationality` 가 `preferred_nationalities` 안에 있으면 부합. 각 차원별로 빈 선호는 무조건 부합으로 처리. 동일 티어 내 2차 점수는 관심사 겹침(최대 +30), 사진 3장+ (+10), 신규 가입 7일 이내 (+10), 결정적 jitter (0~15) 합산이며 합산 상한이 65로 묶여 티어 경계를 절대 넘지 않는다. jitter는 같은 viewer-candidate 쌍에 대해 결정적이므로 페이지네이션 시 순서 안정.
 
 **일일 카드 한도**: 사용자당 하루 최대 50장 노출 (`DISCOVER_MAX_PER_DAY = 50`, `src/routes/swipe.ts`). `swipes` 테이블이 source of truth — 기기 간 동기화를 위해 BE 가 일일 카운트를 산출. `GET /api/discover/quota` 가 `{ used, max, remaining }` 를 반환하며 FE 는 이 값을 폴링/캐시. 자정 기준은 서버 UTC 타임존 (자세한 롤오버 동작은 `quotaQuerySchema` 참고). FE 의 `BATCH_SIZE=10`, `PREFETCH_THRESHOLD=3` 등 클라이언트 prefetch 동작은 `haru_FE/docs/discover-card-logic.md` 참고.
 
@@ -36,7 +36,7 @@ Express 5 + Supabase + ElevenLabs 기반 크로스언어 소개팅 API 서버.
 - `/api/matches` — 매치 목록(N+1 해결 RPC, 커서 페이지네이션), 언매치, 메시지 CRUD, 읽음 처리
 - `/api/block` — 유저 차단/해제/목록 (차단 시 매치 자동 soft delete, 해제 시 404 처리)
 - `/api/report` — 유저 신고
-- `/api/preferences` — 매칭 선호도 (나이/성별/언어/국가). 사전 SQL 필터: 나이·성별 + viewer primary 언어 일치 후보 하드 제외. 추가 언어 선호와 국가 선호는 티어 정렬 신호.
+- `/api/preferences` — 매칭 선호도 (나이/성별/언어/국가). 사전 SQL 필터: 나이·성별 + viewer 본인 언어와 동일한 후보 하드 제외. 언어 선호 (`preferred_languages` TEXT[])와 국가 선호는 티어 정렬 신호.
 - `/docs` — Swagger UI
 
 ## Key Conventions
@@ -50,7 +50,7 @@ Express 5 + Supabase + ElevenLabs 기반 크로스언어 소개팅 API 서버.
 - 파일 업로드: multer 메모리 스토리지 → Supabase Storage `uploadFile` 유틸. 사진 파일명은 `{timestamp}_{uuid}.{ext}`로 원본명 미사용.
 - 사진 삭제: DB 먼저 업데이트 후 Storage 삭제는 fire-and-forget (Storage 고아 파일보다 DB 불일치가 더 위험)
 - 비동기 처리 (메시지 번역/TTS, voice intro 오디오): fire-and-forget + `.catch()` 로깅. 상태 필드로 추적.
-- 번역은 `src/services/translation.ts`의 `translateMessage()` (Vertex AI Gemini 2.5 Flash, `responseMimeType: application/json`, `temperature=0.3`, `BLOCK_ONLY_HIGH` safety). source/target 은 송수신자의 `languages[0].code`. TTS는 `src/services/elevenlabs.ts`의 `synthesizeSpeech()` — `eleven_v3` 모델, `stability=0.4`, 언어 코드는 안 보내고 텍스트에서 자동 감지. emotion 값이 있으면 텍스트 앞에 `[emotion]` 프리픽스로 전달.
+- 번역은 `src/services/translation.ts`의 `translateMessage()` (Vertex AI Gemini 2.5 Flash, `responseMimeType: application/json`, `temperature=0.3`, `BLOCK_ONLY_HIGH` safety). source/target 은 송수신자의 `profiles.language` 스칼라 값. TTS는 `src/services/elevenlabs.ts`의 `synthesizeSpeech()` — `eleven_v3` 모델, `stability=0.4`, 언어 코드는 안 보내고 텍스트에서 자동 감지. emotion 값이 있으면 텍스트 앞에 `[emotion]` 프리픽스로 전달.
 - Supabase `.update()` / `.delete()`에서 count가 필요하면 `{ count: 'exact' }` 옵션 사용
 
 ## DB Migrations
@@ -63,6 +63,8 @@ Express 5 + Supabase + ElevenLabs 기반 크로스언어 소개팅 API 서버.
 - `006_multi_language_proficiency.sql` — `profiles.languages` JSONB + `user_preferences.preferred_languages_detail` JSONB 추가, 옛 scalar 컬럼에서 백필
 - `007_rename_bio_to_voice_intro.sql` — `profiles.bio` → `voice_intro`, `profiles.bio_audio_url` → `voice_intro_audio_url`. Storage 버킷 `bio-audio` → `voice-intro-audio`. 옛 URL은 NULL 리셋 후 다음 저장 시 재합성.
 - `008_cleanup_languages_add_nationalities.sql` — 옛 scalar `profiles.language` 컬럼 삭제(언어는 `languages` JSONB 만 사용). 옛 codes-only `user_preferences.preferred_languages` 컬럼 삭제. 신규 `user_preferences.preferred_nationalities TEXT[]` 추가 (그 전엔 FE 만 보내고 BE가 silent drop 했음).
+- `009_simplify_language_model.sql` — 언어 모델 단순화 (다중 + level → 단일 scalar / 코드 배열). `profiles.language TEXT` 재도입 (mig 008 에서 같은 이름이 drop 된 이력 있음 — rollback 아니라 단순화된 형태로의 재도입). `profiles.languages` JSONB 삭제. `user_preferences.preferred_languages TEXT[]` 재도입 (level 없음). `user_preferences.preferred_languages_detail` JSONB 삭제. 백필: `languages[0].code` → `language`, `preferred_languages_detail[].code` → `preferred_languages`.
+- `010_profile_language_not_null.sql` — `profiles.language` NOT NULL 강제. mig 009 백필 검증 후 단계.
 
 ## Testing
 

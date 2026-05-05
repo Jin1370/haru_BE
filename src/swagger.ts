@@ -159,17 +159,10 @@ export const swaggerDocument = {
           min_age: { type: 'integer', minimum: 18, maximum: 100 },
           max_age: { type: 'integer', minimum: 18, maximum: 100 },
           preferred_genders: { type: 'array', items: { type: 'string', enum: ['male', 'female', 'other'] } },
-          preferred_languages_detail: {
+          preferred_languages: {
             type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                code: { type: 'string', minLength: 2, maxLength: 5 },
-                level: { type: 'integer', minimum: 1, maximum: 3 },
-              },
-              required: ['code', 'level'],
-            },
-            description: 'level: 1=초보, 2=중급(일상회화), 3=원어민. 빈 배열이면 언어 제약 없음.',
+            items: { type: 'string', minLength: 2, maxLength: 5 },
+            description: '선호 언어 코드 (ko/ja/en/th/hi). 빈 배열이면 언어 제약 없음. mig 009 에서 level 차원 제거.',
           },
           preferred_nationalities: {
             type: 'array',
@@ -541,16 +534,9 @@ export const swaggerDocument = {
                   min_age: { type: 'integer', minimum: 18, maximum: 100, default: 18 },
                   max_age: { type: 'integer', minimum: 18, maximum: 100, default: 100 },
                   preferred_genders: { type: 'array', items: { type: 'string', enum: ['male', 'female', 'other'] } },
-                  preferred_languages_detail: {
+                  preferred_languages: {
                     type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        code: { type: 'string', minLength: 2, maxLength: 5 },
-                        level: { type: 'integer', minimum: 1, maximum: 3 },
-                      },
-                      required: ['code', 'level'],
-                    },
+                    items: { type: 'string', minLength: 2, maxLength: 5 },
                   },
                   preferred_nationalities: {
                     type: 'array',

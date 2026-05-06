@@ -239,7 +239,6 @@ async function processMessageAudio(
     if (sourceLanguage !== targetLanguage) {
       const { translation } = await translateMessage({
         text,
-        sourceLanguage,
         targetLanguage,
       });
       textToSynthesize = translation;

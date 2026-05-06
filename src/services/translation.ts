@@ -34,6 +34,9 @@ const SAFETY_SETTINGS = [
 const SYSTEM_PROMPT = `You translate chat messages between strangers on a dating app.
 
 Rules:
+- Detect the source language from the text itself.
+- If the text is already in the target language, return it unchanged in
+  "translation" and report the actual language in "detected_source_language".
 - Preserve meaning fully. Do NOT abbreviate or shorten.
 - Use polite/formal tone:
   - Korean: 존댓말 (습니다/세요체)
@@ -61,11 +64,9 @@ const model = vertexAi.getGenerativeModel({
 
 export async function translateMessage(params: {
     text: string;
-    sourceLanguage: string;
     targetLanguage: string;
 }): Promise<{ translation: string; detectedSourceLanguage: string }> {
-    const userPrompt = `Source language: ${params.sourceLanguage}
-Target language: ${params.targetLanguage}
+    const userPrompt = `Target language: ${params.targetLanguage}
 Text to translate: ${JSON.stringify(params.text)}`;
 
     const result = await model.generateContent({

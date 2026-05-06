@@ -10,6 +10,7 @@ export interface AuthRequest extends Request {
 export type VoiceIntroSlotLanguage = 'ko' | 'ja' | 'en';
 export const VOICE_INTRO_SLOT_LANGUAGES: VoiceIntroSlotLanguage[] = ['ko', 'ja', 'en'];
 export type VoiceIntroAudioStatus = 'pending' | 'processing' | 'ready' | 'failed';
+export type VoiceIntroTranslations = Partial<Record<VoiceIntroSlotLanguage, string>>;
 
 export interface Profile {
   id: string;
@@ -30,7 +31,7 @@ export interface Profile {
   // FE chat 파트너 detail 이 supabase 직접 select 로 RLS 통과 중이라 drop 보류.
   voice_intro_audio_url: string | null;
   // mig 011 신규. 슬롯은 ko/ja/en 만. 키 미존재 가능.
-  voice_intro_translations: Partial<Record<VoiceIntroSlotLanguage, string>>;
+  voice_intro_translations: VoiceIntroTranslations;
   voice_intro_audio_urls: Partial<Record<VoiceIntroSlotLanguage, string | null>>;
   voice_intro_audio_status: Partial<Record<VoiceIntroSlotLanguage, VoiceIntroAudioStatus>>;
   is_active: boolean;

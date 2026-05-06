@@ -6,6 +6,7 @@ import {
   VOICE_INTRO_SLOT_LANGUAGES,
   type VoiceIntroSlotLanguage,
   type VoiceIntroAudioStatus,
+  type VoiceIntroTranslations,
 } from '../types';
 
 // mig 011: voice intro 다국어 슬롯 파이프라인.
@@ -166,17 +167,22 @@ export async function generateVoiceIntroAudios(
   voiceIntroText: string,
   voiceId: string,
   authorLanguageRaw: string | null | undefined,
+  presetTranslations?: VoiceIntroTranslations,
 ): Promise<void> {
   const authorLang = normalizeAuthorLanguage(authorLanguageRaw);
 
   // (1) 시작 시점 옛 URL snapshot (cleanup 용)
   const oldUrls = await snapshotOldUrls(userId);
 
-  // (2) 상태 초기화 + 작성자 슬롯 텍스트 commit (단일 update). 단일 컬럼도 NULL 리셋.
+  // (2) 상태 초기화 + 슬롯 텍스트 commit (단일 update). 단일 컬럼도 NULL 리셋.
+  // preset 경로 (voice-intro-preset-bypass sprint) 는 BE 카탈로그가 ko/ja/en 3개를
+  // 모두 보유하므로 이 단계에서 3슬롯을 한 번에 commit. 기존 path 는 작성자 슬롯만 commit.
+  const initialTranslations: VoiceIntroTranslations =
+    presetTranslations ?? { [authorLang]: voiceIntroText };
   await supabase
     .from('profiles')
     .update({
-      voice_intro_translations: { [authorLang]: voiceIntroText },
+      voice_intro_translations: initialTranslations,
       voice_intro_audio_urls: {},
       voice_intro_audio_status: { ko: 'pending', ja: 'pending', en: 'pending' },
       voice_intro_audio_url: null,
@@ -184,31 +190,35 @@ export async function generateVoiceIntroAudios(
     .eq('id', userId);
 
   // (3) 누락 언어 번역 (1회 호출). 실패 시 누락 슬롯 status='failed', 작성자 슬롯만 진행.
-  const targetLangs = VOICE_INTRO_SLOT_LANGUAGES.filter((l) => l !== authorLang);
-  const slotTexts: Partial<Record<VoiceIntroSlotLanguage, string>> = {
-    [authorLang]: voiceIntroText,
-  };
-  if (targetLangs.length > 0) {
-    try {
-      const { translations } = await translateVoiceIntro({
-        text: voiceIntroText,
-        sourceLanguage: authorLang,
-        targetLanguages: targetLangs,
-      });
-      for (const lang of targetLangs) {
-        const value = translations[lang];
-        if (typeof value === 'string' && value.length > 0) {
-          slotTexts[lang] = value;
+  // preset 경로는 카탈로그가 3슬롯 모두 보유 → 이 단계 전체 스킵, slotTexts 직접 채움.
+  let slotTexts: VoiceIntroTranslations;
+  if (presetTranslations) {
+    slotTexts = presetTranslations;
+  } else {
+    slotTexts = { [authorLang]: voiceIntroText };
+    const targetLangs = VOICE_INTRO_SLOT_LANGUAGES.filter((l) => l !== authorLang);
+    if (targetLangs.length > 0) {
+      try {
+        const { translations } = await translateVoiceIntro({
+          text: voiceIntroText,
+          sourceLanguage: authorLang,
+          targetLanguages: targetLangs,
+        });
+        for (const lang of targetLangs) {
+          const value = translations[lang];
+          if (typeof value === 'string' && value.length > 0) {
+            slotTexts[lang] = value;
+          }
         }
+        // 번역문 commit (작성자 언어 + 성공 번역 슬롯).
+        await supabase
+          .from('profiles')
+          .update({ voice_intro_translations: slotTexts })
+          .eq('id', userId);
+      } catch (err) {
+        console.error(`[Voice intro translate failed] userId=${userId}`, err);
+        await markSlotsFailed(userId, targetLangs);
       }
-      // 번역문 commit (작성자 언어 + 성공 번역 슬롯).
-      await supabase
-        .from('profiles')
-        .update({ voice_intro_translations: slotTexts })
-        .eq('id', userId);
-    } catch (err) {
-      console.error(`[Voice intro translate failed] userId=${userId}`, err);
-      await markSlotsFailed(userId, targetLangs);
     }
   }
 

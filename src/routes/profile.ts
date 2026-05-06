@@ -2,11 +2,12 @@ import { Router, Response } from 'express';
 import multer from 'multer';
 import { supabase } from '../config/supabase';
 import { uploadFile, deleteFile, extractPath } from '../services/storage';
-import { generateVoiceIntroAudios } from '../services/voiceIntro';
+import { generateVoiceIntroAudios, normalizeAuthorLanguage } from '../services/voiceIntro';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
 import { profileUpsertSchema } from '../schemas/profile';
-import { AuthRequest } from '../types';
+import { lookupBioPhrase } from '../constants/bioPhrasesCatalog';
+import { AuthRequest, VoiceIntroTranslations } from '../types';
 
 const router = Router();
 const upload = multer({ limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB
@@ -31,7 +32,16 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
 
 // 내 프로필 수정 (생성 포함 - upsert)
 router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, res: Response) => {
-  const { display_name, birth_date, gender, nationality, language, voice_intro, interests } = req.body;
+  const {
+    display_name,
+    birth_date,
+    gender,
+    nationality,
+    language,
+    voice_intro,
+    voice_intro_phrase_id,
+    interests,
+  } = req.body;
 
   // 기존 voice_intro를 조회해 변경 여부 판단. 바뀌지 않았으면 TTS 재생성을 건너뛰어
   // 불필요한 ElevenLabs 호출을 막는다.
@@ -40,8 +50,30 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
     .select('voice_intro')
     .eq('id', req.userId!)
     .maybeSingle();
+
+  // voice-intro-preset-bypass sprint: phrase id 매칭 시 BE 카탈로그가
+  // 작성자 언어/번역 텍스트의 단일 진실 소스. 사용자 페이로드의 voice_intro 와
+  // 카탈로그 텍스트가 다를 경우(클라이언트 위조/구버전 OTA) 카탈로그가 우선.
+  // 미상 id 는 폴백 — Gemini 경로로 흡수, 사용자에게 reject 노출하지 않음.
+  let presetTranslations: VoiceIntroTranslations | undefined;
+  let resolvedVoiceIntro: string | null = voice_intro ?? null;
+  if (voice_intro_phrase_id) {
+    const entry = lookupBioPhrase(voice_intro_phrase_id);
+    if (entry) {
+      presetTranslations = entry.text;
+      // Server-authoritative override: voice_intro 컬럼도 카탈로그의 작성자 언어
+      // 텍스트로 덮어쓴다. display 와 audio 의 텍스트 일관성 강제(시나리오 8 방어).
+      const authorLang = normalizeAuthorLanguage(language);
+      resolvedVoiceIntro = entry.text[authorLang];
+    } else {
+      console.warn(
+        `[Voice intro preset bypass] unknown phrase_id=${voice_intro_phrase_id} userId=${req.userId} — falling back to Gemini`,
+      );
+    }
+  }
+
   const prevVoiceIntro = prev?.voice_intro ?? null;
-  const nextVoiceIntro = voice_intro ?? null;
+  const nextVoiceIntro = resolvedVoiceIntro;
   const voiceIntroChanged = prevVoiceIntro !== nextVoiceIntro;
 
   const upsertPayload: Record<string, unknown> = {
@@ -51,7 +83,7 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
     gender,
     nationality,
     language,
-    voice_intro,
+    voice_intro: resolvedVoiceIntro,
     interests: interests || [],
     updated_at: new Date().toISOString(),
   };
@@ -78,9 +110,15 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
 
   // voice_intro 가 실제로 바뀐 경우에만 다국어 오디오 파이프라인 트리거.
   // voice_clone 미보유면 스킵 (FE 폴링이 단일 컬럼/status fallback 으로 처리).
-  if (voiceIntroChanged && voice_intro && data.elevenlabs_voice_id) {
-    generateVoiceIntroAudios(req.userId!, voice_intro, data.elevenlabs_voice_id, language)
-      .catch((err) => console.error('[Voice intro audios generation failed]', err));
+  // preset 매칭 시 presetTranslations 주입 → service 가 Gemini 단계 스킵.
+  if (voiceIntroChanged && resolvedVoiceIntro && data.elevenlabs_voice_id) {
+    generateVoiceIntroAudios(
+      req.userId!,
+      resolvedVoiceIntro,
+      data.elevenlabs_voice_id,
+      language,
+      presetTranslations,
+    ).catch((err) => console.error('[Voice intro audios generation failed]', err));
   }
 
   res.json(data);

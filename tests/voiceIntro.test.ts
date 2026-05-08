@@ -346,4 +346,81 @@ describe('generateVoiceIntroAudios', () => {
       targetLanguages: ['ja', 'en'],
     });
   });
+
+  // voice-intro-preset-bypass sprint: 5번째 인자 presetTranslations 가 주입되면
+  // service 가 Gemini 단계 전체를 스킵하고 카탈로그 텍스트로 직접 TTS 만 진행.
+  describe('presetTranslations 인자 (preset bypass)', () => {
+    it('presetTranslations 주입 → translateVoiceIntro 호출 0회', async () => {
+      const presetTranslations = {
+        ko: '지금 하트 누를까 말까 고민 중이죠? 그냥 눌러주면 안 돼요?',
+        ja: '今ハート押そうか迷ってますよね？そのまま押しちゃだめですか？',
+        en: "Still hovering over the heart button? Just press it for me, won't you?",
+      };
+      await generateVoiceIntroAudios(
+        USER_ID,
+        '지금 하트 누를까 말까 고민 중이죠? 그냥 눌러주면 안 돼요?',
+        VOICE_ID,
+        'ko',
+        presetTranslations,
+      );
+      expect(hoisted.translateVoiceIntroMock).not.toHaveBeenCalled();
+      // 3슬롯 모두 TTS 호출됨
+      expect(hoisted.synthesizeSpeechMock).toHaveBeenCalledTimes(3);
+      const profile = hoisted.supabaseState.profile;
+      expect(profile.voice_intro_audio_status).toEqual({
+        ko: 'ready',
+        ja: 'ready',
+        en: 'ready',
+      });
+      // voice_intro_translations 가 카탈로그 3개 텍스트로 채워짐
+      expect(profile.voice_intro_translations).toEqual(presetTranslations);
+      // 작성자 슬롯 단일 컬럼 미러 (작성자 ko)
+      expect(profile.voice_intro_audio_url).toBe(profile.voice_intro_audio_urls.ko);
+    });
+
+    it('presetTranslations 주입 + TTS 텍스트는 카탈로그 텍스트 사용 (작성자 텍스트 무시)', async () => {
+      const presetTranslations = {
+        ko: '카탈로그 ko 텍스트',
+        ja: '카탈로그 ja 텍스트',
+        en: 'catalog en text',
+      };
+      // 사용자가 인자로 전혀 다른 voiceIntroText 를 보내도, 슬롯별 TTS 는
+      // presetTranslations 의 텍스트로 진행 — server-authoritative.
+      await generateVoiceIntroAudios(
+        USER_ID,
+        '악성 텍스트 (무시되어야 함)',
+        VOICE_ID,
+        'ko',
+        presetTranslations,
+      );
+      expect(hoisted.synthesizeSpeechMock).toHaveBeenCalledTimes(3);
+      const ttsTexts = hoisted.synthesizeSpeechMock.mock.calls.map((c: any[]) => c[0]);
+      expect(ttsTexts).toContain('카탈로그 ko 텍스트');
+      expect(ttsTexts).toContain('카탈로그 ja 텍스트');
+      expect(ttsTexts).toContain('catalog en text');
+      expect(ttsTexts).not.toContain('악성 텍스트 (무시되어야 함)');
+    });
+
+    it('presetTranslations 미전달 (undefined) → 기존 path (translateVoiceIntro 1회 호출)', async () => {
+      // 회귀 테스트: 5번째 인자 옵셔널이라 미전달 시 기존 동작 100% 동일.
+      hoisted.translateVoiceIntroMock.mockResolvedValue({
+        translations: { ja: 'JA', en: 'EN' },
+        detectedSourceLanguage: 'ko',
+      });
+      await generateVoiceIntroAudios(USER_ID, '안녕', VOICE_ID, 'ko');
+      expect(hoisted.translateVoiceIntroMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('presetTranslations 주입 + 작성자 ja → 단일 컬럼 = ja URL 미러', async () => {
+      const presetTranslations = {
+        ko: 'ko text',
+        ja: 'ja text',
+        en: 'en text',
+      };
+      await generateVoiceIntroAudios(USER_ID, 'ja text', VOICE_ID, 'ja', presetTranslations);
+      expect(hoisted.translateVoiceIntroMock).not.toHaveBeenCalled();
+      const profile = hoisted.supabaseState.profile;
+      expect(profile.voice_intro_audio_url).toBe(profile.voice_intro_audio_urls.ja);
+    });
+  });
 });

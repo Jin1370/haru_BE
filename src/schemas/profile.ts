@@ -24,5 +24,10 @@ export const profileUpsertSchema = z.object({
   nationality: z.enum(NATIONALITY_CODES),
   language: z.enum(LANGUAGE_CODES),
   voice_intro: z.string().max(500).nullable().optional(),
+  // mig 011 후속 — preset bypass 메커니즘 (voice-intro-preset-bypass sprint).
+  // BE 가 자체 카탈로그(bioPhrasesCatalog)에서 lookup 해 Gemini 호출을 스킵.
+  // 미상 id (FE가 신규 추가, BE가 미반영 = OTA 비대칭) 는 reject 하지 않고
+  // service 단에서 Gemini 폴백으로 흡수한다 — 사용자 경험 깨짐 방지.
+  voice_intro_phrase_id: z.string().min(1).max(64).nullable().optional(),
   interests: z.array(z.string().max(30)).max(10).optional(),
 });

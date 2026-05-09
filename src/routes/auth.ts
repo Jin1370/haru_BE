@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { supabase, supabaseAuth } from '../config/supabase';
+import { authMiddleware } from '../middleware/auth';
+import { AuthRequest } from '../types';
 
 const router = Router();
 
@@ -214,6 +216,72 @@ router.post('/google', async (req: Request, res: Response) => {
       email: data.user?.email,
     },
   });
+});
+
+// 비밀번호 변경 — 현재 비밀번호 검증 후 갱신.
+//   WRONG_CURRENT_PASSWORD  현재 비밀번호 미스매치 (또는 OAuth 가입자라 비밀번호 자체가 없음)
+//   PASSWORD_FORMAT         새 비밀번호가 서버 정책 위반
+//   SAME_PASSWORD           새 비밀번호가 현재와 동일
+//
+// 검증 단계는 별도 supabaseAuth 인스턴스로 signInWithPassword 호출 — 현 세션을
+// 갈아치우지 않도록 하려는 의도. Google 가입자는 password identity 자체가 없어
+// signInWithPassword 가 invalid_credentials 로 실패하므로 자연히 차단됨.
+router.post('/change-password', authMiddleware, async (req: AuthRequest, res: Response) => {
+  const { current_password, new_password } = req.body;
+
+  if (!current_password || !new_password) {
+    res.status(400).json({ error: 'current_password and new_password are required' });
+    return;
+  }
+
+  if (current_password === new_password) {
+    res.status(400).json({
+      error: 'new password must differ from the current one',
+      code: 'SAME_PASSWORD',
+    });
+    return;
+  }
+
+  if (!PASSWORD_RE.test(new_password)) {
+    res.status(400).json({
+      error: 'password must be at least 8 characters and include a letter and a number',
+      code: 'PASSWORD_FORMAT',
+    });
+    return;
+  }
+
+  // authMiddleware sets req.userId; pull email via admin API.
+  const { data: userData, error: userErr } = await supabase.auth.admin.getUserById(
+    req.userId!,
+  );
+  if (userErr || !userData.user?.email) {
+    res.status(401).json({ error: 'user not found' });
+    return;
+  }
+  const email = userData.user.email;
+
+  // Verify current password without disturbing the caller's active session.
+  const { error: verifyErr } = await supabaseAuth.auth.signInWithPassword({
+    email,
+    password: current_password,
+  });
+  if (verifyErr) {
+    res.status(401).json({
+      error: 'current password is incorrect',
+      code: 'WRONG_CURRENT_PASSWORD',
+    });
+    return;
+  }
+
+  const { error: updateErr } = await supabase.auth.admin.updateUserById(req.userId!, {
+    password: new_password,
+  });
+  if (updateErr) {
+    res.status(500).json({ error: updateErr.message });
+    return;
+  }
+
+  res.status(204).end();
 });
 
 // 토큰 갱신

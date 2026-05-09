@@ -3,13 +3,13 @@
 -- 목적: 기존 get_match_summaries 반환 필드에 round_trip_count,
 --       main_photo_unlocked, all_photos_unlocked 를 추가한 확장판.
 --
--- 라운드트립 정의 (FE voicemate-FE/src/utils/chat.ts countRoundTrips 와 동일 의미):
+-- 라운드트립 정의 (FE haru_FE/src/utils/chat.ts countRoundTrips 와 동일 의미):
 --   각 match 의 messages 를 created_at ASC 로 순회하며
 --   첫 발신자를 기준으로 A/B 교대 페어를 완성한 횟수를 센다.
 --   (sender 가 연속으로 같은 쪽이면 1회로 묶임. 반대쪽이 처음 등장한 순간 페어 1 완성)
 --
 -- 임계치 상수 UNLOCK_MAIN / UNLOCK_ALL 은 BE 측
--- voicemate-BE-v2/src/constants/chat.ts 의 UNLOCK_MAIN_PHOTO_AT,
+-- haru_BE/src/constants/chat.ts 의 UNLOCK_MAIN_PHOTO_AT,
 -- UNLOCK_ALL_PHOTOS_AT 와 반드시 **동일 값으로 동기화** 되어야 한다.
 -- 값 변경 시 본 migration 과 constants/chat.ts, FE 상수 3곳을 동시에 고친다.
 --

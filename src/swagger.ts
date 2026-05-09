@@ -408,18 +408,6 @@ export const swaggerDocument = {
         },
       },
     },
-    '/api/matches/{matchId}': {
-      delete: {
-        tags: ['Match'],
-        summary: '언매치 (soft delete)',
-        parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
-        responses: {
-          200: { description: '언매치 성공', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', example: 'unmatched' } } } } } },
-          404: { description: '매치 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-        },
-      },
-    },
-
     // ── Messages ──
     '/api/matches/{matchId}/messages': {
       get: {

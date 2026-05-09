@@ -41,14 +41,32 @@ router.post('/', validateBody(reportSchema), async (req: AuthRequest, res: Respo
     blocked_id: reported_id,
   });
 
-  // 자동 매치 해제 — 두 사람 사이의 활성 매치가 있으면 soft delete.
+  // 자동 매치 해제 + actor 의 hidden_by 자동 append.
+  // 신고 직후 본인 시야에서 매치가 즉시 사라지도록 hidden_by 에 자기
+  // user_id 추가 (mig 013). 상대방 화면에는 tombstone 으로 남는다.
+  // 자세한 동작 근거는 block.ts 동일 블록 주석 참고.
   const [id1, id2] = [req.userId!, reported_id].sort();
-  await supabase
+  const { data: match } = await supabase
     .from('matches')
-    .update({ unmatched_at: new Date().toISOString(), unmatched_by: req.userId! })
+    .select('id, hidden_by, unmatched_at')
     .eq('user1_id', id1)
     .eq('user2_id', id2)
-    .is('unmatched_at', null);
+    .maybeSingle();
+
+  if (match) {
+    const currentHidden = (match.hidden_by as string[] | null) ?? [];
+    const nextHidden = currentHidden.includes(req.userId!)
+      ? currentHidden
+      : [...currentHidden, req.userId!];
+
+    const updates: Record<string, unknown> = { hidden_by: nextHidden };
+    if (!match.unmatched_at) {
+      updates.unmatched_at = new Date().toISOString();
+      updates.unmatched_by = req.userId!;
+    }
+
+    await supabase.from('matches').update(updates).eq('id', match.id);
+  }
 
   res.status(201).json({ status: 'reported' });
 });

@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
+import { randomBytes } from 'crypto';
 import { supabase, supabaseAuth } from '../config/supabase';
 import { authMiddleware } from '../middleware/auth';
+import { deleteVoiceClone } from '../services/elevenlabs';
 import { AuthRequest } from '../types';
 
 const router = Router();
@@ -280,6 +282,146 @@ router.post('/change-password', authMiddleware, async (req: AuthRequest, res: Re
     res.status(500).json({ error: updateErr.message });
     return;
   }
+
+  res.status(204).end();
+});
+
+// 회원 탈퇴 — anonymize in place (mig 012).
+//
+// auth.users 를 hard-delete 하면 profiles.id ON DELETE CASCADE 로 인해 매치/
+// 메시지가 cascade 로 사라지고, 상대방은 채팅이 흔적 없이 증발하는 UX 를
+//보게 된다. 그래서 auth.users 는 살리되 email/password 를 무작위 값으로
+// 갈아치워 로그인 자체를 막고, profiles 행은 PII 필드만 비운 뒤
+// `deleted_at` 을 찍는다. 매치/메시지는 그대로 유지되고, 상대 화면에서는
+// FE 가 partner.deleted_at 을 보고 "탈퇴한 사용자" tombstone 으로 렌더링.
+//
+// Storage 사진·voice intro 오디오·ElevenLabs voice clone 등 외부 자원
+// 정리는 별도 클린업 잡(향후) 대상.
+// Best-effort cleanup of external assets owned by the deleted user. Each
+// step is independently logged and swallowed so a single failure (e.g.
+// ElevenLabs API hiccup, orphaned storage path) doesn't block the others.
+//
+// Buckets we wipe:
+//   * photos                — `{userId}/...` folder of profile photos
+//   * voice-samples         — `{userId}.wav` voice clone source
+//   * voice-intro-audio     — `{userId}/...` folder of multi-language TTS
+//
+// Buckets we keep (intentional):
+//   * voice-messages — past TTS audio in chat history. Comparable to
+//     retaining text messages: the partner already received them and
+//     erasing only the audio mid-conversation is a worse UX than letting
+//     the message bubble keep playing. The clone source is gone so no
+//     further synthesis is possible.
+async function cleanupDeletedUserAssets(userId: string, voiceCloneId: string | null) {
+  const removeFolder = async (bucket: string, folder: string) => {
+    const { data: files, error: listErr } = await supabase.storage.from(bucket).list(folder);
+    if (listErr) throw new Error(`list ${bucket}/${folder}: ${listErr.message}`);
+    if (!files || files.length === 0) return;
+    const paths = files.map((f) => `${folder}/${f.name}`);
+    const { error: rmErr } = await supabase.storage.from(bucket).remove(paths);
+    if (rmErr) throw new Error(`remove ${bucket}/${folder}: ${rmErr.message}`);
+  };
+
+  const tasks: Array<{ name: string; run: () => Promise<unknown> }> = [
+    { name: 'photos', run: () => removeFolder('photos', userId) },
+    {
+      name: 'voice-samples',
+      run: async () => {
+        const { error } = await supabase.storage.from('voice-samples').remove([`${userId}.wav`]);
+        if (error) throw new Error(error.message);
+      },
+    },
+    { name: 'voice-intro-audio', run: () => removeFolder('voice-intro-audio', userId) },
+  ];
+
+  if (voiceCloneId) {
+    tasks.push({ name: 'elevenlabs-clone', run: () => deleteVoiceClone(voiceCloneId) });
+  }
+
+  const results = await Promise.allSettled(tasks.map((t) => t.run()));
+  results.forEach((r, i) => {
+    if (r.status === 'rejected') {
+      console.error(`[deleteAccount cleanup] ${tasks[i].name} failed for ${userId}:`, r.reason);
+    }
+  });
+}
+
+router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response) => {
+  const userId = req.userId!;
+
+  // Capture the voice-clone id before we anonymize — once the profile row
+  // is cleared we lose the reference to the ElevenLabs side. Photos folder
+  // is keyed by userId so we don't need to capture URLs.
+  const { data: prevProfile } = await supabase
+    .from('profiles')
+    .select('elevenlabs_voice_id')
+    .eq('id', userId)
+    .maybeSingle();
+  const voiceCloneId = (prevProfile?.elevenlabs_voice_id as string | null) ?? null;
+
+  // (1) Anonymize the profile row. NOT NULL columns (display_name,
+  // birth_date, gender, nationality, language) are kept satisfied with
+  // sentinel values — display_name='' triggers the FE tombstone fallback
+  // (resolves to "탈퇴한 사용자" via i18n). Voice/photo PII is nulled out.
+  // is_active=false drops the row out of discover and the public
+  // "Anyone can read active profiles" RLS policy (so getPartnerDetail
+  // also can't fetch the cleared bio/birth_date/interests fields).
+  // mig 011 의 voice_intro_translations / voice_intro_audio_urls /
+  // voice_intro_audio_status 는 JSONB NOT NULL DEFAULT '{}'. null 대신
+  // 빈 객체로 비운다. voice_intro_phrase_id 는 zod 페이로드 필드일 뿐
+  // DB 컬럼이 아니므로 update 페이로드에서 제외.
+  const { error: profErr } = await supabase
+    .from('profiles')
+    .update({
+      display_name: '',
+      photos: [],
+      interests: [],
+      voice_intro: null,
+      voice_intro_audio_url: null,
+      voice_intro_audio_urls: {},
+      voice_intro_translations: {},
+      voice_intro_audio_status: {},
+      elevenlabs_voice_id: null,
+      voice_sample_url: null,
+      voice_clone_status: 'pending',
+      is_active: false,
+      deleted_at: new Date().toISOString(),
+    })
+    .eq('id', userId);
+  if (profErr) {
+    res.status(500).json({ error: profErr.message });
+    return;
+  }
+
+  // (2) Anonymize the auth.users row so the user can no longer authenticate
+  // and their original email becomes free for re-registration. Email goes to
+  // a non-routable .local address; password is set to 32 bytes of random hex
+  // — the user has no way to know it. user_metadata flags the row for audit.
+  const anonEmail = `deleted-${userId}@deleted.local`;
+  const anonPassword = randomBytes(32).toString('hex');
+  const { error: authErr } = await supabase.auth.admin.updateUserById(userId, {
+    email: anonEmail,
+    password: anonPassword,
+    user_metadata: { deleted: true, deleted_at: new Date().toISOString() },
+  });
+  if (authErr) {
+    // Profile is already anonymized at this point; surface the error so the
+    // caller knows auth.users is in an inconsistent state and can retry.
+    res.status(500).json({ error: authErr.message });
+    return;
+  }
+
+  // Note: existing refresh tokens on other devices remain valid until they
+  // expire — admin.signOut takes a JWT, not a userId, so we can't broadcast
+  // a global sign-out from here. Acceptable trade-off for v1: the account
+  // is fully anonymized so even an active session sees its own tombstone.
+
+  // (3) Fire-and-forget cleanup of external assets (Supabase Storage +
+  // ElevenLabs clone). Errors logged inside; we never block the response on
+  // these because the DB-level anonymization above is the privacy contract.
+  cleanupDeletedUserAssets(userId, voiceCloneId).catch((e) => {
+    console.error('[deleteAccount cleanup] uncaught:', e);
+  });
 
   res.status(204).end();
 });

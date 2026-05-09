@@ -13,9 +13,13 @@ router.use(authMiddleware);
 
 const ALLOWED_AUDIO_TYPES = ['audio/wav', 'audio/wave', 'audio/x-wav', 'audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/ogg', 'audio/webm'];
 
-// FE 우회 케이스 백스톱 — FE 가드는 평균 dB(-45) + bitrate(7000 bytes/s × 10s = 70KB)로
-// 최소 70KB 이상 파일만 통과시킨다. BE 는 디코더 없이 dB 를 다시 잴 수 없으므로,
-// 보수적으로 40KB 미만(=정상 녹음의 절반 이하)을 무음/너무 짧은 케이스로 보고 차단한다.
+// FE 우회 케이스 백스톱. FE 가드(useVoiceCloneRecorder.ts) 는
+//   * 평균 dBFS ≥ -35 (MIN_AVG_METERING_DB)
+//   * bitrate ≥ 7000 bytes/s × 10s = 70KB (MIN_BYTES_PER_SEC)
+// 두 조건으로 정상 녹음만 통과시킨다. BE 는 디코더 없이 dB 를 다시
+// 잴 수 없으므로, 보수적으로 40KB 미만(=정상 녹음의 절반 이하)을
+// 무음/너무 짧은 케이스로 보고 차단한다. FE 임계 변경 시 본 상수도
+// 같이 비례 조정 검토.
 const MIN_VOICE_SAMPLE_BYTES = 40 * 1024;
 
 // 음성 샘플 업로드 + ElevenLabs 클론 생성

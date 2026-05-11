@@ -3,7 +3,12 @@ import { supabase } from '../config/supabase';
 import { uploadFile } from '../services/storage';
 import { synthesizeSpeech } from '../services/elevenlabs';
 import { translateMessage } from '../services/translation';
-import { normalizeSlangInput } from '../utils/textNormalization';
+import {
+  prepareTextForTTS,
+  replaceTagsForDisplay,
+  ensureSpeakableForTTS,
+  hasSpeakableContent,
+} from '../utils/textNormalization';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
 import { sendMessageSchema, messageQuerySchema } from '../schemas/message';
@@ -234,22 +239,63 @@ async function processMessageAudio(
   emotion: Exclude<Emotion, 'neutral'> | null
 ): Promise<void> {
   try {
-    // 번역/TTS 진입 직전에 발신자 언어 기준 슬랭 length-capping.
-    // 매치 단계에서 동일 대표언어 후보는 하드 제외되므로 정상 흐름에선 source≠target.
-    // 사용자가 대화 중 대표언어를 전환한 경우 source==target 이 될 수 있으나,
-    // 이 경로에서도 텍스트 내용이 수신자 언어와 다를 수 있으므로 Gemini 를 항상 경유한다
-    // (이미 같은 언어면 시스템 프롬프트 룰로 변형 없이 반환됨).
-    const normalizedSource = normalizeSlangInput(
-      text,
-      sourceLanguage as 'ko' | 'ja' | 'th' | 'en' | 'hi',
-    );
+    // 파이프라인:
+    //   1. prepareTextForTTS — 감정 마커(ㅋㅋ/ㅠㅠ/에휴 등) 를 eleven_v3 audio tag 로 치환.
+    //      Gemini 가 마커를 "탄식"으로 오번역하거나 TTS 가 마커 글자를 직접 발화하는
+    //      두 가지 사고를 한 번에 차단. 정규화(length-cap) 는 이 단계로 흡수됨.
+    //   2. Gemini 번역 — 시스템 프롬프트의 audio tag 보존 룰이 태그를 그대로 통과시킴.
+    //      매치 단계에서 동일 대표언어 후보는 하드 제외이지만 대화 중 언어 전환·cross-script
+    //      입력 가능성 때문에 source==target 여부와 무관하게 항상 Gemini 경유.
+    //   3. TTS — 태그 보존된 텍스트로 eleven_v3 합성. 태그는 효과음, 나머지는 발화.
+    //   4. DB 저장 시 translated_text 는 stripAudioTags 로 태그 제거 (UI 노출 방지).
+    const taggedSource = prepareTextForTTS(text);
 
     const { translation } = await translateMessage({
-      text: normalizedSource,
+      text: taggedSource,
       targetLanguage,
     });
-    const textToSynthesize = translation;
-    const translatedText = translation;
+    // Identity 조건: 동일 언어 페어에서 Gemini 가 변형 없이 반환한 케이스만.
+    // cross-language(source!=target) 라면 Gemini 가 태그를 보존했더라도 슬랭 표기는
+    // 타깃 언어로 바꿔서 보여줘야 함 (예: [laughs] → ja=www, en=lol).
+    const isIdentity =
+      sourceLanguage === targetLanguage && translation === taggedSource;
+    const translatedText = isIdentity
+      ? null
+      : replaceTagsForDisplay(translation, targetLanguage);
+
+    // 발화 불가 메시지(`:)`/`<3`/`???`/이모지 단독 등) 는 TTS 호출을 스킵하고
+    // audio_url=null 로 저장. FE 가 audio_url 없을 때 재생 버튼 숨김 → 무음 재생
+    // 버튼이 표시되는 UX 사고 차단.
+    if (!hasSpeakableContent(translation)) {
+      console.log(
+        `[processMessageAudio] messageId=${messageId} ${sourceLanguage}->${targetLanguage} skip TTS (no speakable content)`,
+        { original: text, translated: translation },
+      );
+      await supabase
+        .from('messages')
+        .update({
+          translated_text: translatedText,
+          audio_url: null,
+          audio_status: 'ready',
+        })
+        .eq('id', messageId);
+      return;
+    }
+
+    // 사용자가 ㅋㅋㅋ/ㅠㅠ/에휴 등 감정 마커만 보내면 번역 결과가 audio tag 단독이 됨.
+    // ElevenLabs 가 tag/이모지 strip 후 빈 텍스트면 reject 하므로 마침표로 패딩.
+    const textToSynthesize = ensureSpeakableForTTS(translation);
+
+    console.log(
+      `[processMessageAudio] messageId=${messageId} ${sourceLanguage}->${targetLanguage}`,
+      {
+        original: text,
+        tagged: taggedSource,
+        translated: translation,
+        translatedClean: translatedText,
+        toTTS: textToSynthesize,
+      },
+    );
 
     const audio = await synthesizeSpeech(textToSynthesize, voiceId, emotion);
 

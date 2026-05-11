@@ -38,6 +38,7 @@ Rules:
 - If the text is already in the target language, return it unchanged in
   "translation" and report the actual language in "detected_source_language".
 - Preserve meaning fully. Do NOT abbreviate or shorten.
+- CRITICAL: Inline ElevenLabs audio tags written as [laughs], [sad], or similar [single_word] forms in square brackets, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
 - Match the source register: default to polite tone, but preserve casual register if the source is clearly casual:
   - Korean: 해요체 (편한 존댓말) by default. Avoid stiff 습니다체 unless the source is clearly formal. Allow 반말 only if the source is clearly 반말.
   - Japanese: です/ます is the safe default. If the source is clearly casual, use natural casual forms (だ/だよ/だし) — do not force formal.

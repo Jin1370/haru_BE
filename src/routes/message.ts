@@ -12,7 +12,7 @@ import {
 import { authMiddleware } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
 import { sendMessageSchema, messageQuerySchema } from '../schemas/message';
-import { AuthRequest, Emotion } from '../types';
+import { AuthRequest, Emotion, MatchAfter } from '../types';
 
 const router = Router();
 
@@ -135,8 +135,28 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
     return;
   }
 
-  // 즉시 응답 반환 (텍스트 메시지는 바로 전달)
-  res.status(201).json(message);
+  // mig 014c AFTER INSERT 트리거가 동기 실행되어 matches 행 갱신 후
+  // 본 줄에 도달한다. 트리거 결과를 즉시 읽어 응답에 match_after 로 동봉
+  // → FE useChat 이 roundTrips/photoUnlocked 를 send 응답 한 번에 시드.
+  // 백필 실패 매치(round_trip_count=NULL)는 0/false 로 정규화.
+  const { data: matchAfterRow } = await supabase
+    .from('matches')
+    .select('round_trip_count, main_photo_unlocked_at, all_photos_unlocked_at')
+    .eq('id', matchId)
+    .single();
+
+  const matchAfter: MatchAfter = {
+    round_trip_count:
+      (matchAfterRow?.round_trip_count as number | null | undefined) ?? 0,
+    main_photo_unlocked:
+      (matchAfterRow?.main_photo_unlocked_at as string | null | undefined) != null,
+    all_photos_unlocked:
+      (matchAfterRow?.all_photos_unlocked_at as string | null | undefined) != null,
+  };
+
+  // 즉시 응답 반환 (텍스트 메시지는 바로 전달). 기존 message 필드는 그대로 두고
+  // match_after nested 필드 1개만 추가 → 구버전 FE 는 미지 필드로 무시.
+  res.status(201).json({ ...message, match_after: matchAfter });
 
   // 비동기로 번역 + TTS 처리
   if (sender.elevenlabs_voice_id) {

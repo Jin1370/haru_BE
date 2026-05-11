@@ -22,6 +22,14 @@ interface MatchSummary {
   all_photos_unlocked: boolean;
 }
 
+// mig 014 의 matches 신규 컬럼 (백필 미완/실패 매치는 NULL 가능).
+// `.select('*')` 가 자동으로 끌어오므로 별도 select 추가는 불필요.
+interface MatchRoundtripColumns {
+  round_trip_count: number | null;
+  main_photo_unlocked_at: string | null;
+  all_photos_unlocked_at: string | null;
+}
+
 const router = Router();
 
 router.use(authMiddleware);
@@ -96,15 +104,42 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
   // 보안 경계: Supabase Storage URL 은 public 이므로 FE 블러는 UX 보호일 뿐.
   //            all_photos_unlocked=false 인 경우 서버에서 photos 배열을 잘라
   //            메인 1장만 노출한다 (photos[0] 이 없으면 빈 배열).
+  //
+  // mig 014 이후 photo_access 산출 우선순위:
+  //   1차 = matches.*_unlocked_at IS NOT NULL (트리거가 단조 set 한 컬럼 진실)
+  //   폴백 = get_match_summaries_v2 RPC 의 *_unlocked (rt>=임계치 즉석 계산)
+  //          — 014b 백필 실패로 *_unlocked_at 이 NULL 인 매치에 대비.
+  // round_trip_count 도 컬럼 우선, NULL 이면 v2 RPC 결과, 그래도 없으면 0.
   const results = matches.map((match) => {
     const partnerId = match.user1_id === req.userId! ? match.user2_id : match.user1_id;
     const summary = summaryMap.get(match.id);
     const rawPartner = profileMap.get(partnerId);
 
+    const cols = match as unknown as MatchRoundtripColumns;
+    // `!= null` (loose) intentional: 트리거가 적용되기 전 mig 014 윈도우 동안
+    // 컬럼이 응답에 빠져 `undefined` 로 도착할 수 있다. `!== null` 은
+    // undefined 를 통과시켜 모든 매치가 unlock=true 로 응답되는
+    // 사진 노출 사고를 만든다 — null/undefined 둘 다 잠금 의미로 처리.
+    const mainUnlocked =
+      cols.main_photo_unlocked_at != null
+        ? true
+        : Boolean(summary?.main_photo_unlocked);
+    const allUnlocked =
+      cols.all_photos_unlocked_at != null
+        ? true
+        : Boolean(summary?.all_photos_unlocked);
+
     const photoAccess = {
-      main_photo_unlocked: Boolean(summary?.main_photo_unlocked),
-      all_photos_unlocked: Boolean(summary?.all_photos_unlocked),
+      main_photo_unlocked: mainUnlocked,
+      all_photos_unlocked: allUnlocked,
     };
+
+    // 백필 실패 매치(rt=NULL)는 0 으로 정규화. FE 의 photoAccessStore
+    // downgrade guard 가 잠금 역행을 차단하므로 0 으로 보내도 안전.
+    const roundTripCount =
+      cols.round_trip_count != null
+        ? cols.round_trip_count
+        : Number(summary?.round_trip_count ?? 0);
 
     const partner = rawPartner
       ? {
@@ -128,6 +163,7 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
       unmatched_at: (match.unmatched_at as string | null) ?? null,
       partner,
       photo_access: photoAccess,
+      round_trip_count: roundTripCount,
       last_message: summary?.last_message_id
         ? {
             id: summary.last_message_id,

@@ -81,6 +81,15 @@ export interface Message {
   created_at: string;
 }
 
+// mig 014 match-roundtrip-realtime: 메시지 POST 응답에 동봉되는 match-level
+// snapshot. 트리거(014c match_roundtrip_on_insert)가 INSERT 직후 동기 갱신한
+// matches 행을 즉시 SELECT 해서 만든 nested DTO. 구버전 FE는 미지 필드로 무시한다.
+export interface MatchAfter {
+  round_trip_count: number;
+  main_photo_unlocked: boolean;
+  all_photos_unlocked: boolean;
+}
+
 export interface Block {
   id: string;
   blocker_id: string;

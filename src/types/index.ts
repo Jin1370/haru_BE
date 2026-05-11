@@ -81,14 +81,12 @@ export interface Message {
   created_at: string;
 }
 
-// mig 014 match-roundtrip-realtime: 메시지 POST 응답에 동봉되는 match-level
-// snapshot. 트리거(014c match_roundtrip_on_insert)가 INSERT 직후 동기 갱신한
-// matches 행을 즉시 SELECT 해서 만든 nested DTO. 구버전 FE는 미지 필드로 무시한다.
-export interface MatchAfter {
-  round_trip_count: number;
-  main_photo_unlocked: boolean;
-  all_photos_unlocked: boolean;
-}
+// chat-audio-async-insert sprint: 메시지 POST 응답에서 match_after 제거.
+// mig 014 의 동봉 패턴은 BE 가 INSERT 직후 SELECT 한 matches snapshot 을
+// 응답에 nest 하던 흐름이었으나, 본 sprint 에서 POST 가 더 이상 동기 INSERT
+// 를 보장하지 않게 되면서 (voice clone 보유자는 stub 응답 + 비동기 INSERT)
+// snapshot 동봉 의미가 없어졌다. FE 는 realtime matches UPDATE 채널을 단일
+// 진실원으로 사용. 인터페이스 정의는 forward-compat 차원에서 유지하지 않음.
 
 export interface Block {
   id: string;

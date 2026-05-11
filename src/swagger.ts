@@ -425,12 +425,16 @@ export const swaggerDocument = {
       },
       post: {
         tags: ['Message'],
-        summary: '메시지 전송 (번역 + 음성 더빙 자동 처리)',
-        description: '텍스트 즉시 저장/응답, 음성 더빙 비동기 처리. 차단된 유저에게는 전송 불가.',
+        summary: '메시지 전송 (큐잉 → 비동기 INSERT)',
+        description:
+          'POST 는 stub 메시지(id=확정된 UUID, audio_status=pending)를 즉시 반환하며 DB INSERT 는 하지 않는다. ' +
+          '비동기 파이프라인(번역 + ElevenLabs TTS + Storage 업로드)이 완료되면 마지막에 한 번만 INSERT — ' +
+          'realtime INSERT 가 1회만 발생해 expo-audio 의 mid-session player resource 회수 트리거를 회피한다. ' +
+          '파이프라인 실패 시에도 audio_url=null, audio_status=failed 로 INSERT 되어 텍스트는 전달된다.',
         parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['text'], properties: { text: { type: 'string', minLength: 1, maxLength: 1000 } } } } } },
         responses: {
-          201: { description: '전송 성공', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
+          202: { description: '큐잉 성공 — INSERT 는 realtime 으로 도착', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
           400: { description: 'text 누락/초과', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '매치 비참여자 / 차단됨', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
@@ -447,18 +451,10 @@ export const swaggerDocument = {
         },
       },
     },
-    '/api/matches/{messageId}/retry': {
-      post: {
-        tags: ['Message'],
-        summary: '실패한 음성 더빙 재시도',
-        parameters: [{ name: 'messageId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
-        responses: {
-          200: { description: '재시도 시작', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string' } } } } } },
-          400: { description: 'failed 상태 아님 / voice clone 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          404: { description: '메시지 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-        },
-      },
-    },
+    // chat-audio-async-insert sprint: /api/matches/{messageId}/retry 제거.
+    // mid-session UPDATE 패턴 폐기로 retry 의 status 전이 자체가 없어졌다.
+    // 실패한 메시지는 audio_url=null, audio_status='failed' 로 INSERT 되며,
+    // 사용자가 동일 텍스트로 새 메시지를 보내 재시도한다.
 
     // ── Block ──
     '/api/block': {

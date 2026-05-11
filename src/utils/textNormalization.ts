@@ -99,11 +99,14 @@ export function normalizeSlangInput(text: string, lang?: NormalizationLang): str
 //   * 길이 임계는 false positive 방지에 필요한 최소값 (ha 단독 매칭 X, 2회 이상부터).
 
 const LAUGHTER_RULES: NormalizationRule[] = [
-  // Korean — Hangul Compatibility Jamo(ㅋ/ㅎ) 단독 사용은 일반 한국어 텍스트에 등장하지 않으므로
-  // 단일 문자(ㅋ, ㅎ) 도 웃음으로 안전하게 매칭. {1,}로 둘 경우 single ㅋ/ㅎ가 raw 로 통과해
-  // TTS 가 "붸-" 등 묘한 음을 생성하는 사고 방지.
-  { pattern: /ㅋ+/g, replacement: '[laughs]' },
-  { pattern: /ㅎ+/g, replacement: '[laughs]' },
+  // Korean — Hangul Compatibility Jamo(ㅋ/ㅎ) 단독·연속 사용은 일반 한국어 텍스트에 등장하지 않으므로
+  // 단일 문자도 웃음으로 안전하게 매칭. {1,}로 둘 경우 single ㅋ/ㅎ가 raw 로 통과해 TTS 가 "붸-"
+  // 등 묘한 음을 생성하는 사고 방지.
+  // 단, **다른 자음 자모가 바로 앞에 오면 약어의 일부**(예: ㅇㅋ=오케이, ㄴㅎ 등) 로 보고 미매칭 —
+  // 약어 형태는 Gemini 가 cross-language 에서 자연 번역(ㅇㅋ→OK/オッケー). lookbehind `(?<![ㄱ-ㅎ])`
+  // 로 `ㅇ`·`ㄴ`·다른 자음 직후의 ㅋ/ㅎ 를 제외 (음절(`안`/`녕` 등) 직후는 정상 매칭 — 그건 `ㄱ-ㅎ` 범위 밖).
+  { pattern: /(?<![ㄱ-ㅎ])ㅋ+/g, replacement: '[laughs]' },
+  { pattern: /(?<![ㄱ-ㅎ])ㅎ+/g, replacement: '[laughs]' },
   { pattern: /푸하하+/g, replacement: '[laughs]' },
   { pattern: /와하하+/g, replacement: '[laughs]' },
   // Japanese

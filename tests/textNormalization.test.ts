@@ -172,6 +172,14 @@ describe('prepareTextForTTS — laughter [laughs]', () => {
       expect(prepareTextForTTS('ㅎ')).toBe('[laughs]');
       expect(prepareTextForTTS('ㅎㅎㅎ')).toBe('[laughs]');
     });
+    it('다른 자모 직후의 ㅋ/ㅎ 는 약어로 간주하고 미매칭 (ㅇㅋ=오케이 등)', () => {
+      expect(prepareTextForTTS('ㅇㅋ')).toBe('ㅇㅋ');
+      expect(prepareTextForTTS('ㅇㅎ')).toBe('ㅇㅎ');
+    });
+    it('음절(안/녕 등) 직후의 ㅋ/ㅎ 는 정상 매칭', () => {
+      expect(prepareTextForTTS('안녕ㅋㅋ')).toBe('안녕[laughs]');
+      expect(prepareTextForTTS('좋아ㅎㅎ')).toBe('좋아[laughs]');
+    });
     it('푸하하 / 와하하', () => {
       expect(prepareTextForTTS('푸하하')).toBe('[laughs]');
       expect(prepareTextForTTS('와하하하하')).toBe('[laughs]');

@@ -3,6 +3,7 @@ import { supabase } from '../config/supabase';
 import { uploadFile } from '../services/storage';
 import { synthesizeSpeech } from '../services/elevenlabs';
 import { translateMessage } from '../services/translation';
+import { normalizeSlangInput } from '../utils/textNormalization';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
 import { sendMessageSchema, messageQuerySchema } from '../schemas/message';
@@ -233,17 +234,22 @@ async function processMessageAudio(
   emotion: Exclude<Emotion, 'neutral'> | null
 ): Promise<void> {
   try {
-    let textToSynthesize = text;
-    let translatedText: string | null = null;
+    // 번역/TTS 진입 직전에 발신자 언어 기준 슬랭 length-capping.
+    // 매치 단계에서 동일 대표언어 후보는 하드 제외되므로 정상 흐름에선 source≠target.
+    // 사용자가 대화 중 대표언어를 전환한 경우 source==target 이 될 수 있으나,
+    // 이 경로에서도 텍스트 내용이 수신자 언어와 다를 수 있으므로 Gemini 를 항상 경유한다
+    // (이미 같은 언어면 시스템 프롬프트 룰로 변형 없이 반환됨).
+    const normalizedSource = normalizeSlangInput(
+      text,
+      sourceLanguage as 'ko' | 'ja' | 'th' | 'en' | 'hi',
+    );
 
-    if (sourceLanguage !== targetLanguage) {
-      const { translation } = await translateMessage({
-        text,
-        targetLanguage,
-      });
-      textToSynthesize = translation;
-      translatedText = translation;
-    }
+    const { translation } = await translateMessage({
+      text: normalizedSource,
+      targetLanguage,
+    });
+    const textToSynthesize = translation;
+    const translatedText = translation;
 
     const audio = await synthesizeSpeech(textToSynthesize, voiceId, emotion);
 

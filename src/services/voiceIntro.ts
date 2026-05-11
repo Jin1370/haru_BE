@@ -2,6 +2,7 @@ import { supabase } from '../config/supabase';
 import { uploadFile, deleteFile, extractPath } from './storage';
 import { synthesizeSpeech } from './elevenlabs';
 import { translateVoiceIntro } from './translation';
+import { normalizeSlangInput } from '../utils/textNormalization';
 import {
   VOICE_INTRO_SLOT_LANGUAGES,
   type VoiceIntroSlotLanguage,
@@ -171,6 +172,13 @@ export async function generateVoiceIntroAudios(
 ): Promise<void> {
   const authorLang = normalizeAuthorLanguage(authorLanguageRaw);
 
+  // voice_slang_normalization sprint (2026-05-11):
+  //   작성자 voice_intro 텍스트의 슬랭 length-capping. preset 경로는 카탈로그
+  //   텍스트라 정규화 불요(presetTranslations 분기에서 사용 안 됨).
+  const normalizedIntroText = presetTranslations
+    ? voiceIntroText
+    : normalizeSlangInput(voiceIntroText, authorLang);
+
   // (1) 시작 시점 옛 URL snapshot (cleanup 용)
   const oldUrls = await snapshotOldUrls(userId);
 
@@ -178,7 +186,7 @@ export async function generateVoiceIntroAudios(
   // preset 경로 (voice-intro-preset-bypass sprint) 는 BE 카탈로그가 ko/ja/en 3개를
   // 모두 보유하므로 이 단계에서 3슬롯을 한 번에 commit. 기존 path 는 작성자 슬롯만 commit.
   const initialTranslations: VoiceIntroTranslations =
-    presetTranslations ?? { [authorLang]: voiceIntroText };
+    presetTranslations ?? { [authorLang]: normalizedIntroText };
   await supabase
     .from('profiles')
     .update({
@@ -195,12 +203,12 @@ export async function generateVoiceIntroAudios(
   if (presetTranslations) {
     slotTexts = presetTranslations;
   } else {
-    slotTexts = { [authorLang]: voiceIntroText };
+    slotTexts = { [authorLang]: normalizedIntroText };
     const targetLangs = VOICE_INTRO_SLOT_LANGUAGES.filter((l) => l !== authorLang);
     if (targetLangs.length > 0) {
       try {
         const { translations } = await translateVoiceIntro({
-          text: voiceIntroText,
+          text: normalizedIntroText,
           sourceLanguage: authorLang,
           targetLanguages: targetLangs,
         });

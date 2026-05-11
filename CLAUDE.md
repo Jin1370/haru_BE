@@ -18,7 +18,7 @@ Express 5 + Supabase + ElevenLabs 기반 크로스언어 소개팅 API 서버.
 
 **인증 흐름**: Google OAuth id_token → Supabase `signInWithIdToken` → JWT 발급. 이후 요청은 `authMiddleware`에서 Supabase JWT secret으로 검증하여 `req.userId`(= `sub` claim) 세팅.
 
-**메시지 파이프라인**: 텍스트 메시지를 즉시 저장/응답한 뒤, 발신자에게 ElevenLabs voice clone이 있으면 비동기로 번역 → TTS → Storage 업로드 처리. 송수신자의 `profiles.language` 값이 다르면 Vertex AI Gemini 2.5 Flash로 번역(존댓말/초면 컨텍스트 시스템 프롬프트, `BLOCK_ONLY_HIGH` safety, `temperature=0.3`) → `translated_text`에 저장, 이후 ElevenLabs `eleven_v3` TTS(`stability=0.4`, emotion 프리픽스 지원)로 발신자 클론 보이스 합성. 같은 언어면 번역 생략하고 원문 그대로 TTS. `audio_status` 필드로 진행 상태 추적. 차단된 유저 간 메시지 전송은 403 차단.
+**메시지 파이프라인**: 텍스트 메시지를 즉시 저장/응답한 뒤, 발신자에게 ElevenLabs voice clone이 있으면 비동기로 번역 → TTS → Storage 업로드 처리. **송수신자 언어 일치 여부와 무관하게** Vertex AI Gemini 2.5 Flash로 번역(register-preserving 시스템 프롬프트 — 소스가 캐주얼이면 캐주얼, 명백히 정중하면 정중. ko 해요체 default + 반말 허용, ja です/ます default + 캐주얼 허용, en 회화체, zh 您 default + 你 허용. `BLOCK_ONLY_HIGH` safety, `temperature=0.3`) → `translated_text`에 저장, 이후 ElevenLabs `eleven_v3` TTS(`stability=0.4`, emotion 프리픽스 지원)로 발신자 클론 보이스 합성. 매치 단계에서 동일 대표언어 후보는 이미 하드 제외되므로 정상 흐름에선 source≠target이지만, 사용자가 대화 중 `profiles.language`를 전환하면 source==target이 될 수 있다 — 이 경우에도 텍스트가 수신자의 현재 언어와 다른 스크립트일 수 있어 (예: 일본어→한국어 전환 후에도 발신자가 히라가나 텍스트 전송) Gemini를 항상 경유한다. 이미 타겟 언어인 텍스트는 시스템 프롬프트 룰로 변형 없이 반환됨. `audio_status` 필드로 진행 상태 추적. 차단된 유저 간 메시지 전송은 403 차단.
 
 **Voice intro 오디오** (구 bio): 프로필의 `voice_intro` 텍스트 작성/수정 시 voice clone이 있으면 비동기로 TTS 생성하여 `voice_intro_audio_url`에 저장. 프로필 조회 시 추가 API 호출 없이 URL 반환. 버킷은 `voice-intro-audio` (mig 007).
 

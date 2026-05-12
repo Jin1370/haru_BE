@@ -154,6 +154,13 @@ export const swaggerDocument = {
           audio_url: { type: 'string', format: 'uri', nullable: true },
           audio_status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
           read_at: { type: 'string', format: 'date-time', nullable: true },
+          listened_at: {
+            type: 'string',
+            format: 'date-time',
+            nullable: true,
+            description:
+              'voice-first-message-gate (mig 015): 수신자가 음성을 1회 끝까지 재생한 시각. NULL = 미청취 → FE 가 텍스트를 숨기고 편지 UI 만 노출. 본인 발신 메시지는 항상 null.',
+          },
           created_at: { type: 'string', format: 'date-time' },
         },
       },
@@ -338,18 +345,15 @@ export const swaggerDocument = {
     '/api/voice/clone': {
       post: {
         tags: ['Voice'],
-        summary: '음성 샘플 업로드 + ElevenLabs 클론 생성',
+        summary: '음성 샘플 업로드 + ElevenLabs 클론 생성 (신규 등록 / 재등록 덮어쓰기)',
+        description:
+          '기존 voice_id 가 있을 경우 새 clone 생성 성공 후 옛 voice 를 ElevenLabs 측에서 자동 정리한다. ' +
+          '단독 삭제 라우트는 의도적으로 제공하지 않음 — voice-clone 없는 발신자 메시지가 채팅에서 "메시지 준비 중.." 영구 락을 만드는 회귀를 방지. ' +
+          '데이터 삭제권은 계정 탈퇴 라우트가 보장한다.',
         requestBody: { required: true, content: { 'multipart/form-data': { schema: { type: 'object', required: ['audio'], properties: { audio: { type: 'string', format: 'binary' } } } } } },
         responses: {
           200: { description: '클론 생성 완료', content: { 'application/json': { schema: { type: 'object', properties: { voice_id: { type: 'string' }, status: { type: 'string' } } } } } },
           500: { description: '클론 생성 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-        },
-      },
-      delete: {
-        tags: ['Voice'],
-        summary: '음성 클론 삭제',
-        responses: {
-          200: { description: '삭제 성공', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string' } } } } } },
         },
       },
     },
@@ -448,6 +452,25 @@ export const swaggerDocument = {
         responses: {
           200: { description: '읽음 처리 완료', content: { 'application/json': { schema: { type: 'object', properties: { read_count: { type: 'integer' } } } } } },
           403: { description: '매치 비참여자', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/matches/{matchId}/messages/{messageId}/listened': {
+      post: {
+        tags: ['Message'],
+        summary: '메시지 음성 청취 완료 마킹 (수신자 전용, idempotent)',
+        description:
+          'voice-first-message-gate sprint: 수신자가 음성을 1회 끝까지 재생한 시점에 FE 가 호출. ' +
+          'BE 는 messages.listened_at 를 now() 로 단 한 번만 set 하며, 이후 호출은 그대로 현재 row 반환. ' +
+          'Realtime UPDATE 로 본인의 다른 기기에도 자동 전파되어 텍스트 노출이 동기화된다.',
+        parameters: [
+          { name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+          { name: 'messageId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+        ],
+        responses: {
+          200: { description: '업데이트된 (또는 이미 listened 상태인) Message row', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
+          403: { description: '매치 비참여자 또는 송신자 본인 호출', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: '메시지 없음 또는 매치 불일치', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },

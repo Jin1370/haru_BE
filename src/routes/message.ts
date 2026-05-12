@@ -38,10 +38,17 @@ router.get('/:matchId/messages', validateQuery(messageQuerySchema), async (req: 
     return;
   }
 
+  // voice-first-message-gate sprint follow-up: 수신자에게는 audio_status='ready'
+  // 메시지만 노출한다. failed/pending(voice-clone 미보유 발신자) 메시지는 청취
+  // 자체가 불가능 → listened_at 영구 NULL → "메시지 준비 중.." 문구가 영구 락
+  // 신호로 굳어지는 거짓 신호 문제 해결. 본인 발신 메시지는 status 무관하게
+  // 노출 — 본인은 본인 메시지를 알아야 재전송 등 대응 가능. 별도 송신자 측
+  // 실패 인디케이터는 후속 카드로 분리.
   let query = supabase
     .from('messages')
     .select('*')
     .eq('match_id', matchId)
+    .or(`sender_id.eq.${req.userId!},audio_status.eq.ready`)
     .order('created_at', { ascending: false })
     .limit(limit);
 
@@ -243,6 +250,89 @@ router.patch('/:matchId/messages/read', async (req: AuthRequest, res: Response) 
   }
 
   res.json({ read_count: count || 0 });
+});
+
+// voice-first-message-gate sprint: 수신자가 메시지 음성을 1회 끝까지 재생했음을
+// 서버에 기록. idempotent — 이미 listened_at 가 set 되어 있으면 현 row 그대로
+// 반환. 송신자 본인이 호출하면 403 (본인은 게이팅 대상이 아니므로 잘못된 호출).
+// 다른 매치/존재하지 않는 메시지 시도 시 404.
+//
+// 본 라우트는 chat-audio-async-insert 의 "mid-session UPDATE 금지" 원칙의 예외
+// 이지만, listened_at 한 컬럼에 한정되며 audio_status / audio_url 은 절대 건드리지
+// 않는다 → expo-audio resource 회수 트리거와 무관.
+router.post('/:matchId/messages/:messageId/listened', async (req: AuthRequest, res: Response) => {
+  const { matchId, messageId } = req.params;
+
+  // 1) 매치 참여자 검증 (기존 GET/POST 와 동일 패턴)
+  const { data: match } = await supabase
+    .from('matches')
+    .select('id')
+    .eq('id', matchId)
+    .or(`user1_id.eq.${req.userId!},user2_id.eq.${req.userId!}`)
+    .single();
+
+  if (!match) {
+    res.status(403).json({ error: 'Not a member of this match' });
+    return;
+  }
+
+  // 2) 메시지 조회 + match_id 정합성 검증
+  const { data: msg, error: selectError } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('id', messageId)
+    .eq('match_id', matchId)
+    .single();
+
+  if (selectError || !msg) {
+    res.status(404).json({ error: 'Message not found' });
+    return;
+  }
+
+  // 3) 송신자 본인 호출 차단 — 본인은 게이팅 대상이 아니므로 잘못된 호출.
+  if (msg.sender_id === req.userId!) {
+    res.status(403).json({ error: 'Sender cannot mark own message as listened' });
+    return;
+  }
+
+  // 4) Idempotent — 이미 listened 상태면 현재 row 그대로 반환.
+  if (msg.listened_at) {
+    res.json(msg);
+    return;
+  }
+
+  // 5) listened_at = now() 단일 컬럼 UPDATE.
+  //    조건절에 listened_at IS NULL 을 포함해 동시 호출(여러 기기) 시에도 가장
+  //    빠른 한 번만 실제 UPDATE 한다. 이미 set 된 후 도착한 UPDATE 는 0 rows
+  //    affected → .single() 이 실패 → refresh select 분기로 idempotent 보장.
+  const { data: updated, error: updateError } = await supabase
+    .from('messages')
+    .update({ listened_at: new Date().toISOString() })
+    .eq('id', messageId)
+    .is('listened_at', null)
+    .select()
+    .single();
+
+  if (updateError || !updated) {
+    // 동시 UPDATE 로 row 가 이미 set 되어 .single() 이 0 rows 로 실패한 경우
+    // → 재 SELECT 후 반환. 단, refreshed.listened_at 가 여전히 NULL 이면 진짜
+    // UPDATE 실패 (예: 마이그레이션 미적용으로 컬럼이 없는 schema drift) 이므로
+    // silent-success 로 가리지 않고 500 반환. QA 검증 단계에서 발견된 회귀
+    // 시나리오 — 라이브 DB 에 컬럼이 없는데 200 으로 응답되던 케이스 차단.
+    const { data: refreshed } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('id', messageId)
+      .single();
+    if (refreshed && refreshed.listened_at) {
+      res.json(refreshed);
+      return;
+    }
+    res.status(500).json({ error: updateError?.message ?? 'Listened update failed' });
+    return;
+  }
+
+  res.json(updated);
 });
 
 // chat-audio-async-insert sprint: retry 라우트 제거.

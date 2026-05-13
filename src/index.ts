@@ -18,7 +18,40 @@ import adminRoutes from './routes/admin';
 
 export const app = express();
 
-app.use(cors());
+// CORS — production 에서는 화이트리스트 strict, 개발 환경은 와이드 오픈 유지.
+// CORS_ALLOWED_ORIGINS env 가 set 되어 있으면 콤마 분리 origin 만 허용.
+// 모바일 앱(Expo native)은 browser 가 아니므로 CORS 영향 없음 — origin null 도 허용.
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+if (allowedOrigins.length > 0) {
+  app.use(
+    cors({
+      origin: (origin, callback) => {
+        // origin === undefined: 모바일 native / curl / 동일 출처 → 허용
+        if (!origin || allowedOrigins.includes(origin)) {
+          callback(null, true);
+        } else {
+          callback(new Error(`CORS blocked: ${origin}`));
+        }
+      },
+      credentials: true,
+      allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'X-Admin-Secret',
+        'X-Admin-Impersonate',
+      ],
+    }),
+  );
+  console.log(`[startup] CORS whitelist: ${allowedOrigins.join(', ')}`);
+} else {
+  // 로컬 개발/테스트 — 전체 허용 (CORS_ALLOWED_ORIGINS 미설정 시).
+  app.use(cors());
+}
+
 app.use(express.json());
 
 // Swagger

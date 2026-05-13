@@ -1,0 +1,25 @@
+# Build 컨텍스트에서 제외 — image 크기 ↓ + 보안 (.env, credentials/ 노출 방지)
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.local
+.env.*.local
+credentials/
+*.gcp.json
+*-service-account*.json
+*.log
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+coverage
+.claude
+supabase
+scripts
+tests
+*.md
+fly.toml
+Dockerfile
+.dockerignore

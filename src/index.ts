@@ -21,6 +21,20 @@ export const app = express();
 // CORS — production 에서는 화이트리스트 strict, 개발 환경은 와이드 오픈 유지.
 // CORS_ALLOWED_ORIGINS env 가 set 되어 있으면 콤마 분리 origin 만 허용.
 // 모바일 앱(Expo native)은 browser 가 아니므로 CORS 영향 없음 — origin null 도 허용.
+//
+// glob 패턴 (* 와일드카드) 지원 — Vercel 의 deployment-specific URL 대응 위해.
+//   예: 'https://haruadmin-*-sejin-ims-projects.vercel.app' 는
+//       haruadmin-7rupppulw-sejin-ims-projects.vercel.app 등 매 배포 URL 매칭.
+function escapeRegex(s: string): string {
+  return s.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+}
+function originMatches(origin: string, pattern: string): boolean {
+  if (pattern === origin) return true;
+  if (!pattern.includes('*')) return false;
+  const regex = new RegExp('^' + pattern.split('*').map(escapeRegex).join('.*') + '$');
+  return regex.test(origin);
+}
+
 const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS ?? '')
   .split(',')
   .map((s) => s.trim())
@@ -31,7 +45,11 @@ if (allowedOrigins.length > 0) {
     cors({
       origin: (origin, callback) => {
         // origin === undefined: 모바일 native / curl / 동일 출처 → 허용
-        if (!origin || allowedOrigins.includes(origin)) {
+        if (!origin) {
+          callback(null, true);
+          return;
+        }
+        if (allowedOrigins.some((p) => originMatches(origin, p))) {
           callback(null, true);
         } else {
           callback(new Error(`CORS blocked: ${origin}`));

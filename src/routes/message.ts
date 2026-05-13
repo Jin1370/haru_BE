@@ -13,6 +13,7 @@ import { authMiddleware } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
 import { sendMessageSchema, messageQuerySchema } from '../schemas/message';
 import { AuthRequest, Emotion } from '../types';
+import { sendPushToUser } from '../services/pushNotifications';
 import { randomUUID } from 'crypto';
 
 const router = Router();
@@ -132,8 +133,9 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
   }
 
   // 발신자/수신자 프로필 조회 (mig 009 이후 단일 scalar `language` 사용)
+  // push-notifications sprint: sender_name 푸시 페이로드용 display_name 동시 조회.
   const [senderResult, recipientResult] = await Promise.all([
-    supabase.from('profiles').select('language, elevenlabs_voice_id').eq('id', req.userId!).single(),
+    supabase.from('profiles').select('language, elevenlabs_voice_id, display_name').eq('id', req.userId!).single(),
     supabase.from('profiles').select('language').eq('id', recipientId).single(),
   ]);
 
@@ -141,6 +143,7 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
   const recipient = recipientResult.data;
   const senderLang = (sender?.language as string | null) ?? null;
   const recipientLang = (recipient?.language as string | null) ?? null;
+  const senderName = (sender?.display_name as string | null) ?? '';
 
   if (!sender || !recipient || !senderLang || !recipientLang) {
     res.status(404).json({ error: 'Profile not found' });
@@ -181,6 +184,12 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
       return;
     }
     res.status(201).json(row);
+
+    // push-notifications sprint: 동기 INSERT 경로 (voice-clone 미보유 발신자) 의
+    // 푸시 발송. INSERT 가 'pending' 상태로 저장되지만 voice-first-message-gate
+    // 정책상 수신자 GET 에서 필터링되어 안 보이는 메시지 — 푸시도 보내지 않는다.
+    // (failed 메시지와 같은 정합성: "수신자에게 안 보이는 메시지 = 푸시 미발송")
+    // 사실상 voice clone 미보유 발신자의 메시지는 푸시 미발송 분기.
     return;
   }
 
@@ -207,6 +216,8 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
     messageId,
     matchId,
     senderId: req.userId!,
+    senderName,
+    recipientId,
     text,
     senderLang,
     recipientLang,
@@ -349,6 +360,8 @@ interface ProcessJob {
   messageId: string;
   matchId: string;
   senderId: string;
+  senderName: string;
+  recipientId: string;
   text: string;
   senderLang: string;
   recipientLang: string;
@@ -362,6 +375,8 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
     messageId,
     matchId,
     senderId,
+    senderName,
+    recipientId,
     text,
     senderLang,
     recipientLang,
@@ -431,7 +446,18 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
 
     if (insertError) {
       console.error(`[processAndInsertMessage] insert failed messageId=${messageId}:`, insertError);
+      return;
     }
+
+    // push-notifications sprint: 'ready' INSERT 성공 직후 푸시 발송.
+    // voice-first-message-gate 정책상 'ready' 메시지만 수신자에게 노출되므로
+    // 'failed' 분기에서는 푸시 미발송 (거짓 신호 차단).
+    sendPushToUser(recipientId, {
+      type: 'message',
+      match_id: matchId,
+      sender_id: senderId,
+      sender_name: senderName,
+    }).catch((err) => console.error('[sendPushToUser message]', err));
   } catch (error) {
     console.error(`[processAndInsertMessage] pipeline error messageId=${messageId}:`, error);
     console.dir(error, { depth: null });

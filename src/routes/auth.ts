@@ -393,6 +393,22 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
     return;
   }
 
+  // (1.5) push-notifications sprint: device_tokens 동기 DELETE.
+  // mig 016 의 FK CASCADE 는 auth.users 가 실제 DELETE 될 때만 발화하는데,
+  // 본 라우트는 auth.users 를 anonymize 만 하므로 CASCADE 가 fire 하지 않는다.
+  // 미정리 시 탈퇴한 사용자에게 푸시가 계속 발송될 수 있고 expo_push_token
+  // (개인 단말 식별자) 이 서버에 잔존해 GDPR/PIPA 데이터 삭제권 위반.
+  // cleanup task (fire-and-forget) 가 아니라 anonymize 이전 동기 경로로 실행
+  // — 실패 시 500 응답으로 노출하여 inconsistent state 를 호출자가 인지.
+  const { error: tokenErr } = await supabase
+    .from('device_tokens')
+    .delete()
+    .eq('user_id', userId);
+  if (tokenErr) {
+    res.status(500).json({ error: tokenErr.message });
+    return;
+  }
+
   // (2) Anonymize the auth.users row so the user can no longer authenticate
   // and their original email becomes free for re-registration. Email goes to
   // a non-routable .local address; password is set to 32 bytes of random hex

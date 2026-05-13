@@ -13,6 +13,8 @@ import messageRoutes from './routes/message';
 import blockRoutes from './routes/block';
 import reportRoutes from './routes/report';
 import preferenceRoutes from './routes/preference';
+import notificationsRoutes from './routes/notifications';
+import adminRoutes from './routes/admin';
 
 export const app = express();
 
@@ -37,6 +39,14 @@ app.use('/api/matches', messageRoutes);
 app.use('/api/block', blockRoutes);
 app.use('/api/report', reportRoutes);
 app.use('/api/preferences', preferenceRoutes);
+app.use('/api/notifications', notificationsRoutes);
+
+// dev/QA 어드민 라우트 — env.admin.dashboardEnabled=true 일 때만 mount.
+// 출시 빌드에선 ADMIN_DASHBOARD_ENABLED 미설정 → 라우트 자체가 부재.
+if (env.admin.dashboardEnabled) {
+  app.use('/api/admin', adminRoutes);
+  console.warn('[startup] /api/admin mounted (ADMIN_DASHBOARD_ENABLED=true). 출시 빌드에서는 disable 필수.');
+}
 
 // Error handling
 app.use(errorMiddleware);

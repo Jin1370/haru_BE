@@ -28,4 +28,16 @@ export const env = {
     projectId: required('GCP_PROJECT_ID'),
     location: process.env.GCP_LOCATION || 'us-central1',
   },
+
+  // dev/QA 어드민 대시보드 — 출시 빌드에서는 ADMIN_DASHBOARD_ENABLED 미설정
+  // 으로 라우트/임퍼소네이션 경로 자체가 사라진다. ADMIN_SECRET 은 enabled
+  // 일 때만 required. 프로덕션에서 실수로 활성화 + 빈 시크릿 = 무제한 침해
+  // 시나리오를 차단.
+  admin: {
+    dashboardEnabled: process.env.ADMIN_DASHBOARD_ENABLED === 'true',
+    secret:
+      process.env.ADMIN_DASHBOARD_ENABLED === 'true'
+        ? required('ADMIN_SECRET')
+        : '',
+  },
 };

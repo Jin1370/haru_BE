@@ -4,6 +4,7 @@ import { authMiddleware } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
 import { swipeBodySchema, discoverQuerySchema, quotaQuerySchema } from '../schemas/swipe';
 import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
+import { sendPushToUser } from '../services/pushNotifications';
 
 // 시청자 언어 → 보이스 인트로 슬롯 매핑 (mig 011).
 // ko/ja/en 활성. th/hi/그 외/null 은 'en' 폴백 (FE 의 영문 강제 정책과 일관).
@@ -323,7 +324,7 @@ router.post('/swipe', validateBody(swipeBodySchema), async (req: AuthRequest, re
     return;
   }
 
-  let match = null;
+  let match: { id: string; user1_id: string; user2_id: string } | null = null;
   if (direction === 'like') {
     const { data: reciprocal } = await supabase
       .from('swipes')
@@ -352,6 +353,39 @@ router.post('/swipe', validateBody(swipeBodySchema), async (req: AuthRequest, re
         match = existing;
       } else if (!matchError) {
         match = newMatch;
+      }
+
+      // push-notifications sprint: 매치 성사 시 양쪽 사용자에게 푸시 발송.
+      // 능동 like 한 사람도 "상대도 좋아함" 알림을 받는 표준 데이팅앱 UX.
+      // unmatch 후 재match (소프트 삭제 후 23505 fallback) 케이스에도 발송 — 매치 부활도 알림 가치 있음.
+      if (match) {
+        // 양쪽 display_name 조회 — 양쪽 모두에게 상대 이름이 들어간 푸시 발송.
+        const matchId = match.id;
+        supabase
+          .from('profiles')
+          .select('id, display_name')
+          .in('id', [req.userId!, swiped_id])
+          .then(({ data: profiles }) => {
+            if (!profiles) return;
+            const me = profiles.find((p: any) => p.id === req.userId!);
+            const other = profiles.find((p: any) => p.id === swiped_id);
+            const myName = (me?.display_name as string | null) ?? '';
+            const otherName = (other?.display_name as string | null) ?? '';
+
+            sendPushToUser(req.userId!, {
+              type: 'match',
+              match_id: matchId,
+              matched_user_id: swiped_id,
+              matched_name: otherName,
+            }).catch((err) => console.error('[sendPushToUser match→swiper]', err));
+
+            sendPushToUser(swiped_id, {
+              type: 'match',
+              match_id: matchId,
+              matched_user_id: req.userId!,
+              matched_name: myName,
+            }).catch((err) => console.error('[sendPushToUser match→swiped]', err));
+          });
       }
     }
   }

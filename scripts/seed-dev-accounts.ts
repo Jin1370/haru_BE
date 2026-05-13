@@ -69,7 +69,9 @@ const PERSONAS: Persona[] = [
     gender: 'female',
     nationality: 'KR',
     language: 'ko',
-    interests: ['카페투어', '여행', '사진'],
+    // interests 는 canonical ID (haru_FE/src/constants/interests.ts) 로 저장.
+    // FE 가 viewer 의 locale 로 i18n 번역해 표시 (interestOptions.<id>).
+    interests: ['cafe', 'travel', 'photography'],
     phrase_id: 'taste-1',
   },
   {
@@ -78,7 +80,7 @@ const PERSONAS: Persona[] = [
     gender: 'female',
     nationality: 'KR',
     language: 'ko',
-    interests: ['독서', '영화', '요가'],
+    interests: ['reading', 'movies', 'yoga'],
     phrase_id: 'sincere-1',
   },
   {
@@ -87,7 +89,7 @@ const PERSONAS: Persona[] = [
     gender: 'female',
     nationality: 'KR',
     language: 'ko',
-    interests: ['운동', '쿠킹', '와인'],
+    interests: ['gym', 'cooking', 'wine'],
     phrase_id: 'flutter-1',
   },
   {
@@ -96,7 +98,7 @@ const PERSONAS: Persona[] = [
     gender: 'male',
     nationality: 'KR',
     language: 'ko',
-    interests: ['게임', '드라이브', '음악감상'],
+    interests: ['gaming', 'driving', 'music'],
     phrase_id: 'simple-1',
   },
   {
@@ -105,7 +107,7 @@ const PERSONAS: Persona[] = [
     gender: 'male',
     nationality: 'KR',
     language: 'ko',
-    interests: ['헬스', '러닝', '맛집'],
+    interests: ['gym', 'running', 'foodie'],
     phrase_id: 'confidence-1',
   },
   // --- ja 2F + 3M ---
@@ -115,7 +117,7 @@ const PERSONAS: Persona[] = [
     gender: 'female',
     nationality: 'JP',
     language: 'ja',
-    interests: ['カフェ巡り', '読書', '旅行'],
+    interests: ['cafe', 'reading', 'travel'],
     phrase_id: 'simple-2',
   },
   {
@@ -124,7 +126,7 @@ const PERSONAS: Persona[] = [
     gender: 'female',
     nationality: 'JP',
     language: 'ja',
-    interests: ['アニメ', '音楽', 'ピアノ'],
+    interests: ['anime', 'music', 'jpop'],
     phrase_id: 'aegyo-1',
   },
   {
@@ -133,7 +135,7 @@ const PERSONAS: Persona[] = [
     gender: 'male',
     nationality: 'JP',
     language: 'ja',
-    interests: ['映画', 'ジム', 'ワイン'],
+    interests: ['movies', 'gym', 'wine'],
     phrase_id: 'flutter-2',
   },
   {
@@ -142,7 +144,7 @@ const PERSONAS: Persona[] = [
     gender: 'male',
     nationality: 'JP',
     language: 'ja',
-    interests: ['サッカー', 'ギター', 'ラーメン'],
+    interests: ['soccer', 'music', 'foodie'],
     phrase_id: 'sincere-1',
   },
   {
@@ -151,7 +153,7 @@ const PERSONAS: Persona[] = [
     gender: 'male',
     nationality: 'JP',
     language: 'ja',
-    interests: ['登山', '写真', 'バイク'],
+    interests: ['hiking', 'photography', 'driving'],
     phrase_id: 'taste-1',
   },
 ];

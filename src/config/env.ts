@@ -7,24 +7,32 @@ dotenv.config();
 
 // Cloud 배포 (Fly/Vercel) 환경 대응:
 //   credentials/service-account.json 파일은 gitignored 라 빌드 이미지에 부재.
-//   GOOGLE_APPLICATION_CREDENTIALS_JSON env 에 JSON 전체 내용을 넣어두면
-//   startup 시점에 OS tmp dir 에 쓰고 GOOGLE_APPLICATION_CREDENTIALS 를 그 경로로 set.
-//   로컬 개발은 기존대로 GOOGLE_APPLICATION_CREDENTIALS 파일 경로 사용 — 이 분기 스킵.
+//   다음 env 중 하나로 service account JSON 을 받아 startup 에 OS tmp dir 에 작성:
+//     * GOOGLE_APPLICATION_CREDENTIALS_JSON_B64  ← 권장 (base64, Windows PowerShell argv 안전)
+//     * GOOGLE_APPLICATION_CREDENTIALS_JSON       ← 원본 JSON 문자열 (Unix shell 에서만 안전)
+//   로컬 개발은 GOOGLE_APPLICATION_CREDENTIALS 파일 경로 사용 (이 분기 스킵).
 //
 // 본 사이드 이펙트가 translation.ts (VertexAI 초기화) 보다 먼저 실행되도록
-// env.ts 의 module 최상단에서 수행. 모든 라우트가 env.ts 를 transitive 하게
-// import 하기 전 단계.
-const credentialsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
-if (credentialsJson && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+// env.ts 의 module 최상단에서 수행.
+const credentialsB64 = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON_B64;
+const credentialsJsonRaw = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+if ((credentialsB64 || credentialsJsonRaw) && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
   try {
-    JSON.parse(credentialsJson); // 형식 검증 (잘못된 JSON 이면 즉시 fail-fast)
+    const jsonText = credentialsB64
+      ? Buffer.from(credentialsB64, 'base64').toString('utf-8')
+      : (credentialsJsonRaw as string);
+    JSON.parse(jsonText); // 형식 검증 (잘못된 JSON 이면 즉시 fail-fast)
     const credentialsPath = join(tmpdir(), 'gcp-service-account.json');
-    writeFileSync(credentialsPath, credentialsJson, { mode: 0o600 });
+    writeFileSync(credentialsPath, jsonText, { mode: 0o600 });
     process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
-    console.log(`[env] GCP credentials written from env → ${credentialsPath}`);
+    console.log(
+      `[env] GCP credentials written from ${credentialsB64 ? 'B64' : 'JSON'} env → ${credentialsPath}`,
+    );
   } catch (err) {
-    console.error('[env] GOOGLE_APPLICATION_CREDENTIALS_JSON 파싱/쓰기 실패:', err);
-    throw new Error('Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON');
+    console.error('[env] GCP credentials env 파싱/쓰기 실패:', err);
+    throw new Error(
+      'Invalid GCP credentials env. Use GOOGLE_APPLICATION_CREDENTIALS_JSON_B64 (base64-encoded JSON) for cloud deploys.',
+    );
   }
 }
 

@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { supabase } from '../config/supabase';
 import { authMiddleware } from '../middleware/auth';
 import { validateQuery } from '../middleware/validate';
-import { AuthRequest } from '../types';
+import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
+import { pickViewerSlot } from './swipe';
 
 const matchListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional().default(20),
@@ -215,6 +216,69 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
   });
 
   res.json(results);
+});
+
+// 채팅 상대의 부가 프로필 (birth_date / interests / 시청자 언어 슬롯 보이스
+// 인트로 URL). 디스커버와 정합을 맞추기 위해 voice_intro_audio_url 응답 키는
+// viewer 의 profiles.language → pickViewerSlot 매핑 결과로 골라 미러한다.
+// 종전에는 FE 가 supabase 에서 직접 단일 voice_intro_audio_url 컬럼을 select
+// 했고, 그 컬럼은 mig 011 의 정의상 "작성자 언어 슬롯 미러" 라 시청자가
+// 자기 언어가 아닌 작성자 언어로 듣게 되는 비대칭이 있었다.
+//
+// tombstone 매치(unmatched/partner deleted)도 통과시킨다 — 채팅 화면이 종료
+// 상태에서도 과거 partner detail 모달을 열 수 있도록(현재 FE 는 막고 있지만
+// 라우트 차원에서 정책을 강제하지 않는다, /api/matches 와 일관). 활성 여부
+// 분기가 필요해지면 호출처에서 컨트롤한다.
+router.get('/:matchId/partner', async (req: AuthRequest, res: Response) => {
+  const { matchId } = req.params;
+  const userId = req.userId!;
+
+  const { data: match, error: matchErr } = await supabase
+    .from('matches')
+    .select('user1_id, user2_id')
+    .eq('id', matchId)
+    .or(`user1_id.eq.${userId},user2_id.eq.${userId}`)
+    .maybeSingle();
+  if (matchErr) {
+    res.status(500).json({ error: matchErr.message });
+    return;
+  }
+  if (!match) {
+    res.status(404).json({ error: 'Match not found' });
+    return;
+  }
+
+  const partnerId = match.user1_id === userId ? match.user2_id : match.user1_id;
+
+  const [viewerResult, partnerResult] = await Promise.all([
+    supabase.from('profiles').select('language').eq('id', userId).maybeSingle(),
+    supabase
+      .from('profiles')
+      .select('birth_date, interests, voice_intro_audio_urls')
+      .eq('id', partnerId)
+      .maybeSingle(),
+  ]);
+
+  if (partnerResult.error) {
+    res.status(500).json({ error: partnerResult.error.message });
+    return;
+  }
+  if (!partnerResult.data) {
+    res.status(404).json({ error: 'Partner profile not found' });
+    return;
+  }
+
+  const viewerLanguage = (viewerResult.data?.language as string | null) ?? null;
+  const slot = pickViewerSlot(viewerLanguage);
+  const slotUrls = (partnerResult.data.voice_intro_audio_urls ?? {}) as Partial<
+    Record<VoiceIntroSlotLanguage, string | null>
+  >;
+
+  res.json({
+    birth_date: (partnerResult.data.birth_date as string | null) ?? '',
+    interests: (partnerResult.data.interests as string[] | null) ?? [],
+    voice_intro_audio_url: (slotUrls[slot] as string | null | undefined) ?? null,
+  });
 });
 
 // 매치를 본인 목록에서만 숨김 (mig 013).

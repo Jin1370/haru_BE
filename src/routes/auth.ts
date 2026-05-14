@@ -377,7 +377,6 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
       photos: [],
       interests: [],
       voice_intro: null,
-      voice_intro_audio_url: null,
       voice_intro_audio_urls: {},
       voice_intro_translations: {},
       voice_intro_audio_status: {},

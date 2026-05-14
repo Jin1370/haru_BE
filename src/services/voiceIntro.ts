@@ -17,8 +17,12 @@ import {
 //   (2) 옛 URL snapshot (cleanup 용) + 상태 초기화.
 //   (3) 누락 언어 1회 호출로 번역 (실패 시 누락 슬롯 status='failed').
 //   (4) 슬롯별 독립 TTS (Promise.allSettled). 실패 시 해당 슬롯 status='failed'.
-//   (5) 작성자 슬롯 ready 시 단일 컬럼 voice_intro_audio_url 미러 update (FE 호환).
-//   (6) 옛 storage 파일 cleanup (실패는 로그만).
+//   (5) 옛 storage 파일 cleanup (실패는 로그만).
+//
+// mig 019 이후: 단일 컬럼 voice_intro_audio_url 미러 update 경로 제거.
+// 디스커버/매치 응답의 wire key 는 시청자 언어 슬롯을 in-flight 추출하는
+// 라우트 레이어에서 미러되므로 본 서비스는 voice_intro_audio_urls JSONB
+// 슬롯만 갱신한다.
 //
 // 정책:
 //   * 부분 실패 정책 권고 D 무시 — 재시도/알림 없음.
@@ -33,23 +37,15 @@ export function normalizeAuthorLanguage(language: string | null | undefined): Vo
   return 'en';
 }
 
-interface OldUrlsSnapshot {
-  single: string | null;
-  perSlot: Partial<Record<VoiceIntroSlotLanguage, string | null>>;
-}
+type OldUrlsSnapshot = Partial<Record<VoiceIntroSlotLanguage, string | null>>;
 
 async function snapshotOldUrls(userId: string): Promise<OldUrlsSnapshot> {
   const { data } = await supabase
     .from('profiles')
-    .select('voice_intro_audio_url, voice_intro_audio_urls')
+    .select('voice_intro_audio_urls')
     .eq('id', userId)
     .maybeSingle();
-  return {
-    single: (data?.voice_intro_audio_url as string | null) ?? null,
-    perSlot: (data?.voice_intro_audio_urls ?? {}) as Partial<
-      Record<VoiceIntroSlotLanguage, string | null>
-    >,
-  };
+  return (data?.voice_intro_audio_urls ?? {}) as OldUrlsSnapshot;
 }
 
 // JSONB 단일 키 갱신: read-merge-write 패턴.
@@ -116,9 +112,8 @@ async function markSlotsFailed(
 
 async function cleanupOldFiles(userId: string, snapshot: OldUrlsSnapshot): Promise<void> {
   const urls = new Set<string>();
-  if (snapshot.single) urls.add(snapshot.single);
   for (const lang of VOICE_INTRO_SLOT_LANGUAGES) {
-    const url = snapshot.perSlot[lang];
+    const url = snapshot[lang];
     if (typeof url === 'string' && url.length > 0) urls.add(url);
   }
   for (const url of urls) {
@@ -136,22 +131,17 @@ async function synthesizeSlot(args: {
   voiceId: string;
   lang: VoiceIntroSlotLanguage;
   text: string;
-  isAuthorSlot: boolean;
 }): Promise<void> {
-  const { userId, voiceId, lang, text, isAuthorSlot } = args;
+  const { userId, voiceId, lang, text } = args;
   try {
     await setSlotStatus(userId, lang, 'processing');
     const audio = await synthesizeSpeech(text, voiceId);
     const path = `${userId}/voice-intro-${lang}-${Date.now()}.mp3`;
     const audioUrl = await uploadFile(VOICE_INTRO_BUCKET, path, audio, 'audio/mpeg');
 
-    // 슬롯 URL + 상태 commit. 작성자 언어 슬롯이면 단일 컬럼 미러도 update.
-    await mergeJsonbColumn<string | null>(
-      userId,
-      'voice_intro_audio_urls',
-      { [lang]: audioUrl },
-      isAuthorSlot ? { voice_intro_audio_url: audioUrl } : {},
-    );
+    await mergeJsonbColumn<string | null>(userId, 'voice_intro_audio_urls', {
+      [lang]: audioUrl,
+    });
     await mergeJsonbColumn<VoiceIntroAudioStatus>(userId, 'voice_intro_audio_status', {
       [lang]: 'ready',
     });
@@ -182,7 +172,7 @@ export async function generateVoiceIntroAudios(
   // (1) 시작 시점 옛 URL snapshot (cleanup 용)
   const oldUrls = await snapshotOldUrls(userId);
 
-  // (2) 상태 초기화 + 슬롯 텍스트 commit (단일 update). 단일 컬럼도 NULL 리셋.
+  // (2) 상태 초기화 + 슬롯 텍스트 commit (단일 update).
   // preset 경로 (voice-intro-preset-bypass sprint) 는 BE 카탈로그가 ko/ja/en 3개를
   // 모두 보유하므로 이 단계에서 3슬롯을 한 번에 commit. 기존 path 는 작성자 슬롯만 commit.
   const initialTranslations: VoiceIntroTranslations =
@@ -193,7 +183,6 @@ export async function generateVoiceIntroAudios(
       voice_intro_translations: initialTranslations,
       voice_intro_audio_urls: {},
       voice_intro_audio_status: { ko: 'pending', ja: 'pending', en: 'pending' },
-      voice_intro_audio_url: null,
     })
     .eq('id', userId);
 
@@ -242,7 +231,6 @@ export async function generateVoiceIntroAudios(
         voiceId,
         lang,
         text: slotTexts[lang]!,
-        isAuthorSlot: lang === authorLang,
       }),
     ),
   );

@@ -87,11 +87,9 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
     interests: interests || [],
     updated_at: new Date().toISOString(),
   };
-  // voice_intro 가 바뀌면 FE 폴링이 재합성 구간을 감지할 수 있도록 오디오 URL을 먼저 리셋한다.
-  // mig 011: 단일 컬럼뿐 아니라 신규 다국어 슬롯 3컬럼도 빈 객체로 리셋해야 디스커버 응답에
-  // 옛 슬롯 URL 이 잔존하지 않는다. 신규 파이프라인이 비동기로 다시 채운다.
+  // voice_intro 가 바뀌면 FE 폴링이 재합성 구간을 감지할 수 있도록 다국어 슬롯
+  // 3컬럼을 빈 객체로 리셋한다. 신규 파이프라인이 비동기로 다시 채운다.
   if (voiceIntroChanged) {
-    upsertPayload.voice_intro_audio_url = null;
     upsertPayload.voice_intro_translations = {};
     upsertPayload.voice_intro_audio_urls = {};
     upsertPayload.voice_intro_audio_status = {};

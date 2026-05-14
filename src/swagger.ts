@@ -39,12 +39,6 @@ export const swaggerDocument = {
           elevenlabs_voice_id: { type: 'string', nullable: true },
           voice_sample_url: { type: 'string', nullable: true },
           voice_clone_status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
-          voice_intro_audio_url: {
-            type: 'string',
-            format: 'uri',
-            nullable: true,
-            description: '작성자 언어 슬롯 URL 의 미러. 호환용 — voice_intro_audio_urls 로 마이그레이션 권장 (mig 011).',
-          },
           voice_intro_translations: {
             type: 'object',
             additionalProperties: { type: 'string' },
@@ -422,6 +416,39 @@ export const swaggerDocument = {
         ],
         responses: {
           200: { description: '매치 목록', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/MatchWithPartner' } } } } },
+        },
+      },
+    },
+    '/api/matches/{matchId}/partner': {
+      get: {
+        tags: ['Match'],
+        summary: '채팅 상대의 부가 프로필 (시청자 언어 보이스 인트로 미러)',
+        description:
+          'birth_date / interests / 시청자 언어 슬롯의 voice_intro_audio_url 을 반환. ' +
+          'voice_intro_audio_url 은 viewer 의 profiles.language → ko/ja/en 슬롯 매핑으로 ' +
+          'voice_intro_audio_urls JSONB 에서 추출해 미러한다(디스커버 응답과 동일 정책). ' +
+          'FE 가 supabase 에서 단일 voice_intro_audio_url 컬럼을 직접 select 하던 경로를 대체.',
+        parameters: [
+          { name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+        ],
+        responses: {
+          200: {
+            description: 'PartnerDetail',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['birth_date', 'interests', 'voice_intro_audio_url'],
+                  properties: {
+                    birth_date: { type: 'string', format: 'date' },
+                    interests: { type: 'array', items: { type: 'string' } },
+                    voice_intro_audio_url: { type: 'string', format: 'uri', nullable: true },
+                  },
+                },
+              },
+            },
+          },
+          404: { description: '매치 없음 또는 상대 프로필 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },

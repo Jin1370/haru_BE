@@ -27,9 +27,6 @@ export interface Profile {
   elevenlabs_voice_id: string | null;
   voice_sample_url: string | null;
   voice_clone_status: 'pending' | 'processing' | 'ready' | 'failed';
-  // 호환 유지(deprecate 후보) — 작성자 언어 슬롯 URL 의 미러.
-  // FE chat 파트너 detail 이 supabase 직접 select 로 RLS 통과 중이라 drop 보류.
-  voice_intro_audio_url: string | null;
   // mig 011 신규. 슬롯은 ko/ja/en 만. 키 미존재 가능.
   voice_intro_translations: VoiceIntroTranslations;
   voice_intro_audio_urls: Partial<Record<VoiceIntroSlotLanguage, string | null>>;

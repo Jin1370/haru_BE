@@ -136,6 +136,20 @@ export const swaggerDocument = {
               original_text: { type: 'string' },
               sender_id: { type: 'string', format: 'uuid' },
               created_at: { type: 'string', format: 'date-time' },
+              audio_status: {
+                type: 'string',
+                enum: ['pending', 'processing', 'ready', 'failed'],
+                nullable: true,
+                description:
+                  'read-at-removal-list-mask (mig 017 v3): 마지막 메시지의 status. FE 마스킹 분기에서 ready 만 미리보기 후보로 처리.',
+              },
+              listened_at: {
+                type: 'string',
+                format: 'date-time',
+                nullable: true,
+                description:
+                  'read-at-removal-list-mask (mig 017 v3): viewer 가 마지막 메시지의 음성을 청취 완료한 시각. 상대 발신 + NULL 이면 FE 가 "새 메시지" 마스킹을 적용.',
+              },
             },
           },
           unread_count: { type: 'integer' },
@@ -153,7 +167,6 @@ export const swaggerDocument = {
           translated_language: { type: 'string', nullable: true },
           audio_url: { type: 'string', format: 'uri', nullable: true },
           audio_status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
-          read_at: { type: 'string', format: 'date-time', nullable: true },
           listened_at: {
             type: 'string',
             format: 'date-time',
@@ -444,17 +457,10 @@ export const swaggerDocument = {
         },
       },
     },
-    '/api/matches/{matchId}/messages/read': {
-      patch: {
-        tags: ['Message'],
-        summary: '메시지 읽음 처리 (상대가 보낸 미읽 메시지 일괄)',
-        parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
-        responses: {
-          200: { description: '읽음 처리 완료', content: { 'application/json': { schema: { type: 'object', properties: { read_count: { type: 'integer' } } } } } },
-          403: { description: '매치 비참여자', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-        },
-      },
-    },
+    // read-at-removal-list-mask sprint: PATCH /api/matches/{matchId}/messages/read 제거.
+    // "읽음" 의미를 listened_at 로 일원화하면서 read_at 컬럼이 사라졌고, 일괄 read
+    // 처리 동선 자체가 무의미해졌다. 메시지별 listened 마킹은 아래 listened
+    // 라우트가 단일 진실원.
     '/api/matches/{matchId}/messages/{messageId}/listened': {
       post: {
         tags: ['Message'],

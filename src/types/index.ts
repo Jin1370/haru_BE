@@ -77,10 +77,11 @@ export interface Message {
   audio_url: string | null;
   audio_status: 'pending' | 'processing' | 'ready' | 'failed';
   emotion: Emotion | null;
-  read_at: string | null;
   // voice-first-message-gate sprint (mig 015): 수신자가 음성을 1회 끝까지
   // 재생한 시각. NULL = 미청취 → FE 가 텍스트를 숨기고 편지 UI 만 노출.
   // 본인 발신 메시지는 항상 null (라우트가 sender_id == req.userId 호출을 403).
+  // read-at-removal-list-mask sprint (mig 018): 옛 read_at 컬럼 제거. "읽음" 의미는
+  // listened_at 단일 진실원으로 일원화.
   listened_at: string | null;
   created_at: string;
 }

@@ -13,9 +13,14 @@ const matchListQuerySchema = z.object({
 interface MatchSummary {
   match_id: string;
   last_message_id: string | null;
-  last_message_text: string | null;
+  last_message_preview: string | null;
   last_message_sender_id: string | null;
   last_message_created_at: string | null;
+  // mig 017 v3 에서 추가: 마지막 메시지의 status / listened_at 을 RPC 단계에서
+  // 노출. FE MatchItem 의 마스킹 분기 (본인 발신 / 상대 발신·미청취 등) 가
+  // 별도 fetch 없이 평가 가능하도록 함.
+  last_message_audio_status: 'pending' | 'processing' | 'ready' | 'failed' | null;
+  last_message_listened_at: string | null;
   unread_count: number;
   round_trip_count: number;
   main_photo_unlocked: boolean;
@@ -89,12 +94,28 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
     (profiles || []).map((p) => [p.id, { ...p, language: (p.language as string | null) ?? '' }]),
   );
 
-  // 3. 매치별 마지막 메시지 + 읽지 않은 수 + 라운드트립 기반 unlock 플래그 (RPC v2)
+  // 3. 매치별 마지막 메시지 + 읽지 않은 수 + 라운드트립 기반 unlock 플래그 (RPC v3)
+  //
+  // read-at-removal-list-mask sprint:
+  //   - v3 는 unread 산정을 listened_at IS NULL 기준으로 전환 + audio_status='ready'
+  //     필터 적용 (voice-first-message-gate follow-up 의 채팅방 GET 필터와 정합).
+  //   - last_message 후보 SELECT 에 viewer 시점 필터 (sender_id = viewer OR
+  //     audio_status='ready') 적용 → 수신자에게 안 보이는 메시지가 카드 미리보기
+  //     자리에 잡혀 빈 상태로 보이는 회귀 차단.
+  //   - 응답에 last_message_audio_status / last_message_listened_at 두 필드 추가
+  //     (FE 마스킹 분기용 raw 필드).
   const matchIds = matches.map((m) => m.id);
-  const { data: summaries } = await supabase.rpc('get_match_summaries_v2', {
+  const { data: summaries, error: rpcError } = await supabase.rpc('get_match_summaries_v3', {
     match_ids: matchIds,
     viewer_id: req.userId!,
   });
+  // silent-success 가드: mig 017 미적용 상태에서 BE 만 deploy 되면 RPC not found
+  // 가 발생해도 응답이 빈 매치 목록 + unread=0 으로 silent-degrade 된다. listened
+  // POST 의 schema-drift 가드와 동일 패턴 — 500 으로 가시화.
+  if (rpcError) {
+    res.status(500).json({ error: rpcError.message });
+    return;
+  }
 
   const summaryMap = new Map<string, MatchSummary>(
     ((summaries || []) as MatchSummary[]).map((s) => [s.match_id, s])
@@ -154,6 +175,12 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
         }
       : null;
 
+    // tombstone (언매치 또는 상대 탈퇴) 매치는 unread badge 가 사용자 혼동을
+    // 유발하므로 0 으로 강제. RPC 는 raw 값을 주고 라우트가 정책적으로 normalize.
+    // read-at-removal-list-mask sprint (strategist 우려 2 의 follow-up).
+    const isTombstone = !!match.unmatched_at || !!rawPartner?.deleted_at;
+    const unreadCount = isTombstone ? 0 : Number(summary?.unread_count || 0);
+
     return {
       match_id: match.id,
       created_at: match.created_at,
@@ -164,15 +191,26 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
       partner,
       photo_access: photoAccess,
       round_trip_count: roundTripCount,
+      // 응답 wire 형식의 키 이름 (id/original_text/sender_id/created_at) 은
+      // 기존 그대로 유지하고, 값만 v3 RPC 의 last_message_preview 에서 가져온다.
+      // audio_status / listened_at 은 FE 마스킹 분기용 신규 필드.
+      //
+      // tombstone(언매치/상대 탈퇴) 매치는 last_message.original_text 를 null 로
+      // normalize — FE 분기 1번이 tombstone 카피로 덮지만, raw API 응답을 직접
+      // 보는 경로(reverse engineer/직접 호출) 에서도 차단 직전 마지막 메시지
+      // 원문이 노출되지 않도록 defense-in-depth (read-at-removal-list-mask
+      // safety 권고 #2).
       last_message: summary?.last_message_id
         ? {
             id: summary.last_message_id,
-            original_text: summary.last_message_text,
+            original_text: isTombstone ? null : summary.last_message_preview,
             sender_id: summary.last_message_sender_id,
             created_at: summary.last_message_created_at,
+            audio_status: summary.last_message_audio_status,
+            listened_at: summary.last_message_listened_at,
           }
         : null,
-      unread_count: Number(summary?.unread_count || 0),
+      unread_count: unreadCount,
     };
   });
 

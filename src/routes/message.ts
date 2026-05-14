@@ -208,7 +208,6 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
     audio_url: null,
     audio_status: 'pending',
     emotion: storedEmotion,
-    read_at: null,
     created_at: queuedAt,
   });
 
@@ -227,41 +226,12 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
   }).catch((err) => console.error('[processAndInsertMessage unhandled]', err));
 });
 
-// 메시지 읽음 처리
-router.patch('/:matchId/messages/read', async (req: AuthRequest, res: Response) => {
-  const { matchId } = req.params;
-
-  // 매치 참여자 확인
-  const { data: match } = await supabase
-    .from('matches')
-    .select('id')
-    .eq('id', matchId)
-    .or(`user1_id.eq.${req.userId!},user2_id.eq.${req.userId!}`)
-    .single();
-
-  if (!match) {
-    res.status(403).json({ error: 'Not a member of this match' });
-    return;
-  }
-
-  // 상대가 보낸 읽지 않은 메시지를 일괄 업데이트.
-  // chat-audio-async-insert sprint: read_at UPDATE 는 audio_status / audio_url
-  // 을 건드리지 않으므로 expo-audio mid-session 회수 트리거가 아님 — 기존 동작
-  // 유지. FE 의 realtime UPDATE 핸들러도 read_at 같은 부수 필드만 처리.
-  const { count, error } = await supabase
-    .from('messages')
-    .update({ read_at: new Date().toISOString() }, { count: 'exact' })
-    .eq('match_id', matchId)
-    .neq('sender_id', req.userId!)
-    .is('read_at', null);
-
-  if (error) {
-    res.status(500).json({ error: error.message });
-    return;
-  }
-
-  res.json({ read_count: count || 0 });
-});
+// read-at-removal-list-mask sprint: PATCH /:matchId/messages/read 라우트 제거.
+//
+// "읽음" 의 의미를 listened_at (음성 청취 완료) 으로 일원화하면서 read_at 컬럼이
+// 사라졌고, 채팅방 진입 시 일괄 읽음 처리 동선 자체가 무의미해졌다. 메시지별
+// listened 마킹은 `POST /:matchId/messages/:messageId/listened` 로 단일 진실원
+// 유지 — 수신자가 음성을 끝까지 재생한 메시지만 read 로 간주된다.
 
 // voice-first-message-gate sprint: 수신자가 메시지 음성을 1회 끝까지 재생했음을
 // 서버에 기록. idempotent — 이미 listened_at 가 set 되어 있으면 현 row 그대로

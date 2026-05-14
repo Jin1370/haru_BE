@@ -167,16 +167,9 @@ describe('Message Routes', () => {
     });
   });
 
-  describe('PATCH /api/matches/:matchId/messages/read', () => {
-    it('읽음 처리 성공', async () => {
-      const res = await request(app)
-        .patch(`/api/matches/${matchId}/messages/read`)
-        .set('Authorization', `Bearer ${token2}`);
-
-      expect(res.status).toBe(200);
-      expect(res.body).toHaveProperty('read_count');
-    });
-  });
+  // read-at-removal-list-mask sprint: PATCH /api/matches/:matchId/messages/read
+  // 라우트가 제거되어 본 describe 블록도 삭제. "읽음" 의 의미는 listened_at 으로
+  // 일원화되었고, 메시지별 마킹은 아래 listened POST 가 담당.
 
   // voice-first-message-gate sprint
   describe('POST /api/matches/:matchId/messages/:messageId/listened', () => {

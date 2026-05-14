@@ -294,7 +294,7 @@ async function seedOne(
   //    preset 카탈로그가 ko/ja/en 3개 텍스트 보유 → Gemini 우회.
   //    내부에서 ElevenLabs TTS 3회 + Storage 업로드 + JSONB 컬럼 업데이트까지 수행.
   console.log('  generating voice intro audio (3 slots)...');
-  await generateVoiceIntroAudios(userId, authorText, voice.id, persona.language, phrase.text);
+  await generateVoiceIntroAudios(userId, authorText, voice.id, persona.language, phrase.text, persona.gender);
   console.log('  ✓ voice intro audio ready');
 
   return { email, password, userId };

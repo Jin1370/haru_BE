@@ -45,11 +45,13 @@ export async function synthesizeSpeech(
   const audioStream = await client.textToSpeech.convert(voiceId, {
     text: prefixed,
     modelId: 'eleven_v3',
+    // stability 0.6: 데이팅 톤(차분·다정) 위해 v3 natural(0.5) 보다 살짝 위로
+    // 고정. 너무 낮으면 prosody 변동 폭이 커져 "방정맞은" 첫인상.
     // similarityBoost 0.75 명시 (eleven 기본값과 동일하지만, 다국어 합성 시
     // boost 가 너무 높으면 원어 음소가 외국어에 잔존하는 부작용을 차단하기 위해
     // 향후 default 변경 영향에서 코드를 분리. mig 011 voice intro 다국어 합성과
     // 메시지 TTS 모두 동일 설정 공유.
-    voiceSettings: { stability: 0.4, similarityBoost: 0.75 },
+    voiceSettings: { stability: 0.6, similarityBoost: 0.75 },
   });
   return streamToBuffer(audioStream);
 }

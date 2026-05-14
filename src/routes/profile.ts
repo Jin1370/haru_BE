@@ -116,6 +116,7 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
       data.elevenlabs_voice_id,
       language,
       presetTranslations,
+      gender,
     ).catch((err) => console.error('[Voice intro audios generation failed]', err));
   }
 

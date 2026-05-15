@@ -2,9 +2,14 @@
 //
 // 만들어내는 것:
 //   * auth.users 10명 (email/password, email_confirm=true, user_metadata.is_dev_seed=true)
-//   * profiles 10건 (ko 5 / ja 5, 5F/5M, voice clone status = ready, 스톡 voice_id)
+//     - 비밀번호는 전원 SEED_PASSWORD('aaaa1111') 로 통일 (dev/QA 편의)
+//   * profiles 10건 (ko 5 / ja 5, 5M/5F, voice clone status = ready, 스톡 voice_id)
+//     - Test1~Test3: KR/ko/M, Test4~Test5: KR/ko/F
+//     - Test6~Test8: JP/ja/F, Test9~Test10: JP/ja/M
+//     - voice_intro 텍스트는 'simple-1' phrase 로 전원 통일 (ko/ja 슬롯별)
+//     - interests 는 전부 빈 배열 ([])
 //   * user_preferences 10건 (크로스언어 매칭 — ko → ja/JP 선호, ja → ko/KR 선호)
-//   * photos 버킷에 AI 생성 얼굴 2장씩 (thispersondoesnotexist.com)
+//   * photos 버킷에 기본 프로필 사진 1장씩 (DiceBear 'initials' avatar, display_name seed)
 //   * voice-intro-audio 버킷에 ko/ja/en 3슬롯 TTS (스톡 보이스 합성)
 //
 // 사용:
@@ -16,38 +21,44 @@
 // 비용:
 //   * ElevenLabs TTS 30회 (10명 × ko/ja/en 슬롯, 짧은 프리셋 문구 ~30자 평균)
 //     → 합계 ~1500자, $0.30 미만
-//   * Supabase Storage: 사진 20장(~2MB) + 음성 30개(~3MB)
+//   * Supabase Storage: 사진 10장(~0.5MB) + 음성 30개(~3MB)
 //
 // 마커: auth.users.user_metadata.is_dev_seed = true 로 식별 (닉네임/이메일에는 라벨 없음).
 // cleanup 시 이 마커로 일괄 삭제.
 
 import 'dotenv/config';
-import { randomBytes } from 'crypto';
 import { supabase } from '../src/config/supabase';
 import { uploadFile } from '../src/services/storage';
 import { generateVoiceIntroAudios } from '../src/services/voiceIntro';
 import { lookupBioPhrase } from '../src/constants/bioPhrasesCatalog';
 
 // ----- ElevenLabs 스톡 보이스 ID (성별 태깅) -----
-// 공식 default voice library. eleven_v3 는 단일 보이스로 다국어 합성 가능.
+// ElevenLabs 자체 premade voice library 에서 dating-app 톤만 선별 (저작권/도용 리스크 0).
+// 모두 영어권 화자 기반이지만 eleven_v3 다국어 모델로 ko/ja 합성 지원 (약한 영어권
+// 액센트 가능). ElevenLabs premade 풀 안엔 ko/ja native 화자가 없어 차선의 베스트.
+//
+// 라운드로빈 분배 순서는 PERSONAS 배열 순서에 맞춰 정렬됨:
+//   FEMALE: Test4(KR), Test5(KR), Test6(JP), Test7(JP), Test8(JP)
+//   MALE:   Test1(KR), Test2(KR), Test3(KR), Test9(JP), Test10(JP)
 const STOCK_VOICES_FEMALE = [
-  { id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel' },
-  { id: 'AZnzlk1XvdvUeBnXmlld', name: 'Domi' },
-  { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Bella' },
-  { id: 'MF3mGyEYCl7XYWbV9V6O', name: 'Elli' },
-  { id: 'ThT5KcBeYPX3keUQqHPh', name: 'Dorothy' },
+  { id: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica' }, // Playful, Bright, Warm
+  { id: 'FGY2WhTYpPnrIDTdsKH5', name: 'Laura' }, // Enthusiast, Quirky Attitude
+  { id: 'pFZP5JQG7iQjIQuC4Bku', name: 'Lily' }, // Velvety Actress
+  { id: 'hpp4J3VqNfWAUOO0d1Us', name: 'Bella' }, // Professional, Bright, Warm
+  { id: 'Xb7hH8MSUJpSbSDYk0k2', name: 'Alice' }, // Clear, Engaging Educator
 ];
 
 const STOCK_VOICES_MALE = [
-  { id: 'ErXwobaYiN019PkySvjV', name: 'Antoni' },
-  { id: 'VR6AewLTigWG4xSOukaG', name: 'Arnold' },
-  { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam' },
-  { id: 'TxGEqnHWrfWFTfGW9XjX', name: 'Josh' },
-  { id: 'yoZ06aMxZJJ28mfd3POQ', name: 'Sam' },
+  { id: 'iP95p4xoKVk53GoZ742B', name: 'Chris' }, // Charming, Down-to-Earth
+  { id: 'TX3LPaxmHKxFdv7VOQHJ', name: 'Liam' }, // Energetic, Social Media Creator
+  { id: 'bIHbv24MWmeRgasZH58o', name: 'Will' }, // Relaxed Optimist
+  { id: 'cjVigY5qzO86Huf0OWal', name: 'Eric' }, // Smooth, Trustworthy
+  { id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George' }, // Warm, Captivating Storyteller
 ];
 
 // ----- 페르소나 10명 -----
-// ko 5 (3F + 2M), ja 5 (2F + 3M) → 합계 5F + 5M.
+// Test1~Test3: KR/ko/M, Test4~Test5: KR/ko/F, Test6~Test8: JP/ja/F, Test9~Test10: JP/ja/M
+// → ko 5 + ja 5, 5M + 5F.
 // phrase_id 는 bioPhrasesCatalog.ts 의 preset bypass 카탈로그에서 픽. 카탈로그가
 // ko/ja/en 3슬롯 텍스트를 모두 보유하므로 Gemini 호출 0회.
 
@@ -61,102 +72,114 @@ type Persona = {
   phrase_id: string;
 };
 
+// voice_intro 텍스트 전원 통일: 'simple-1' phrase
+//   ko: '그냥 자연스럽게 대화해봐요. 인연이면 이어지지 않을까요?'
+//   ja: '自然に話してみませんか？縁があれば、きっと繋がりますよね。'
+//   en: "Let's just chat naturally. If we click, things will fall into place, right?"
+// interests 는 전원 빈 배열 — FE 가 viewer locale 로 i18n 번역해 표시할 게 없음.
+const SHARED_PHRASE_ID = 'simple-1';
+
 const PERSONAS: Persona[] = [
-  // --- ko 3F + 2M ---
+  // --- Test1~Test3: KR/ko/M (3명) ---
   {
-    display_name: '서연',
-    birth_date: '1998-03-15',
-    gender: 'female',
-    nationality: 'KR',
-    language: 'ko',
-    // interests 는 canonical ID (haru_FE/src/constants/interests.ts) 로 저장.
-    // FE 가 viewer 의 locale 로 i18n 번역해 표시 (interestOptions.<id>).
-    interests: ['cafe', 'travel', 'photography'],
-    phrase_id: 'taste-1',
-  },
-  {
-    display_name: '하늘',
-    birth_date: '1999-07-22',
-    gender: 'female',
-    nationality: 'KR',
-    language: 'ko',
-    interests: ['reading', 'movies', 'yoga'],
-    phrase_id: 'sincere-1',
-  },
-  {
-    display_name: '지호',
-    birth_date: '1995-11-30',
-    gender: 'female',
-    nationality: 'KR',
-    language: 'ko',
-    interests: ['gym', 'cooking', 'wine'],
-    phrase_id: 'flutter-1',
-  },
-  {
-    display_name: '준영',
+    display_name: 'Test1',
     birth_date: '1997-05-08',
     gender: 'male',
     nationality: 'KR',
     language: 'ko',
-    interests: ['gaming', 'driving', 'music'],
-    phrase_id: 'simple-1',
+    interests: [],
+    phrase_id: SHARED_PHRASE_ID,
   },
   {
-    display_name: '도현',
+    display_name: 'Test2',
     birth_date: '1994-09-17',
     gender: 'male',
     nationality: 'KR',
     language: 'ko',
-    interests: ['gym', 'running', 'foodie'],
-    phrase_id: 'confidence-1',
+    interests: [],
+    phrase_id: SHARED_PHRASE_ID,
   },
-  // --- ja 2F + 3M ---
   {
-    display_name: 'さくら',
+    display_name: 'Test3',
+    birth_date: '1995-06-11',
+    gender: 'male',
+    nationality: 'KR',
+    language: 'ko',
+    interests: [],
+    phrase_id: SHARED_PHRASE_ID,
+  },
+  // --- Test4~Test5: KR/ko/F (2명) ---
+  {
+    display_name: 'Test4',
+    birth_date: '1998-03-15',
+    gender: 'female',
+    nationality: 'KR',
+    language: 'ko',
+    interests: [],
+    phrase_id: SHARED_PHRASE_ID,
+  },
+  {
+    display_name: 'Test5',
+    birth_date: '1999-07-22',
+    gender: 'female',
+    nationality: 'KR',
+    language: 'ko',
+    interests: [],
+    phrase_id: SHARED_PHRASE_ID,
+  },
+  // --- Test6~Test8: JP/ja/F (3명) ---
+  {
+    display_name: 'Test6',
+    birth_date: '1995-11-30',
+    gender: 'female',
+    nationality: 'JP',
+    language: 'ja',
+    interests: [],
+    phrase_id: SHARED_PHRASE_ID,
+  },
+  {
+    display_name: 'Test7',
     birth_date: '1999-02-14',
     gender: 'female',
     nationality: 'JP',
     language: 'ja',
-    interests: ['cafe', 'reading', 'travel'],
-    phrase_id: 'simple-2',
+    interests: [],
+    phrase_id: SHARED_PHRASE_ID,
   },
   {
-    display_name: 'ゆい',
+    display_name: 'Test8',
     birth_date: '2000-08-03',
     gender: 'female',
     nationality: 'JP',
     language: 'ja',
-    interests: ['anime', 'music', 'jpop'],
-    phrase_id: 'aegyo-1',
+    interests: [],
+    phrase_id: SHARED_PHRASE_ID,
   },
+  // --- Test9~Test10: JP/ja/M (2명) ---
   {
-    display_name: 'はるき',
+    display_name: 'Test9',
     birth_date: '1996-12-25',
     gender: 'male',
     nationality: 'JP',
     language: 'ja',
-    interests: ['movies', 'gym', 'wine'],
-    phrase_id: 'flutter-2',
+    interests: [],
+    phrase_id: SHARED_PHRASE_ID,
   },
   {
-    display_name: 'たくみ',
+    display_name: 'Test10',
     birth_date: '1998-04-19',
     gender: 'male',
     nationality: 'JP',
     language: 'ja',
-    interests: ['soccer', 'music', 'foodie'],
-    phrase_id: 'sincere-1',
-  },
-  {
-    display_name: 'けんた',
-    birth_date: '1995-06-11',
-    gender: 'male',
-    nationality: 'JP',
-    language: 'ja',
-    interests: ['hiking', 'photography', 'driving'],
-    phrase_id: 'taste-1',
+    interests: [],
+    phrase_id: SHARED_PHRASE_ID,
   },
 ];
+
+// dev/QA 편의 — 비밀번호 전원 통일. 실유저 비밀번호 정책과 별개로 dev 전용.
+// auth.users.user_metadata.is_dev_seed=true 마커가 있어야만 임퍼소네이션 허용되므로
+// 비밀번호 노출 자체는 위협이 아니지만, 출시 전 cleanup:dev 로 일괄 삭제 필수.
+const SEED_PASSWORD = 'aaaa1111';
 
 // 크로스언어 선호 — 차별점 1 (디스커버 viewer-자국어 하드 제외) 가 활성화되려면
 // preferred_languages / preferred_nationalities 가 반대편으로 향해야 매칭이 잘 보인다.
@@ -167,40 +190,22 @@ const PREF_BY_LANG: Record<'ko' | 'ja', { langs: string[]; nats: string[] }> = {
 
 // ----- helpers -----
 
-function randomPassword(): string {
-  // 18자 base64url (영숫자 + - _). Supabase 기본 password policy 통과.
-  return randomBytes(14).toString('base64url');
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// AI 얼굴 다운로드 — thispersondoesnotexist.com.
-// 매 GET 마다 새 얼굴. 동일 IP 에서 빠르게 받으면 동일 이미지가 캐시될 수 있어
-// 호출 사이에 짧은 sleep 을 넣어 캐시 회전 보장. Cloudflare 차단 시 명확한
-// 에러로 알린다.
-async function fetchAIFace(attempt = 1): Promise<Buffer> {
-  const res = await fetch('https://thispersondoesnotexist.com/', {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-    },
-  });
+// 기본 프로필 사진 (DiceBear initials avatar, PNG).
+// seed 로 display_name 사용 → Test1 은 "T1"·Test2 는 "T2" 등 식별 가능한 이니셜 원형 아바타.
+// 외부 의존성 1개지만 Cloudflare 차단/rate-limit 이슈 없음.
+async function fetchDefaultProfilePhoto(seed: string): Promise<Buffer> {
+  const url = `https://api.dicebear.com/9.x/initials/png?seed=${encodeURIComponent(seed)}&size=512`;
+  const res = await fetch(url);
   if (!res.ok) {
-    if (attempt < 3) {
-      await sleep(2000);
-      return fetchAIFace(attempt + 1);
-    }
-    throw new Error(
-      `thispersondoesnotexist.com HTTP ${res.status}. 차단된 것 같습니다. ` +
-        `VPN/네트워크 변경 후 재시도하거나 fetchAIFace() 를 다른 소스로 교체하세요.`,
-    );
+    throw new Error(`dicebear HTTP ${res.status} (seed=${seed})`);
   }
   const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.length < 30 * 1024) {
-    throw new Error(`AI face 응답이 너무 작음 (${buf.length} bytes) — placeholder/captcha 의심`);
+  if (buf.length < 500) {
+    throw new Error(`dicebear 응답이 너무 작음 (${buf.length} bytes, seed=${seed})`);
   }
   return buf;
 }
@@ -220,7 +225,7 @@ async function seedOne(
   personasBefore: Persona[],
 ): Promise<{ email: string; password: string; userId: string }> {
   const email = `dev-${String(index + 1).padStart(2, '0')}@haru.test`;
-  const password = randomPassword();
+  const password = SEED_PASSWORD;
 
   console.log(`\n[${index + 1}/${PERSONAS.length}] ${persona.display_name} (${persona.language}/${persona.gender}) — ${email}`);
 
@@ -236,15 +241,12 @@ async function seedOne(
   }
   const userId = userData.user.id;
 
-  // 2) AI 얼굴 2장 다운로드 + Storage 업로드
-  const photoUrls: string[] = [];
-  for (let p = 0; p < 2; p++) {
-    const faceBuf = await fetchAIFace();
-    const url = await uploadFile('photos', `${userId}/photo-${p}.jpg`, faceBuf, 'image/jpeg');
-    photoUrls.push(url);
-    await sleep(1500); // 캐시 회전 + rate limit 회피
-    console.log(`  photo ${p + 1}/2 uploaded`);
-  }
+  // 2) 기본 프로필 사진 1장 다운로드 + Storage 업로드 (DiceBear initials, PNG).
+  //    photos 컬럼은 TEXT[] 이므로 단일 URL 만 담아도 됨.
+  const photoBuf = await fetchDefaultProfilePhoto(persona.display_name);
+  const photoUrl = await uploadFile('photos', `${userId}/photo-0.png`, photoBuf, 'image/png');
+  const photoUrls = [photoUrl];
+  console.log('  photo uploaded');
 
   // 3) 스톡 보이스 선택
   const voice = pickStockVoice(personasBefore, persona.gender);

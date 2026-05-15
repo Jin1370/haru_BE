@@ -385,6 +385,16 @@ export const swaggerDocument = {
         },
       },
     },
+    '/api/discover/likes-received': {
+      get: {
+        tags: ['Discover'],
+        summary: '받은 좋아요 목록 (나를 like 한 사용자 중 미스와이프·비차단 후보)',
+        description: '응답 shape 은 /api/discover 와 동일 (사진 1장, photo_access 잠금, voice intro 시청자 언어 슬롯 미러). 정렬은 like 한 시각 내림차순.',
+        responses: {
+          200: { description: '받은 좋아요 목록', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/ProfileCandidate' } } } } },
+        },
+      },
+    },
     '/api/discover/swipe': {
       post: {
         tags: ['Discover'],

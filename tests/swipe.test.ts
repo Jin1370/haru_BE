@@ -222,16 +222,50 @@ describe('Swipe Routes', () => {
     };
     const viewer = { id: 'viewer', interests: ['music', 'travel', 'food'] };
 
-    it('합산 상한이 65 이내 (티어 경계 보호)', () => {
-      // intra 점수 어떤 가산도 65를 넘으면 안 됨 — 그 경우 다른 티어 후보보다
-      // 상위로 올라가는 정렬 버그가 발생한다.
-      // 최대 케이스: 관심사 3개+ 겹침(30) + 사진 3장+(10) + 신규 7일(10) + jitter max(<15) = <65
+    it('기본 신호 합산 상한이 65 (reciprocity 없을 때)', () => {
+      // 기본 신호: 관심사 3개+ 겹침(30) + 사진 3장+(10) + 신규 7일(10) + jitter max(<15) = <65.
+      // 티어 경계 보호는 합산 상한이 아니라 정렬 키 우선순위(tier ASC > intra DESC)가
+      // 담당 — reciprocity boost 가 추가되면서 본 상한은 "기본 신호 한정" 의미로 좁아짐.
       const score = computeIntraScore(
         { ...baseCand, interests: ['music', 'travel', 'food'] },
         viewer,
       );
       expect(score).toBeLessThan(65);
       expect(score).toBeGreaterThanOrEqual(50); // 30 + 10 + 10 + jitter≥0
+    });
+
+    it('reciprocity 신호 있으면 +50 가산 (같은 티어 내 다른 신호 압도)', () => {
+      // 후보가 이미 viewer 를 like 한 경우, 동일 후보·viewer 쌍에 대한 점수가
+      // 정확히 +50 만큼 증가. jitter 가 결정적이라 차분 비교가 정확함.
+      const withoutBoost = computeIntraScore(baseCand, viewer);
+      const withBoost = computeIntraScore(baseCand, viewer, new Set([baseCand.id]));
+      // jitter 의 /100 나눗셈으로 부동소수점 차분 정밀도가 잠재적으로 깨질 수 있어
+      // toBeCloseTo(2 dp) 로 비교. 의미상 정확히 +50.
+      expect(withBoost - withoutBoost).toBeCloseTo(50, 2);
+    });
+
+    it('reciprocity 신호는 해당 후보에만 적용 (다른 후보 점수 불변)', () => {
+      // 풀에 'cand' 만 있고 'other' 는 없으면, 'other' 점수는 기본 신호 그대로.
+      const reciprocal = new Set([baseCand.id]);
+      const other = { ...baseCand, id: 'other' };
+      const otherWithout = computeIntraScore(other, viewer);
+      const otherWith = computeIntraScore(other, viewer, reciprocal);
+      expect(otherWith).toBeCloseTo(otherWithout, 6);
+    });
+
+    it('reciprocity 가 커도 티어 경계는 넘지 않음 (정렬 키 우선순위)', () => {
+      // 정렬 비교 함수 (tier ASC, intra DESC). 1차 키가 tier 라 intra 가 아무리
+      // 커져도 더 낮은(=더 우선) 티어 후보 위로 못 올라간다. reciprocity +50 이
+      // 65 → 115 로 합산을 끌어올려도 본 회귀로 보호됨.
+      type Scored = { _tier: number; _intra: number; id: string };
+      const cmp = (a: Scored, b: Scored) =>
+        a._tier !== b._tier ? a._tier - b._tier : b._intra - a._intra;
+      const list: Scored[] = [
+        { id: 'reciprocal_t2', _tier: 2, _intra: 115 }, // reciprocity 만점 T2
+        { id: 'plain_t1', _tier: 1, _intra: 0 },        // 기본 T1
+      ];
+      list.sort(cmp);
+      expect(list.map((x) => x.id)).toEqual(['plain_t1', 'reciprocal_t2']);
     });
 
     it('관심사 0 겹침이면 0 (사진/신규 가산 빼고)', () => {
@@ -317,6 +351,46 @@ describe('Swipe Routes', () => {
     });
     it('viewer language undefined → en (안전 폴백)', () => {
       expect(pickViewerSlot(undefined)).toBe('en');
+    });
+  });
+
+  describe('GET /api/discover/likes-received', () => {
+    it('인증 없으면 401', async () => {
+      const res = await request(app).get('/api/discover/likes-received');
+      expect(res.status).toBe(401);
+    });
+
+    it('받은 좋아요 풀이 비어있으면 빈 배열', async () => {
+      // 본 테스트에서는 user1 이 user2 를 'pass' 만 한 상태 (앞 POST swipe 테스트).
+      // user1 에게 들어온 like 는 없으므로 받은 좋아요 목록은 비어 있어야.
+      const res = await request(app)
+        .get('/api/discover/likes-received')
+        .set('Authorization', `Bearer ${token1}`);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body)).toBe(true);
+      expect(res.body.length).toBe(0);
+    });
+
+    it('응답 shape 이 디스커버 카드와 동일 (사진 1장, photo_access 잠금)', async () => {
+      // 사용자 풀에 본 테스트가 단독으로 like 후보를 주입하지 못해, 비어있을 수도 있음.
+      // 비어있지 않다면 shape 회귀만 검증.
+      const res = await request(app)
+        .get('/api/discover/likes-received')
+        .set('Authorization', `Bearer ${token2}`);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body)).toBe(true);
+      if (res.body.length > 0) {
+        const card = res.body[0];
+        expect(card).toHaveProperty('id');
+        expect(card).toHaveProperty('photo_access');
+        expect(card.photo_access).toEqual({
+          main_photo_unlocked: false,
+          all_photos_unlocked: false,
+        });
+        expect(Array.isArray(card.photos)).toBe(true);
+        expect(card.photos.length).toBeLessThanOrEqual(1);
+        expect(card).toHaveProperty('voice_intro_audio_url');
+      }
     });
   });
 

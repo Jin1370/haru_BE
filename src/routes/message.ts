@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { supabase } from '../config/supabase';
 import { uploadFile } from '../services/storage';
-import { synthesizeSpeech } from '../services/elevenlabs';
+import { synthesizeSpeech, type PersonaGender } from '../services/elevenlabs';
 import { translateMessage } from '../services/translation';
 import {
   prepareTextForTTS,
@@ -134,8 +134,9 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
 
   // 발신자/수신자 프로필 조회 (mig 009 이후 단일 scalar `language` 사용)
   // push-notifications sprint: sender_name 푸시 페이로드용 display_name 동시 조회.
+  // gender 는 elevenlabs.synthesizeSpeech 의 persona tag 분기에 사용.
   const [senderResult, recipientResult] = await Promise.all([
-    supabase.from('profiles').select('language, elevenlabs_voice_id, display_name').eq('id', req.userId!).single(),
+    supabase.from('profiles').select('language, elevenlabs_voice_id, display_name, gender').eq('id', req.userId!).single(),
     supabase.from('profiles').select('language').eq('id', recipientId).single(),
   ]);
 
@@ -144,6 +145,11 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
   const senderLang = (sender?.language as string | null) ?? null;
   const recipientLang = (recipient?.language as string | null) ?? null;
   const senderName = (sender?.display_name as string | null) ?? '';
+  // 메시지 TTS persona: 'female' 은 voice intro 에서만 사용하고 메시지에선 제외.
+  // 이유: 매 메시지 [sweetly, smiling] 누적 시 톤이 단조로워지고 캐릭터가 과장됨.
+  // 'male' 의 [warm, gently] 는 baseline 안정성 보조라 유지.
+  const rawGender = (sender?.gender as PersonaGender) ?? null;
+  const senderGender: PersonaGender = rawGender === 'female' ? null : rawGender;
 
   if (!sender || !recipient || !senderLang || !recipientLang) {
     res.status(404).json({ error: 'Profile not found' });
@@ -216,6 +222,7 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
     matchId,
     senderId: req.userId!,
     senderName,
+    senderGender,
     recipientId,
     text,
     senderLang,
@@ -331,6 +338,7 @@ interface ProcessJob {
   matchId: string;
   senderId: string;
   senderName: string;
+  senderGender: PersonaGender;
   recipientId: string;
   text: string;
   senderLang: string;
@@ -346,6 +354,7 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
     matchId,
     senderId,
     senderName,
+    senderGender,
     recipientId,
     text,
     senderLang,
@@ -395,7 +404,7 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
           toTTS: textToSynthesize,
         },
       );
-      const audio = await synthesizeSpeech(textToSynthesize, voiceId, emotion);
+      const audio = await synthesizeSpeech(textToSynthesize, voiceId, emotion, senderGender);
       const path = `${messageId}.mp3`;
       audioUrl = await uploadFile('voice-messages', path, audio, 'audio/mpeg');
     }

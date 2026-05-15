@@ -1,6 +1,6 @@
 import { supabase } from '../config/supabase';
 import { uploadFile, deleteFile, extractPath } from './storage';
-import { synthesizeSpeech } from './elevenlabs';
+import { synthesizeSpeech, type PersonaGender } from './elevenlabs';
 import { translateVoiceIntro } from './translation';
 import { normalizeSlangInput } from '../utils/textNormalization';
 import {
@@ -37,16 +37,9 @@ export function normalizeAuthorLanguage(language: string | null | undefined): Vo
   return 'en';
 }
 
-// 데이팅 톤 페르소나 — voice intro 합성 시에만 prepend (메시지 TTS 는 미적용).
-// 매 메시지 일률 적용은 단조로움 누적 위험 → 첫인상 표면(디스커버)에 한정.
-// 'other' / null / undefined 는 태그 없음.
-type PersonaGender = 'male' | 'female' | 'other' | null | undefined;
-
-function getPersonaTag(gender: PersonaGender): string {
-  if (gender === 'male') return '[warm, gently] ';
-  if (gender === 'female') return '[sweetly, smiling] ';
-  return '';
-}
+// 페르소나 태그는 elevenlabs.synthesizeSpeech 안에서 gender 인자 기반으로 직접
+// prepend 한다. 메시지 TTS 도 동일 페르소나를 공유 — voice intro 와 메시지
+// 모두 발신자 baseline 캐릭터로 사용 (이전엔 voice intro 첫인상 표면에만 한정).
 
 type OldUrlsSnapshot = Partial<Record<VoiceIntroSlotLanguage, string | null>>;
 
@@ -142,12 +135,12 @@ async function synthesizeSlot(args: {
   voiceId: string;
   lang: VoiceIntroSlotLanguage;
   text: string;
-  personaTag: string;
+  gender: PersonaGender;
 }): Promise<void> {
-  const { userId, voiceId, lang, text, personaTag } = args;
+  const { userId, voiceId, lang, text, gender } = args;
   try {
     await setSlotStatus(userId, lang, 'processing');
-    const audio = await synthesizeSpeech(`${personaTag}${text}`, voiceId);
+    const audio = await synthesizeSpeech(text, voiceId, null, gender);
     const path = `${userId}/voice-intro-${lang}-${Date.now()}.mp3`;
     const audioUrl = await uploadFile(VOICE_INTRO_BUCKET, path, audio, 'audio/mpeg');
 
@@ -174,7 +167,6 @@ export async function generateVoiceIntroAudios(
   gender?: PersonaGender,
 ): Promise<void> {
   const authorLang = normalizeAuthorLanguage(authorLanguageRaw);
-  const personaTag = getPersonaTag(gender);
 
   // voice_slang_normalization sprint (2026-05-11):
   //   작성자 voice_intro 텍스트의 슬랭 length-capping. preset 경로는 카탈로그
@@ -245,7 +237,7 @@ export async function generateVoiceIntroAudios(
         voiceId,
         lang,
         text: slotTexts[lang]!,
-        personaTag,
+        gender,
       }),
     ),
   );

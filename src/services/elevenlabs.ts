@@ -36,12 +36,27 @@ async function streamToBuffer(stream: ReadableStream<Uint8Array>): Promise<Buffe
   return Buffer.concat(chunks);
 }
 
+// 데이팅 톤 페르소나 — 발신자 성별 기반 vocal style tag.
+// 'other' / null / undefined 는 태그 없음. mig 011 voice intro 다국어 합성
+// 시 도입됐고, 메시지 TTS 도 동일 페르소나를 공유하도록 본 서비스로 이동.
+export type PersonaGender = 'male' | 'female' | 'other' | null | undefined;
+
+function buildPersonaTag(gender: PersonaGender): string {
+  if (gender === 'male') return '[warm, gently] ';
+  if (gender === 'female') return '[sweetly, smiling] ';
+  return '';
+}
+
 export async function synthesizeSpeech(
   text: string,
   voiceId: string,
-  emotion?: Exclude<Emotion, 'neutral'> | null
+  emotion?: Exclude<Emotion, 'neutral'> | null,
+  gender?: PersonaGender,
 ): Promise<Buffer> {
-  const prefixed = emotion ? `[${emotion}] ${text}` : text;
+  // 태그 순서: persona (발신자 baseline 캐릭터) → emotion (이 발화의 modifier).
+  const personaTag = buildPersonaTag(gender);
+  const emotionTag = emotion ? `[${emotion}] ` : '';
+  const prefixed = `${personaTag}${emotionTag}${text}`;
   const audioStream = await client.textToSpeech.convert(voiceId, {
     text: prefixed,
     modelId: 'eleven_v3',

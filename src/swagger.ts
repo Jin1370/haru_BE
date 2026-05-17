@@ -162,6 +162,11 @@ export const swaggerDocument = {
             },
           },
           unread_count: { type: 'integer' },
+          muted: {
+            type: 'boolean',
+            description:
+              'mig 022: viewer 가 이 매치의 푸시 알림을 끈 상태인지. 채팅 목록 액션시트 "알림 끄기/켜기" 토글의 표시 진실원. user_preferences.notify_messages 전역 토글과 AND 결합 — 어느 쪽이든 OFF 면 푸시 미발송.',
+          },
         },
       },
       Message: {
@@ -482,6 +487,31 @@ export const swaggerDocument = {
             },
           },
           404: { description: '매치 없음 또는 상대 프로필 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/matches/{matchId}/mute': {
+      post: {
+        tags: ['Match'],
+        summary: '매치별 푸시 알림 끄기 (mig 022, 멱등)',
+        description:
+          'long-press 액션시트의 "알림 끄기" 토글. match_mutes 에 (match_id, user_id) upsert. '
+          + 'user_preferences.notify_messages 전역 토글과 AND 결합 — 어느 쪽이든 OFF 면 푸시 미발송. '
+          + '여러 번 호출해도 행 1개. 멤버십 검증만 적용 (tombstone 매치도 허용).',
+        parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: {
+          200: { description: 'mute 적용', content: { 'application/json': { schema: { type: 'object', properties: { muted: { type: 'boolean', example: true } } } } } },
+          404: { description: '매치 없음 또는 비참여자', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+      delete: {
+        tags: ['Match'],
+        summary: '매치별 푸시 알림 켜기 (mig 022, 멱등)',
+        description: 'match_mutes 에서 (match_id, user_id) 삭제. 이미 켜져 있어도 200.',
+        parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: {
+          200: { description: 'mute 해제', content: { 'application/json': { schema: { type: 'object', properties: { muted: { type: 'boolean', example: false } } } } } },
+          404: { description: '매치 없음 또는 비참여자', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },

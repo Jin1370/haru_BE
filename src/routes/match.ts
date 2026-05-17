@@ -107,10 +107,20 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
   //   - 응답에 last_message_audio_status / last_message_listened_at 두 필드 추가
   //     (FE 마스킹 분기용 raw 필드).
   const matchIds = matches.map((m) => m.id);
-  const { data: summaries, error: rpcError } = await supabase.rpc('get_match_summaries_v3', {
-    match_ids: matchIds,
-    viewer_id: req.userId!,
-  });
+  const [{ data: summaries, error: rpcError }, mutesResult] = await Promise.all([
+    supabase.rpc('get_match_summaries_v3', {
+      match_ids: matchIds,
+      viewer_id: req.userId!,
+    }),
+    // mig 022: viewer 가 mute 한 match_id 일괄 조회. RLS 가 본인 행만 통과시키므로
+    // user_id 필터는 defense-in-depth. mig 미적용 윈도우에서 PostgREST 가 404 를
+    // 주면 mutedSet 은 빈 Set 으로 폴백 → 응답에 muted=false 일관 노출 (회귀 X).
+    supabase
+      .from('match_mutes')
+      .select('match_id')
+      .eq('user_id', req.userId!)
+      .in('match_id', matchIds),
+  ]);
   // silent-success 가드: mig 017 미적용 상태에서 BE 만 deploy 되면 RPC not found
   // 가 발생해도 응답이 빈 매치 목록 + unread=0 으로 silent-degrade 된다. listened
   // POST 의 schema-drift 가드와 동일 패턴 — 500 으로 가시화.
@@ -121,6 +131,10 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
 
   const summaryMap = new Map<string, MatchSummary>(
     ((summaries || []) as MatchSummary[]).map((s) => [s.match_id, s])
+  );
+
+  const mutedSet = new Set<string>(
+    (mutesResult.data ?? []).map((row: { match_id: string }) => row.match_id),
   );
 
   // 4. 조합
@@ -213,6 +227,10 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
           }
         : null,
       unread_count: unreadCount,
+      // mig 022: per-match 푸시 옵트아웃 (액션시트 "알림 끄기"). user_preferences.
+      // notify_messages 전역 토글과 AND 결합 — pushNotifications.ts 가 두 토글
+      // 모두 검사한다.
+      muted: mutedSet.has(match.id),
     };
   });
 
@@ -342,6 +360,85 @@ router.post('/:matchId/hide', requireNotFrozen, async (req: AuthRequest, res: Re
   }
 
   res.status(204).end();
+});
+
+// 매치별 푸시 알림 옵트아웃 (mig 022). 채팅 목록 long-press 액션시트의
+// "알림 끄기/켜기" 백업 엔드포인트.
+//
+// POST = mute (멱등 upsert), DELETE = unmute (멱등 delete). 둘 다 멤버십
+// (viewer ∈ {user1_id, user2_id}) 만 검사하고 tombstone 여부는 무시 —
+// FE 에서 tombstone 매치는 액션시트의 mute 항목을 미노출하므로 라우트는
+// 정책을 강제하지 않는다 (hide 라우트와 동일 결).
+//
+// freeze 가드 미적용: mute 는 본인 알림 설정 변경일 뿐이라 mutating 차단
+// 동선이 아니다 (notifications/preferences 라우트와 일관).
+// Express 5 의 req.params 타입은 `string | string[]` 이므로 helper 도
+// 그대로 받아 PostgREST 의 `.eq` (unknown 인수) 에 그대로 통과시킨다.
+async function ensureMatchMembership(matchId: string | string[], userId: string) {
+  const { data, error } = await supabase
+    .from('matches')
+    .select('id')
+    .eq('id', matchId)
+    .or(`user1_id.eq.${userId},user2_id.eq.${userId}`)
+    .maybeSingle();
+  return { found: !!data, error };
+}
+
+router.post('/:matchId/mute', async (req: AuthRequest, res: Response) => {
+  const { matchId } = req.params;
+  const userId = req.userId!;
+
+  const { found, error: memErr } = await ensureMatchMembership(matchId, userId);
+  if (memErr) {
+    res.status(500).json({ error: memErr.message });
+    return;
+  }
+  if (!found) {
+    res.status(404).json({ error: 'Match not found' });
+    return;
+  }
+
+  // PRIMARY KEY (match_id, user_id) → upsert 가 idempotent. ignoreDuplicates
+  // 옵션으로 중복 시 23505 가 아닌 0-row 정상 응답.
+  const { error: upErr } = await supabase
+    .from('match_mutes')
+    .upsert(
+      { match_id: matchId, user_id: userId },
+      { onConflict: 'match_id,user_id', ignoreDuplicates: true },
+    );
+  if (upErr) {
+    res.status(500).json({ error: upErr.message });
+    return;
+  }
+
+  res.status(200).json({ muted: true });
+});
+
+router.delete('/:matchId/mute', async (req: AuthRequest, res: Response) => {
+  const { matchId } = req.params;
+  const userId = req.userId!;
+
+  const { found, error: memErr } = await ensureMatchMembership(matchId, userId);
+  if (memErr) {
+    res.status(500).json({ error: memErr.message });
+    return;
+  }
+  if (!found) {
+    res.status(404).json({ error: 'Match not found' });
+    return;
+  }
+
+  const { error: delErr } = await supabase
+    .from('match_mutes')
+    .delete()
+    .eq('match_id', matchId)
+    .eq('user_id', userId);
+  if (delErr) {
+    res.status(500).json({ error: delErr.message });
+    return;
+  }
+
+  res.status(200).json({ muted: false });
 });
 
 // 언매치 전용 엔드포인트는 제거됨 — 언매치/차단 결과가 동일하므로 FE 의

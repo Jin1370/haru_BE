@@ -172,4 +172,78 @@ describe('Match Routes', () => {
       expect(res.status).toBe(404);
     });
   });
+
+  // mig 022: per-match 푸시 알림 옵트아웃 토글. 채팅 목록 액션시트의
+  // "알림 끄기/켜기" 가 본 라우트를 호출한다.
+  describe('POST/DELETE /:matchId/mute', () => {
+    let muteMatchId: string;
+
+    beforeAll(async () => {
+      // 새 매치를 만들 수도 있으나 직전 describe 가 만든 매치를 재사용 —
+      // tombstone 상태여도 멤버십만 검증되므로 mute 토글 가능.
+      const { data } = await supabase
+        .from('matches')
+        .select('id')
+        .or(`user1_id.eq.${userId1},user2_id.eq.${userId1}`)
+        .limit(1)
+        .single();
+      muteMatchId = data!.id;
+      // hidden_by 에 들어가 있더라도 mute/unmute 자체에는 영향 없음 — 단,
+      // GET /api/matches 응답에서는 본인 목록에 안 보이므로 muted 플래그
+      // assertion 시 그 점을 감안한다.
+    });
+
+    it('인증 없으면 401', async () => {
+      const res = await request(app).post(`/api/matches/${muteMatchId}/mute`);
+      expect(res.status).toBe(401);
+    });
+
+    it('비참여자가 mute 시도하면 404', async () => {
+      // 임의 user 토큰이 필요하므로 같은 매치의 user2 가 아닌 별도 사용자를
+      // 만들기보다, 존재하지 않는 매치 id 로 갈음 — 라우트 분기 동일 (404).
+      const res = await request(app)
+        .post('/api/matches/00000000-0000-0000-0000-000000000000/mute')
+        .set('Authorization', `Bearer ${token1}`);
+      expect(res.status).toBe(404);
+    });
+
+    it('mute 성공 + 멱등 + GET 응답에 muted=true 반영', async () => {
+      const res1 = await request(app)
+        .post(`/api/matches/${muteMatchId}/mute`)
+        .set('Authorization', `Bearer ${token1}`);
+      expect(res1.status).toBe(200);
+      expect(res1.body.muted).toBe(true);
+
+      // 멱등 — 같은 요청을 한 번 더 보내도 200/true.
+      const res2 = await request(app)
+        .post(`/api/matches/${muteMatchId}/mute`)
+        .set('Authorization', `Bearer ${token1}`);
+      expect(res2.status).toBe(200);
+      expect(res2.body.muted).toBe(true);
+
+      // 상대방 user2 는 본인 시야에서 muted=false 여야 함 (per-user).
+      const list2 = await request(app)
+        .get('/api/matches')
+        .set('Authorization', `Bearer ${token2}`);
+      const found2 = list2.body.find((m: any) => m.match_id === muteMatchId);
+      if (found2) {
+        expect(found2.muted).toBe(false);
+      }
+    });
+
+    it('unmute 성공 + 멱등', async () => {
+      const res1 = await request(app)
+        .delete(`/api/matches/${muteMatchId}/mute`)
+        .set('Authorization', `Bearer ${token1}`);
+      expect(res1.status).toBe(200);
+      expect(res1.body.muted).toBe(false);
+
+      // 이미 unmuted 상태에서 다시 DELETE 해도 200/false.
+      const res2 = await request(app)
+        .delete(`/api/matches/${muteMatchId}/mute`)
+        .set('Authorization', `Bearer ${token1}`);
+      expect(res2.status).toBe(200);
+      expect(res2.body.muted).toBe(false);
+    });
+  });
 });

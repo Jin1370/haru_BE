@@ -100,6 +100,23 @@ export async function sendPushToUser(
       }
     }
 
+    // 2.5) per-match 옵트아웃 (mig 022). 채팅 목록 long-press 액션시트의
+    // "알림 끄기" 토글. type='match' 는 매치 형성 시점이라 그 전에 mute 가
+    // 존재할 수 없으므로 type='message' 에만 적용. mig 미적용 윈도우에서
+    // PostgREST 가 404 를 주면 data=null + error 만 set 되어 silent skip
+    // 처리 (회귀 없이 기존 동작 유지).
+    if (payload.type === 'message') {
+      const { data: mute } = await supabase
+        .from('match_mutes')
+        .select('match_id')
+        .eq('match_id', payload.match_id)
+        .eq('user_id', receiverId)
+        .maybeSingle();
+      if (mute) {
+        return;
+      }
+    }
+
     // 3) 토큰 조회 — 다기기 허용 (배열)
     const { data: tokens } = await supabase
       .from('device_tokens')

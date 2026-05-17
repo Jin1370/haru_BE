@@ -463,6 +463,19 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
     return;
   }
 
+  // (1.7) mig 022 match_mutes 동기 DELETE — device_tokens / moderation_blocks
+  // 와 동일 회귀 (anonymize 가 CASCADE 를 fire 시키지 않음). mute 이력은 보존
+  // 가치가 없고 신규 사용자에게 옛 매치의 mute 가 잔존하면 푸시 silent skip
+  // 회귀가 생기므로 동기 DELETE 가 필수.
+  const { error: matchMutesErr } = await supabase
+    .from('match_mutes')
+    .delete()
+    .eq('user_id', userId);
+  if (matchMutesErr) {
+    res.status(500).json({ error: matchMutesErr.message });
+    return;
+  }
+
   // (2) Anonymize the auth.users row so the user can no longer authenticate
   // and their original email becomes free for re-registration. Email goes to
   // a non-routable .local address; password is set to 32 bytes of random hex

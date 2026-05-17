@@ -14,6 +14,9 @@ import { validateBody, validateQuery } from '../middleware/validate';
 import { sendMessageSchema, messageQuerySchema } from '../schemas/message';
 import { AuthRequest, Emotion } from '../types';
 import { sendPushToUser } from '../services/pushNotifications';
+import { isBlocked } from '../constants/moderationDictionary';
+import { checkOpenAiModeration } from '../services/openaiModeration';
+import { requireNotFrozen } from '../utils/freezeGuard';
 import { randomUUID } from 'crypto';
 
 const router = Router();
@@ -89,7 +92,7 @@ router.get('/:matchId/messages', validateQuery(messageQuerySchema), async (req: 
 //   5. retry 라우트 제거. 실패 메시지는 audio_url=null 인 텍스트 전용으로
 //      INSERT 되며, 사용자가 메시지를 다시 입력해 재송신. DELETE/UPDATE 트리거
 //      간섭이 없어 가장 안전.
-router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: AuthRequest, res: Response) => {
+router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSchema), async (req: AuthRequest, res: Response) => {
   const matchId = req.params.matchId as string;
   const { text, emotion } = req.body as { text: string; emotion?: Emotion };
   // neutral = "태그 없음" — DB에는 null로 저장 (CHECK constraint도 neutral 제외)
@@ -153,6 +156,89 @@ router.post('/:matchId/messages', validateBody(sendMessageSchema), async (req: A
 
   if (!sender || !recipient || !senderLang || !recipientLang) {
     res.status(404).json({ error: 'Profile not found' });
+    return;
+  }
+
+  // message-moderation-v1 (PR1): 사전 키워드 차단 — TTS·번역 비동기 큐 도달 전.
+  //
+  // 차별점 2 (클론 보이스 TTS) 의 가장 큰 평판 리스크 (노골 표현 합성 → 캡처/유출)
+  // 를 송신 시점에 차단. normalize(NFKC + 가타카나→히라가나 + 한글 자모 결합) 후
+  // substring contains 매칭. 위치는 매치/차단 검증 뒤 + queueing 직전 — 매치 자체가
+  // 없는 사용자가 차단 정책을 probe 하는 경로 차단 (먼저 403).
+  //
+  // 응답: 422 + code: 'message_blocked'. 카테고리/매칭 토큰은 응답에 노출 ❌
+  // (송신자가 우회 패턴 학습 차단). FE 는 `code` 매칭으로 i18n 토스트 노출.
+  //
+  // 부수효과:
+  //   1) console.warn 으로 즉시 운영 가시성 — 사전/우회 패턴 튜닝의 1차 신호원.
+  //      메시지 원문은 절대 로그 ❌ (PIPA/GDPR + 사쿠라 의혹 회피).
+  //   2) moderation_blocks 테이블에 fire-and-forget INSERT — DB audit log.
+  //      mig 020. INSERT 실패해도 응답 막지 않음 (push-notifications fire-and-
+  //      forget 패턴 동일). 카테고리 + 언어 + sender_id + blocked_at 만 보존,
+  //      원문/매칭 토큰/매치 id 미보존 (사용자 결정 PR1 스키마).
+  const moderationResult = isBlocked(text);
+  if (moderationResult.blocked) {
+    console.warn('[moderation.block]', {
+      sender_id: req.userId,
+      category: moderationResult.category,
+      language: moderationResult.language,
+      layer: 'dictionary',
+      at: new Date().toISOString(),
+    });
+    void supabase
+      .from('moderation_blocks')
+      .insert({
+        sender_id: req.userId!,
+        category: moderationResult.category!,
+        language: moderationResult.language!,
+      })
+      .then(({ error }) => {
+        if (error) {
+          console.error('[moderation.block.audit_insert_failed]', error.message);
+        }
+      });
+    res.status(422).json({
+      error: 'Message contains restricted expressions',
+      code: 'message_blocked',
+    });
+    return;
+  }
+
+  // message-moderation-v1 follow-up (B 안, 2026-05-18): OpenAI Moderation 2차 검수.
+  // 사전 차단 통과 메시지를 omni-moderation-latest 로 보내 우회 / 그루밍 / 스캠
+  // 패턴 차단. 응답 shape 는 사전 차단과 정확히 동일 (422 + code='message_blocked'
+  // + category 미노출) — FE 핸들러 무변경. audit log 도 같은 테이블 (layer 컬럼은
+  // moderation_blocks v1 스키마에 없으므로 console 로그에만 layer='openai' 가시화).
+  // fail-open: 키 미설정 / OpenAI 다운 시 통과 (사전 차단이 1차 방어선).
+  const openaiResult = await checkOpenAiModeration(text);
+  if (openaiResult.blocked) {
+    console.warn('[moderation.block]', {
+      sender_id: req.userId,
+      category: openaiResult.category,
+      raw_category: openaiResult.rawCategory,
+      layer: 'openai',
+      at: new Date().toISOString(),
+    });
+    void supabase
+      .from('moderation_blocks')
+      .insert({
+        sender_id: req.userId!,
+        category: openaiResult.category!,
+        // OpenAI 는 multi-lingual 한 모델이라 language 단정 어려움 — 메시지 언어
+        // 추정은 별도 로직 필요. v1 에선 송신자 profiles.language 를 fallback 으로
+        // 사용. 추후 OpenAI 응답의 language field 활용 검토 (omni-moderation-latest
+        // 는 language 명시 안 함).
+        language: senderLang ?? 'ko',
+      })
+      .then(({ error }) => {
+        if (error) {
+          console.error('[moderation.block.audit_insert_failed]', error.message);
+        }
+      });
+    res.status(422).json({
+      error: 'Message contains restricted expressions',
+      code: 'message_blocked',
+    });
     return;
   }
 

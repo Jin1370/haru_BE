@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { supabase } from '../config/supabase';
 import { authMiddleware } from '../middleware/auth';
 import { validateQuery } from '../middleware/validate';
+import { requireNotFrozen } from '../utils/freezeGuard';
 import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
 import { pickViewerSlot } from './swipe';
 
@@ -287,7 +288,8 @@ router.get('/:matchId/partner', async (req: AuthRequest, res: Response) => {
 // 거부 — 활성 매치를 정리하려면 차단/언매치를 먼저 거쳐 tombstone 으로
 // 만들어야 한다. 멱등하다: 이미 hidden_by 에 들어 있으면 추가 작업 없이
 // 204. 양쪽이 모두 숨긴 매치 하드 삭제는 별도 클린업 잡(향후) 대상.
-router.post('/:matchId/hide', async (req: AuthRequest, res: Response) => {
+// message-moderation-v1 (PR2): freeze 사용자 mutating 차단.
+router.post('/:matchId/hide', requireNotFrozen, async (req: AuthRequest, res: Response) => {
   const { matchId } = req.params;
   const userId = req.userId!;
 

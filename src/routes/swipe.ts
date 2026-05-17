@@ -5,6 +5,7 @@ import { validateBody, validateQuery } from '../middleware/validate';
 import { swipeBodySchema, discoverQuerySchema, quotaQuerySchema } from '../schemas/swipe';
 import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
 import { sendPushToUser } from '../services/pushNotifications';
+import { requireNotFrozen } from '../utils/freezeGuard';
 
 // 시청자 언어 → 보이스 인트로 슬롯 매핑 (mig 011).
 // ko/ja/en 활성. th/hi/그 외/null 은 'en' 폴백 (FE 의 영문 강제 정책과 일관).
@@ -441,7 +442,13 @@ router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, r
 });
 
 // 스와이프
-router.post('/swipe', validateBody(swipeBodySchema), async (req: AuthRequest, res: Response) => {
+//
+// message-moderation-v1 (PR2): freeze 사용자의 like 시도를 차단.
+// GET /api/discover 와 GET /likes-received 는 이미 SQL 단계에서 `.eq('is_active', true)`
+// 필터로 freeze 사용자를 다른 viewer 의 노출 풀에서 제거한다 (회귀 매트릭스 #1, #2).
+// 본 POST 만 가드 — 본인의 능동 swipe 행위를 막아 reciprocal like 매치 생성 경로
+// 자체를 차단.
+router.post('/swipe', requireNotFrozen, validateBody(swipeBodySchema), async (req: AuthRequest, res: Response) => {
   const { swiped_id, direction } = req.body;
 
   const { error: swipeError } = await supabase.from('swipes').insert({

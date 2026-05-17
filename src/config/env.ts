@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import { writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { z } from 'zod';
 
 dotenv.config();
 
@@ -59,6 +60,16 @@ export const env = {
     apiKey: required('ELEVENLABS_API_KEY'),
   },
 
+  // message-moderation-v1 follow-up (B 안): OpenAI Moderation API key.
+  // 사전 차단 layer 통과 후 omni-moderation-latest 호출 → 4 카테고리
+  // (sexual / sexual-minors / illicit / self-harm-instructions) 임계치 초과 시 422.
+  // 호출 자체 무료 (rate limit + 사용 데이터 OpenAI 수집은 별개). 키 미설정 시
+  // OpenAI layer skip — 사전 차단만으로 동작 (fail-open). 본 분기를 명시적으로 두는
+  // 이유: 로컬 개발자 + 기존 dev 환경 hot reload 시 키 없어도 서버 startup 차단 X.
+  openai: {
+    moderationApiKey: process.env.OPENAI_API_KEY || '',
+  },
+
   vertexAi: {
     projectId: required('GCP_PROJECT_ID'),
     location: process.env.GCP_LOCATION || 'us-central1',
@@ -74,5 +85,20 @@ export const env = {
       process.env.ADMIN_DASHBOARD_ENABLED === 'true'
         ? required('ADMIN_SECRET')
         : '',
+  },
+
+  // message-moderation-v1 (PR2): 누적 신고 임계치.
+  // routes/report.ts 가 INSERT 성공 후 reported_id 의 총 신고 수가 이 값에 도달하면
+  // 자동 freeze (is_active=false + frozen_at=now()) + freeze_events INSERT.
+  // 기본값 3 — strategist 권장은 5 였으나 사용자 결정으로 3 채택.
+  // min=1 max=100 zod 검증 (0 또는 음수는 즉시 fail-fast).
+  moderation: {
+    autoFreezeReportThreshold: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .default(3)
+      .parse(process.env.AUTO_FREEZE_REPORT_THRESHOLD),
   },
 };

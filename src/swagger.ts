@@ -24,6 +24,21 @@ export const swaggerDocument = {
         type: 'object',
         properties: { error: { type: 'string' } },
       },
+      // message-moderation-v1 (PR2): freeze 사용자 mutating 라우트 가드 응답.
+      // FE 의 services/api.ts 글로벌 핸들러가 `code: 'account_frozen'` 매칭으로
+      // 모달 1회 + 로그아웃 흐름 발화. 가드 적용 라우트:
+      //   POST /api/discover/swipe / POST /api/matches/{matchId}/messages /
+      //   POST /api/matches/{matchId}/hide / PUT /api/profile/me /
+      //   POST /api/profile/photos / DELETE /api/profile/photos/{index} /
+      //   POST /api/voice/clone
+      AccountFrozenError: {
+        type: 'object',
+        properties: {
+          error: { type: 'string', example: 'Account frozen' },
+          code: { type: 'string', example: 'account_frozen' },
+        },
+        required: ['error', 'code'],
+      },
       Profile: {
         type: 'object',
         properties: {
@@ -250,6 +265,7 @@ export const swaggerDocument = {
           200: { description: '로그인 성공', content: { 'application/json': { schema: { type: 'object', properties: { access_token: { type: 'string' }, refresh_token: { type: 'string' }, user: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, email: { type: 'string', format: 'email' } } } } } } } },
           400: { description: 'email/password 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           401: { description: '인증 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 정지 (frozen) — code: account_frozen', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
@@ -266,6 +282,7 @@ export const swaggerDocument = {
           200: { description: '로그인 성공', content: { 'application/json': { schema: { type: 'object', properties: { access_token: { type: 'string' }, refresh_token: { type: 'string' }, user: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, email: { type: 'string', format: 'email' } } } } } } } },
           400: { description: 'id_token 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           401: { description: '인증 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 정지 (frozen) — code: account_frozen', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
@@ -282,6 +299,7 @@ export const swaggerDocument = {
           200: { description: '갱신 성공', content: { 'application/json': { schema: { type: 'object', properties: { access_token: { type: 'string' }, refresh_token: { type: 'string' } } } } } },
           400: { description: 'refresh_token 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           401: { description: '갱신 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 정지 (frozen) — code: account_frozen', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
@@ -322,6 +340,7 @@ export const swaggerDocument = {
         responses: {
           200: { description: '성공', content: { 'application/json': { schema: { $ref: '#/components/schemas/Profile' } } } },
           400: { description: '유효성 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
@@ -333,6 +352,7 @@ export const swaggerDocument = {
         responses: {
           200: { description: '업로드 성공', content: { 'application/json': { schema: { type: 'object', properties: { url: { type: 'string', format: 'uri' }, photos: { type: 'array', items: { type: 'string', format: 'uri' } } } } } } },
           400: { description: '파일 없음 또는 6장 초과', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
@@ -344,6 +364,7 @@ export const swaggerDocument = {
         responses: {
           200: { description: '삭제 성공', content: { 'application/json': { schema: { type: 'object', properties: { photos: { type: 'array', items: { type: 'string' } } } } } } },
           400: { description: '잘못된 인덱스', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
@@ -360,6 +381,7 @@ export const swaggerDocument = {
         requestBody: { required: true, content: { 'multipart/form-data': { schema: { type: 'object', required: ['audio'], properties: { audio: { type: 'string', format: 'binary' } } } } } },
         responses: {
           200: { description: '클론 생성 완료', content: { 'application/json': { schema: { type: 'object', properties: { voice_id: { type: 'string' }, status: { type: 'string' } } } } } },
+          403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
           500: { description: '클론 생성 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
@@ -410,6 +432,7 @@ export const swaggerDocument = {
         responses: {
           200: { description: '스와이프 완료', content: { 'application/json': { schema: { type: 'object', properties: { direction: { type: 'string' }, match: { $ref: '#/components/schemas/Match', nullable: true } } } } } },
           400: { description: '파라미터 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
           409: { description: '이미 스와이프함', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
@@ -490,7 +513,35 @@ export const swaggerDocument = {
         responses: {
           202: { description: '큐잉 성공 — INSERT 는 realtime 으로 도착', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
           400: { description: 'text 누락/초과', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          403: { description: '매치 비참여자 / 차단됨', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: {
+            description: '매치 비참여자 / 차단됨 / 계정 freeze (message-moderation-v1 PR2)',
+            content: {
+              'application/json': {
+                schema: {
+                  oneOf: [
+                    { $ref: '#/components/schemas/Error' },
+                    { $ref: '#/components/schemas/AccountFrozenError' },
+                  ],
+                },
+              },
+            },
+          },
+          // message-moderation-v1 (PR1): 사전 키워드 매칭 시 422.
+          // body 에 카테고리/매칭 토큰 미노출 — 송신자 우회 패턴 학습 차단.
+          422: {
+            description: '사전 키워드 차단 (모더레이션) — code: message_blocked',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', example: 'Message contains restricted expressions' },
+                    code: { type: 'string', example: 'message_blocked' },
+                  },
+                },
+              },
+            },
+          },
         },
       },
     },

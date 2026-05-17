@@ -7,6 +7,7 @@ import { authMiddleware } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
 import { profileUpsertSchema } from '../schemas/profile';
 import { lookupBioPhrase } from '../constants/bioPhrasesCatalog';
+import { requireNotFrozen } from '../utils/freezeGuard';
 import { AuthRequest, VoiceIntroTranslations } from '../types';
 
 const router = Router();
@@ -31,7 +32,8 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
 });
 
 // 내 프로필 수정 (생성 포함 - upsert)
-router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, res: Response) => {
+// message-moderation-v1 (PR2): freeze 사용자 mutating 차단.
+router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (req: AuthRequest, res: Response) => {
   const {
     display_name,
     birth_date,
@@ -126,7 +128,8 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 // 프로필 사진 업로드
-router.post('/photos', upload.single('photo'), async (req: AuthRequest, res: Response) => {
+// message-moderation-v1 (PR2): freeze 사용자 mutating 차단.
+router.post('/photos', requireNotFrozen, upload.single('photo'), async (req: AuthRequest, res: Response) => {
   if (!req.file) {
     res.status(400).json({ error: 'No photo file provided' });
     return;
@@ -164,7 +167,8 @@ router.post('/photos', upload.single('photo'), async (req: AuthRequest, res: Res
 });
 
 // 프로필 사진 삭제
-router.delete('/photos/:index', async (req: AuthRequest, res: Response) => {
+// message-moderation-v1 (PR2): freeze 사용자 mutating 차단.
+router.delete('/photos/:index', requireNotFrozen, async (req: AuthRequest, res: Response) => {
   const index = parseInt(req.params.index as string, 10);
 
   const { data: profile } = await supabase

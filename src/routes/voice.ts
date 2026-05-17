@@ -4,6 +4,7 @@ import { supabase } from '../config/supabase';
 import { uploadFile } from '../services/storage';
 import { createVoiceClone, deleteVoiceClone } from '../services/elevenlabs';
 import { authMiddleware } from '../middleware/auth';
+import { requireNotFrozen } from '../utils/freezeGuard';
 import { AuthRequest } from '../types';
 
 const router = Router();
@@ -23,7 +24,10 @@ const ALLOWED_AUDIO_TYPES = ['audio/wav', 'audio/wave', 'audio/x-wav', 'audio/mp
 const MIN_VOICE_SAMPLE_BYTES = 40 * 1024;
 
 // 음성 샘플 업로드 + ElevenLabs 클론 생성
-router.post('/clone', upload.single('audio'), async (req: AuthRequest, res: Response) => {
+// message-moderation-v1 (PR2): freeze 사용자의 voice clone 재생성 차단 — voice clone
+// 자체가 자동 freeze 의 root cause (노골 표현 합성) 이므로 frozen 사용자가 자기
+// voice 를 갱신해 우회하는 경로를 막는다.
+router.post('/clone', requireNotFrozen, upload.single('audio'), async (req: AuthRequest, res: Response) => {
   if (!req.file) {
     res.status(400).json({ error: 'No audio file provided' });
     return;

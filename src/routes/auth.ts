@@ -103,6 +103,27 @@ async function emailExists(email: string): Promise<boolean | null> {
 // what Supabase's default rules would otherwise allow.
 const PASSWORD_RE = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/;
 
+// message-moderation-v1 follow-up: 로그인 시점 frozen 차단.
+// Supabase 인증은 통과했지만 profiles.frozen_at 가 set 된 사용자에게는
+// 토큰을 발급하지 않고 403 account_frozen 응답. FE 글로벌 핸들러가 모달 1회
+// 노출 + 자동 로그아웃 흐름으로 통합. 가해자가 자기 상태를 다음 mutating 호출
+// 까지 모르고 화면을 돌아다니는 UX 회귀를 차단한다 (2026-05-18 dev 환경 표면화).
+// signup 은 신규 가입이라 freeze 불가 → 체크 생략.
+async function isAccountFrozen(userId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('frozen_at')
+    .eq('id', userId)
+    .maybeSingle();
+  if (error) {
+    // profile 조회 실패는 frozen 판정 불가 → 보수적으로 통과 (login 차단이
+    // 인프라 장애로 모든 사용자에게 적용되는 회귀 회피). 실패 로그만 가시화.
+    console.error('[auth.frozen_check_failed]', { user_id: userId, error: error.message });
+    return false;
+  }
+  return Boolean(data?.frozen_at);
+}
+
 // 이메일+비밀번호 회원가입
 router.post('/signup', async (req: Request, res: Response) => {
   const { email, password } = req.body;
@@ -181,6 +202,11 @@ router.post('/login', async (req: Request, res: Response) => {
     return;
   }
 
+  if (data.user && (await isAccountFrozen(data.user.id))) {
+    res.status(403).json({ error: 'Account frozen', code: 'account_frozen' });
+    return;
+  }
+
   res.json({
     access_token: data.session?.access_token,
     refresh_token: data.session?.refresh_token,
@@ -207,6 +233,11 @@ router.post('/google', async (req: Request, res: Response) => {
 
   if (error) {
     res.status(401).json({ error: error.message });
+    return;
+  }
+
+  if (data.user && (await isAccountFrozen(data.user.id))) {
+    res.status(403).json({ error: 'Account frozen', code: 'account_frozen' });
     return;
   }
 
@@ -408,6 +439,30 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
     return;
   }
 
+  // (1.6) message-moderation-v1 sprint: moderation_blocks + freeze_events 동기 DELETE.
+  // mig 020/021 의 FK CASCADE 는 profiles 가 실제 DELETE 될 때만 발화하는데
+  // (1) 단계에서 profiles 는 anonymize 만 한다 — device_tokens 와 동일 회귀.
+  // 미정리 시 userId-linked 모더레이션 차단 이력 + freeze audit 가 90일+
+  // 누적 보존되어 GDPR/PIPA 데이터 삭제권 위반.
+  // 두 테이블 모두 service_role 전용 RLS 라 운영자 view 가 핵심 보존 대상 —
+  // anonymize 이전 동기 경로 + 실패 시 500 으로 inconsistent state 노출.
+  const { error: modBlocksErr } = await supabase
+    .from('moderation_blocks')
+    .delete()
+    .eq('sender_id', userId);
+  if (modBlocksErr) {
+    res.status(500).json({ error: modBlocksErr.message });
+    return;
+  }
+  const { error: freezeEventsErr } = await supabase
+    .from('freeze_events')
+    .delete()
+    .eq('frozen_user_id', userId);
+  if (freezeEventsErr) {
+    res.status(500).json({ error: freezeEventsErr.message });
+    return;
+  }
+
   // (2) Anonymize the auth.users row so the user can no longer authenticate
   // and their original email becomes free for re-registration. Email goes to
   // a non-routable .local address; password is set to 32 bytes of random hex
@@ -454,6 +509,11 @@ router.post('/refresh', async (req: Request, res: Response) => {
 
   if (error) {
     res.status(401).json({ error: error.message });
+    return;
+  }
+
+  if (data.user && (await isAccountFrozen(data.user.id))) {
+    res.status(403).json({ error: 'Account frozen', code: 'account_frozen' });
     return;
   }
 

@@ -140,7 +140,7 @@ async function synthesizeSlot(args: {
   const { userId, voiceId, lang, text, gender } = args;
   try {
     await setSlotStatus(userId, lang, 'processing');
-    const audio = await synthesizeSpeech(text, voiceId, null, gender);
+    const audio = await synthesizeSpeech(text, voiceId, null, gender, lang);
     const path = `${userId}/voice-intro-${lang}-${Date.now()}.mp3`;
     const audioUrl = await uploadFile(VOICE_INTRO_BUCKET, path, audio, 'audio/mpeg');
 

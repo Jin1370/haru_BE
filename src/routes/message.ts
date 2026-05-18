@@ -476,7 +476,7 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
       // TTS 스킵 — audio_url=null 이지만 의도된 경로이므로 'ready' 로 마킹.
     } else {
       const textToSynthesize = ensureSpeakableForTTS(translation);
-      const audio = await synthesizeSpeech(textToSynthesize, voiceId, emotion, senderGender);
+      const audio = await synthesizeSpeech(textToSynthesize, voiceId, emotion, senderGender, recipientLang);
       const path = `${messageId}.mp3`;
       audioUrl = await uploadFile('voice-messages', path, audio, 'audio/mpeg');
     }

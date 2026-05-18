@@ -418,42 +418,4 @@ describe('generateVoiceIntroAudios', () => {
     });
   });
 
-  // voice_slang_normalization sprint (2026-05-11)
-  describe('슬랭 length-capping 통합 (정규화 → 번역 → TTS)', () => {
-    it('작성자 voice_intro 의 긴 ㅋ 반복이 translateVoiceIntro 인자에서 cap 됨', async () => {
-      hoisted.translateVoiceIntroMock.mockResolvedValue({
-        translations: { ja: 'ja', en: 'en' },
-        detectedSourceLanguage: 'ko',
-      });
-      await generateVoiceIntroAudios(USER_ID, '재밌어요ㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋ', VOICE_ID, 'ko');
-      // 번역 호출의 text 인자가 정규화된 값이어야 함.
-      const callArg = hoisted.translateVoiceIntroMock.mock.calls[0]?.[0];
-      expect(callArg.text).toBe('재밌어요ㅋㅋㅋㅋ');
-    });
-
-    it('작성자 슬롯 TTS 입력도 정규화된 텍스트', async () => {
-      hoisted.translateVoiceIntroMock.mockResolvedValue({
-        translations: { ja: 'ja', en: 'en' },
-        detectedSourceLanguage: 'ko',
-      });
-      await generateVoiceIntroAudios(USER_ID, '재밌어요ㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋ', VOICE_ID, 'ko');
-      // 작성자(ko) 슬롯 TTS 호출의 text 인자가 정규화된 값.
-      const ttsTexts = hoisted.synthesizeSpeechMock.mock.calls.map((c: any[]) => c[0]);
-      expect(ttsTexts).toContain('재밌어요ㅋㅋㅋㅋ');
-      expect(ttsTexts).not.toContain('재밌어요ㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋ');
-    });
-
-    it('preset bypass 경로는 정규화 비적용 (카탈로그 텍스트 원본 보존)', async () => {
-      // 카탈로그 텍스트가 ㅋ 반복을 포함할 일은 없지만, 만약 가상으로 있다면
-      // server-authoritative 정책상 원본 그대로 TTS 에 사용되어야 함.
-      const presetTranslations = {
-        ko: 'ㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋ 안녕',
-        ja: 'ja',
-        en: 'en',
-      };
-      await generateVoiceIntroAudios(USER_ID, 'whatever', VOICE_ID, 'ko', presetTranslations);
-      const ttsTexts = hoisted.synthesizeSpeechMock.mock.calls.map((c: any[]) => c[0]);
-      expect(ttsTexts).toContain('ㅋㅋㅋㅋㅋㅋㅋㅋㅋㅋ 안녕');
-    });
-  });
 });

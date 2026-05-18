@@ -98,6 +98,7 @@ Text to translate: ${JSON.stringify(params.text)}`;
 const VOICE_INTRO_SYSTEM_PROMPT = `You translate dating-app voice intro texts (a short, first-person self-introduction line that the speaker will record with their cloned voice). The translation will be spoken aloud by a TTS engine using the speaker's cloned voice.
 
 Rules:
+- CRITICAL: Inline ElevenLabs audio tags written as [laughs], [sad], or similar [single_word] forms in square brackets, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
 - Preserve the speaker's intent, mood, and casual/playful register. Voice intros are typically 80-160 characters and aim to invite a stranger to swipe right.
 - Match natural spoken length within ±20% of the source character count. Do NOT pad or truncate to extremes.
 - Use a register appropriate for casual self-introduction in each language:

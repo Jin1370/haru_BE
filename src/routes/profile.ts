@@ -8,6 +8,8 @@ import { validateBody } from '../middleware/validate';
 import { profileUpsertSchema } from '../schemas/profile';
 import { lookupBioPhrase } from '../constants/bioPhrasesCatalog';
 import { requireNotFrozen } from '../utils/freezeGuard';
+import { isBlocked } from '../constants/moderationDictionary';
+import { checkOpenAiModeration } from '../services/openaiModeration';
 import { AuthRequest, VoiceIntroTranslations } from '../types';
 
 const router = Router();
@@ -77,6 +79,85 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
   const prevVoiceIntro = prev?.voice_intro ?? null;
   const nextVoiceIntro = resolvedVoiceIntro;
   const voiceIntroChanged = prevVoiceIntro !== nextVoiceIntro;
+
+  // voice-intro-moderation-unification sprint: voice intro 변경 시 메시지와 동일한
+  // 모더레이션 게이트 (사전 키워드 차단 + OpenAI Moderation 2차 검수) 적용. 차별점
+  // 2 (송신자 클론 보이스 TTS) 의 평판 리스크 표면 (디스커버 노출 + 클론 보이스 합성)
+  // 을 메시지와 동일 인프라로 차단.
+  //
+  // 적용 조건: voiceIntroChanged === true 이고 resolvedVoiceIntro 가 비어있지 않으며
+  // preset 매칭이 아닌 경우. preset 경로 (voice-intro-preset-bypass sprint) 는 BE
+  // 카탈로그가 손번역 화이트리스트 + server-authoritative override 가 phrase_id 위조를
+  // 차단하므로 모더레이션 우회 안전. 카탈로그 변경 게이트 (`bioPhrasesCatalog.test.ts`
+  // EXPECTED_FE_FIXTURE drift 1차 방어선) 가 손번역의 안전성을 보장.
+  //
+  // 응답 shape (422 + code='message_blocked') 는 메시지와 의도적으로 동일 — FE
+  // 422 핸들러 + i18n 토스트 키 재사용.
+  if (voiceIntroChanged && resolvedVoiceIntro && !presetTranslations) {
+    const dictResult = isBlocked(resolvedVoiceIntro);
+    if (dictResult.blocked) {
+      console.warn('[moderation.block]', {
+        sender_id: req.userId,
+        category: dictResult.category,
+        language: dictResult.language,
+        surface: 'voice_intro',
+        layer: 'dictionary',
+        at: new Date().toISOString(),
+      });
+      void supabase
+        .from('moderation_blocks')
+        .insert({
+          sender_id: req.userId!,
+          category: dictResult.category!,
+          language: dictResult.language!,
+          surface: 'voice_intro',
+        })
+        .then(({ error }) => {
+          if (error) {
+            console.error('[moderation.block.audit_insert_failed]', error.message);
+          }
+        });
+      res.status(422).json({
+        error: 'Voice intro contains restricted expressions',
+        code: 'message_blocked',
+      });
+      return;
+    }
+
+    const openaiResult = await checkOpenAiModeration(resolvedVoiceIntro);
+    if (openaiResult.blocked) {
+      // OpenAI 는 multi-lingual 모델 — language 단정 어려움. 작성자 본인 profiles.language
+      // raw 값을 fallback 으로 사용 (normalizeAuthorLanguage 적용 전 — audit log 의
+      // 운영 의미는 작성자 declared language).
+      const authorLang = (language as string | null | undefined) ?? 'ko';
+      console.warn('[moderation.block]', {
+        sender_id: req.userId,
+        category: openaiResult.category,
+        raw_category: openaiResult.rawCategory,
+        surface: 'voice_intro',
+        layer: 'openai',
+        at: new Date().toISOString(),
+      });
+      void supabase
+        .from('moderation_blocks')
+        .insert({
+          sender_id: req.userId!,
+          category: openaiResult.category!,
+          language: authorLang,
+          surface: 'voice_intro',
+        })
+        .then(({ error }) => {
+          if (error) {
+            console.error('[moderation.block.audit_insert_failed]', error.message);
+          }
+        });
+      res.status(422).json({
+        error: 'Voice intro contains restricted expressions',
+        code: 'message_blocked',
+      });
+      return;
+    }
+  }
 
   const upsertPayload: Record<string, unknown> = {
     id: req.userId!,

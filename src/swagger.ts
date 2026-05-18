@@ -345,6 +345,22 @@ export const swaggerDocument = {
           200: { description: '성공', content: { 'application/json': { schema: { $ref: '#/components/schemas/Profile' } } } },
           400: { description: '유효성 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
+          // voice-intro-moderation-unification sprint: voice_intro 변경 시 사전 차단 +
+          // OpenAI Moderation 2차 검수. 응답 shape 는 메시지와 동일 (FE 핸들러 재사용).
+          422: {
+            description: 'voice_intro 모더레이션 차단 — code: message_blocked',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', example: 'Voice intro contains restricted expressions' },
+                    code: { type: 'string', example: 'message_blocked' },
+                  },
+                },
+              },
+            },
+          },
         },
       },
     },

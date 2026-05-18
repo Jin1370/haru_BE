@@ -92,10 +92,11 @@ export async function synthesizeSpeech(
         // useSpeakerBoost 는 API 가 받지만 모델이 무시. expressiveness 와 정체성
         // 제어는 voiceSettings 가 아닌 (1) stability 프리셋 (2) audio tag
         // (persona/emotion) (3) 텍스트 punctuation 으로 한다.
-        // - stability 0: Creative 프리셋. 최대 expressiveness. 원본 prosody 변동을
-        //   가장 풍부하게 반영하지만 take 간 톤 흔들림 가능 (hallucination 위험 최대).
-        //   대안: 0.5 Natural (균형), 1.0 Robust (최대 안정).
-        voiceSettings: { stability: 0.5 },
+        // - stability 1.0: Robust 프리셋. take 간 prosody 변동 최소화, 최대 안정.
+        //   참고: 일부 커뮤니티 글이 "Robust 는 audio tag 무시" 라고 주장하지만
+        //   실증 테스트상 tag 가 honor 됨 (효과가 Natural 0.5 보다 약할 수는
+        //   있음). 대안: 0.5 Natural (균형), 0.0 Creative (최대 expressiveness).
+        voiceSettings: { stability: 1.0 },
     });
     return streamToBuffer(audioStream);
 }

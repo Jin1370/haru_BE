@@ -25,7 +25,6 @@ export interface Profile {
   interests: string[];
   photos: string[];
   elevenlabs_voice_id: string | null;
-  voice_sample_url: string | null;
   voice_clone_status: 'pending' | 'processing' | 'ready' | 'failed';
   // mig 011 신규. 슬롯은 ko/ja/en 만. 키 미존재 가능.
   voice_intro_translations: VoiceIntroTranslations;

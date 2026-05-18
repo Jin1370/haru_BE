@@ -270,7 +270,6 @@ async function seedOne(
     interests: persona.interests,
     photos: photoUrls,
     elevenlabs_voice_id: voice.id,
-    voice_sample_url: null, // 스톡 보이스 — 원본 샘플 업로드 없음
     voice_clone_status: 'ready',
     is_active: true,
   });

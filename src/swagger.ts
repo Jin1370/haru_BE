@@ -52,7 +52,6 @@ export const swaggerDocument = {
           interests: { type: 'array', items: { type: 'string' } },
           photos: { type: 'array', items: { type: 'string', format: 'uri' } },
           elevenlabs_voice_id: { type: 'string', nullable: true },
-          voice_sample_url: { type: 'string', nullable: true },
           voice_clone_status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
           voice_intro_translations: {
             type: 'object',

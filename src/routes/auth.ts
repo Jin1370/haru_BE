@@ -334,7 +334,6 @@ router.post('/change-password', authMiddleware, async (req: AuthRequest, res: Re
 //
 // Buckets we wipe:
 //   * photos                — `{userId}/...` folder of profile photos
-//   * voice-samples         — `{userId}.wav` voice clone source
 //   * voice-intro-audio     — `{userId}/...` folder of multi-language TTS
 //
 // Buckets we keep (intentional):
@@ -355,13 +354,6 @@ async function cleanupDeletedUserAssets(userId: string, voiceCloneId: string | n
 
   const tasks: Array<{ name: string; run: () => Promise<unknown> }> = [
     { name: 'photos', run: () => removeFolder('photos', userId) },
-    {
-      name: 'voice-samples',
-      run: async () => {
-        const { error } = await supabase.storage.from('voice-samples').remove([`${userId}.wav`]);
-        if (error) throw new Error(error.message);
-      },
-    },
     { name: 'voice-intro-audio', run: () => removeFolder('voice-intro-audio', userId) },
   ];
 
@@ -412,7 +404,6 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
       voice_intro_translations: {},
       voice_intro_audio_status: {},
       elevenlabs_voice_id: null,
-      voice_sample_url: null,
       voice_clone_status: 'pending',
       is_active: false,
       deleted_at: new Date().toISOString(),

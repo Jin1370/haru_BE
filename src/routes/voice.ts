@@ -62,9 +62,6 @@ router.post('/clone', requireNotFrozen, upload.single('audio'), async (req: Auth
       .update({ voice_clone_status: 'processing' })
       .eq('id', req.userId!);
 
-    const path = `${req.userId!}.wav`;
-    const voiceSampleUrl = await uploadFile('voice-samples', path, req.file.buffer, req.file.mimetype);
-
     // ElevenLabs 클론 생성
     const voiceId = await createVoiceClone(req.userId!, req.file.buffer, req.file.originalname);
 
@@ -73,7 +70,6 @@ router.post('/clone', requireNotFrozen, upload.single('audio'), async (req: Auth
       .from('profiles')
       .update({
         elevenlabs_voice_id: voiceId,
-        voice_sample_url: voiceSampleUrl,
         voice_clone_status: 'ready',
         updated_at: new Date().toISOString(),
       })

@@ -1,0 +1,35 @@
+-- ========== voice-sample-removal sprint ==========
+-- profiles.voice_sample_url (Supabase Storage `voice-samples` 버킷의 raw 학습
+-- 음성 파일 URL) 컬럼 drop.
+--
+-- 배경:
+--   * 차별점 2 (송신자 클론 보이스 TTS) 의 가장 큰 평판 리스크는 raw 학습
+--     음성이 외부로 노출되는 표면. 클론 생성 직후엔 ElevenLabs voice_id 만
+--     있으면 TTS 가 가능하므로 원본 학습 데이터를 서버에 보관할 정당성이 없다.
+--   * PIPA §3 (개인정보 최소 수집) / GDPR Art.5(c) (data minimization) 정합.
+--   * 운영 측 사용처는 step2.tsx:213 / settings/voice.tsx:201 의 "이미 등록된
+--     원본 재청취" 1 곳뿐 — 그 분기는 본 sprint 에서 함께 단순화. 녹음 직후
+--     미리듣기는 FE `useVoiceCloneRecorder.ts` 의 `recordingUri` (디바이스
+--     로컬 캐시) 가 담당하므로 영향 없음.
+--   * mig 001 에서 `voice_sample_url TEXT` 로 도입된 이후 인덱스/제약/RLS
+--     참조 없음 (mig 001/002/008 grep 검증). RLS 정책은 `profiles` 행 단위
+--     read 만 제어하고 컬럼 단위 참조 없음 → ALTER RLS 불필요.
+--   * Realtime publication 은 컬럼 DROP 시 자동으로 publication 컬럼 set
+--     에서 제외됨. REPLICA IDENTITY DEFAULT 라 별도 처리 없음.
+--
+-- 데이터 손실 평가:
+--   * 본 컬럼이 가리키던 Storage 객체 (`voice-samples/{userId}.wav`) 는 마이그
+--     적용 후 Dashboard 수동 cleanup 으로 일괄 삭제 (출시 전 — 사용자 약 N≤a
+--     few seeds). cleanup 가이드는 본 산출물 §E 참조.
+--   * voice clone 자체는 ElevenLabs 측 voice_id 로 계속 동작 — 채팅 TTS /
+--     voice intro 합성 모두 영향 없음.
+--
+-- BE deploy 순서: BE 코드 deploy (uploadFile 호출 + payload 키 제거 + 옛
+-- voice-samples cleanup task 제거) → mig 적용. 역순이면 deploy 직전까지 BE
+-- 가 컬럼 write 시도해 "column does not exist" 에러로 voice clone POST 가
+-- 500 회귀.
+--
+-- forward-only. mig 001~022 는 수정하지 않는다.
+
+ALTER TABLE public.profiles
+  DROP COLUMN IF EXISTS voice_sample_url;

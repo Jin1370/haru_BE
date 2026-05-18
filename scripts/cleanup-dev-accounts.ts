@@ -12,7 +12,7 @@
 //   보존하려면 cleanup 전에 unmark:dev 로 해제하세요.
 //
 // 삭제 순서:
-//   1) Storage 정리 (photos / voice-intro-audio / voice-samples / voice-messages)
+//   1) Storage 정리 (photos / voice-intro-audio / voice-messages)
 //   2) auth.users 삭제 → profiles/swipes/matches/messages/blocks/reports/user_preferences
 //      는 ON DELETE CASCADE 로 자동 정리.
 
@@ -21,7 +21,7 @@ import { supabase } from '../src/config/supabase';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
-const STORAGE_BUCKETS = ['photos', 'voice-intro-audio', 'voice-samples', 'voice-messages'];
+const STORAGE_BUCKETS = ['photos', 'voice-intro-audio', 'voice-messages'];
 
 async function listDevSeedUserIds(): Promise<{ id: string; email: string | null }[]> {
   const out: { id: string; email: string | null }[] = [];

@@ -473,23 +473,9 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
 
     let audioUrl: string | null = null;
     if (!hasSpeakableContent(translation)) {
-      console.log(
-        `[processAndInsertMessage] messageId=${messageId} ${senderLang}->${recipientLang} skip TTS (no speakable content)`,
-        { original: text, translated: translation },
-      );
       // TTS 스킵 — audio_url=null 이지만 의도된 경로이므로 'ready' 로 마킹.
     } else {
       const textToSynthesize = ensureSpeakableForTTS(translation);
-      console.log(
-        `[processAndInsertMessage] messageId=${messageId} ${senderLang}->${recipientLang}`,
-        {
-          original: text,
-          tagged: taggedSource,
-          translated: translation,
-          translatedClean: translatedText,
-          toTTS: textToSynthesize,
-        },
-      );
       const audio = await synthesizeSpeech(textToSynthesize, voiceId, emotion, senderGender);
       const path = `${messageId}.mp3`;
       audioUrl = await uploadFile('voice-messages', path, audio, 'audio/mpeg');

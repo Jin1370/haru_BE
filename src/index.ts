@@ -15,6 +15,7 @@ import reportRoutes from './routes/report';
 import preferenceRoutes from './routes/preference';
 import notificationsRoutes from './routes/notifications';
 import adminRoutes from './routes/admin';
+import { startAudioExpiryScheduler } from './jobs/purgeExpiredAudio';
 
 export const app = express();
 
@@ -106,4 +107,8 @@ if (process.env.NODE_ENV !== 'test') {
   app.listen(env.port, () => {
     console.log(`Server running on port ${env.port}`);
   });
+  // audio-expiry sprint: 청취 완료 + 30일 경과 음성 파일 일일 sweep 등록.
+  // NODE_ENV=test 분기는 scheduler 내부에서도 가드되지만, listen 과 함께 묶어
+  // 부팅 sequence 를 단일 위치로 유지.
+  startAudioExpiryScheduler();
 }

@@ -419,6 +419,150 @@ router.post('/:matchId/messages/:messageId/listened', async (req: AuthRequest, r
 // INSERT 만 fire 하므로 DELETE 기반 재시도는 카운터 불일치를 만들 수 있어
 // 더 위험. 텍스트 재송신이 가장 안전한 경로.
 
+// audio-expiry sprint: 청취 + 30일 경과로 sweep 이 폐기한 음성을 ElevenLabs 로
+// on-demand 재합성. 매치 멤버 누구나 호출 가능 (송신자/수신자 모두 본인 화면에서
+// 재청취 가능해야 함). 다음 조건을 모두 만족해야 200:
+//   * 매치 멤버 (그 외 403)
+//   * 메시지가 해당 매치에 속함 (그 외 404)
+//   * audio_status='ready' AND audio_purged_at IS NOT NULL — 본 메시지가 원래
+//     음성이 있었고 sweep 으로 폐기된 상태 (그 외 409 — 텍스트 전용 메시지
+//     또는 아직 폐기 안 된 메시지에 대한 부정 호출 차단)
+//   * 송신자의 현재 elevenlabs_voice_id 가 존재 (그 외 410 — 송신자가 클론을
+//     소실한 경우. 탈퇴 anonymize / 미보유 등)
+//
+// 재합성 파이프라인은 processAndInsertMessage 와 동일 구조 (prepareTextForTTS →
+// Gemini → synthesizeSpeech → uploadFile) 이나, INSERT 가 아니라 UPDATE 라는
+// 점만 다름. 재생성된 audio 는 versioned path (`{messageId}_v{ts}.mp3`) 로 업로드
+// 해 CDN/클라이언트 캐시 우회 — 동일 path 에 upsert 하면 일부 클라이언트가
+// 옛 404 응답을 캐시했을 때 새 파일을 못 가져오는 회귀 발생.
+//
+// 사용자가 클론을 재녹음했다면 voice_id 가 옛 발신 시점과 다를 수 있다 — 의도된
+// 트레이드오프 (재녹음 = 사용자가 자기 목소리 변경을 명시 동의). UX 영향 미미.
+router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req: AuthRequest, res: Response) => {
+  const { matchId, messageId } = req.params;
+
+  // 1) 매치 멤버 검증
+  const { data: match } = await supabase
+    .from('matches')
+    .select('id, unmatched_at')
+    .eq('id', matchId)
+    .or(`user1_id.eq.${req.userId!},user2_id.eq.${req.userId!}`)
+    .single();
+
+  if (!match) {
+    res.status(403).json({ error: 'Not a member of this match' });
+    return;
+  }
+
+  // unmatched 매치도 재생성 허용 — 채팅 종료 tombstone 화면에서 옛 메시지를 다시
+  // 들을 수 있도록 (UX: 이별 후 메시지 회상). 별도 정책 변경 원하면 여기서 차단.
+
+  // 2) 메시지 조회 + 매치 정합성
+  const { data: msg, error: selectError } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('id', messageId)
+    .eq('match_id', matchId)
+    .single();
+
+  if (selectError || !msg) {
+    res.status(404).json({ error: 'Message not found' });
+    return;
+  }
+
+  // 3) 재생성 가능 상태 검증 — audio_purged_at IS NOT NULL 인 경우만 허용.
+  // 텍스트 전용 메시지 / no-speakable-content / failed 메시지에 대한 부정 호출
+  // 차단. audio_status='ready' 도 함께 체크해 sweep 이 잘못된 상태에 마킹한
+  // 행이 있어도 안전.
+  if (msg.audio_status !== 'ready' || !msg.audio_purged_at) {
+    res.status(409).json({ error: 'Message audio is not in a regeneratable state' });
+    return;
+  }
+
+  // 4) 송신자 프로필 — 현재 voice clone + gender + language 조회. 메시지의
+  // original_language 가 truth source 이지만 gender persona / voice_id 는 현재
+  // 시점의 sender 프로필을 사용한다 (재녹음했을 수 있음).
+  const { data: sender } = await supabase
+    .from('profiles')
+    .select('elevenlabs_voice_id, gender')
+    .eq('id', msg.sender_id)
+    .single();
+
+  const voiceId = (sender?.elevenlabs_voice_id as string | null) ?? null;
+  if (!voiceId) {
+    // 송신자가 클론 소실 — 탈퇴 anonymize 또는 voice 미보유. 재합성 불가.
+    res.status(410).json({ error: 'Sender voice clone unavailable' });
+    return;
+  }
+
+  const rawGender = (sender?.gender as PersonaGender) ?? null;
+  const senderGender: PersonaGender = rawGender === 'female' ? null : rawGender;
+
+  const originalText = msg.original_text as string;
+  const senderLang = msg.original_language as string;
+  const recipientLang = (msg.translated_language as string | null) ?? senderLang;
+  const emotion = (msg.emotion as Exclude<Emotion, 'neutral'> | null) ?? null;
+
+  // 5) 파이프라인 — 본 라우트는 동기 응답이 필요 (FE 가 받은 URL 로 즉시 재생)
+  // 이라 async stub 패턴 적용 안 함. 일반적으로 < 5초.
+  try {
+    const taggedSource = prepareTextForTTS(originalText);
+    const { translation } = await translateMessage({
+      text: taggedSource,
+      targetLanguage: recipientLang,
+    });
+
+    if (!hasSpeakableContent(translation)) {
+      // 원래도 TTS 가 스킵됐어야 할 케이스 — 재합성 불가. 일반적으로 도달 안 함
+      // (sweep 이 audio_url NOT NULL 인 row 만 노렸기 때문). 방어적 분기.
+      res.status(409).json({ error: 'Message has no speakable content' });
+      return;
+    }
+
+    const textToSynthesize = ensureSpeakableForTTS(translation);
+    const audio = await synthesizeSpeech(
+      textToSynthesize,
+      voiceId,
+      emotion,
+      senderGender,
+      recipientLang,
+    );
+
+    // CDN 캐시 회피용 versioned path. 원본 `{messageId}.mp3` 는 sweep 이 이미
+    // 삭제했고, 같은 path 에 upsert 하면 일부 클라이언트가 옛 404 응답을
+    // 캐시한 경우 새 파일을 못 가져온다.
+    const versionedPath = `${messageId}_v${Date.now()}.mp3`;
+    const audioUrl = await uploadFile('voice-messages', versionedPath, audio, 'audio/mpeg');
+
+    // 6) DB UPDATE — audio_url 새 값 + audio_purged_at NULL + audio_refreshed_at
+    // now(). audio_status 는 'ready' 유지 (재합성 자체가 ready 상태에서만 가능).
+    const { data: updated, error: updateError } = await supabase
+      .from('messages')
+      .update({
+        audio_url: audioUrl,
+        audio_purged_at: null,
+        audio_refreshed_at: new Date().toISOString(),
+      })
+      .eq('id', messageId)
+      .select()
+      .single();
+
+    if (updateError || !updated) {
+      // Storage 에는 객체가 올라갔는데 DB 만 실패 — 다음 sweep 사이클에서 orphan
+      // 정리 (Storage 객체는 audio_url 컬럼에 매핑되지 않은 상태로 잔존하므로
+      // sweep 이 못 잡음). 운영 신호로 노출.
+      console.error(`[regenAudio] DB update failed messageId=${messageId} path=${versionedPath}:`, updateError?.message);
+      res.status(500).json({ error: updateError?.message ?? 'Audio regenerate update failed' });
+      return;
+    }
+
+    res.json(updated);
+  } catch (error) {
+    console.error(`[regenAudio] pipeline error messageId=${messageId}:`, error);
+    res.status(502).json({ error: 'Audio regeneration failed' });
+  }
+});
+
 interface ProcessJob {
   messageId: string;
   matchId: string;

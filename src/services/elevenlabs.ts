@@ -1,4 +1,5 @@
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
+import { SILENCE_TAIL } from "../assets/silenceTail";
 import { env } from "../config/env";
 import { Emotion } from "../types";
 
@@ -82,7 +83,15 @@ export async function synthesizeSpeech(
     const personaTag = buildPersonaTag(gender);
     const accentTag = buildAccentTag(targetLanguage);
     const emotionTag = emotion ? `[${emotion}] ` : "";
-    const prefixed = `${personaTag}${accentTag}${emotionTag}${text}`;
+    // eleven_v3 는 종결 prosody 를 빠르게 마무리해 마지막 음절이 잘려 들리는
+    // 경향이 있음 (특히 stability=1.0 Robust + 종결 punctuation 부재 시).
+    // 텍스트 끝에 종결 punctuation 이 없으면 ellipsis 를 부착해 모델이 학습한
+    // "문장 끝" 분포대로 자연 fade-out 을 유도. audio tag (`[laughs]` 등) 로
+    // 끝나는 경우에도 효과음 직후 trailing silence 가 따라붙어 잘림 완화.
+    const trimmedText = text.trimEnd();
+    const hasTerminalPunctuation = /[.!?…。！？]$/.test(trimmedText);
+    const paddedText = hasTerminalPunctuation ? trimmedText : `${trimmedText}…`;
+    const prefixed = `${personaTag}${accentTag}${emotionTag}${paddedText}`;
     const audioStream = await client.textToSpeech.convert(voiceId, {
         text: prefixed,
         modelId: "eleven_v3",
@@ -98,5 +107,11 @@ export async function synthesizeSpeech(
         //   있음). 대안: 0.5 Natural (균형), 0.0 Creative (최대 expressiveness).
         voiceSettings: { stability: 1.0 },
     });
-    return streamToBuffer(audioStream);
+    const speech = await streamToBuffer(audioStream);
+    // eleven_v3 는 합성 stream 마지막 ~0.2초 trailing silence 없이 잘라내는
+    // 경향이 있음 (모델 동작, stability 프리셋 무관). 텍스트 종결 punctuation
+    // padding (paddedText) 으로도 완전히 해결되지 않아 출력 buffer 뒤에
+    // 500ms 무음 MP3 frame 을 직접 concat 해 청취 잘림을 100% 차단.
+    // ID3/Xing 헤더 없는 LAME MP3 라 binary concat 안전 (assets/silenceTail.ts).
+    return Buffer.concat([speech, SILENCE_TAIL]);
 }

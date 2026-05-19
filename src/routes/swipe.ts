@@ -290,9 +290,13 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
 // 사진 1장 / photo_access 잠금 / voice_intro 시청자 언어 슬롯 미러 — FE 의 SwipeCard
 // 컴포넌트를 그대로 재사용할 수 있게 한다.
 //
-// 정렬은 like 한 시각의 내림차순(최근 받은 좋아요 우선). 디스커버의 tier/intra
-// 스코어와 무관 — "받은 좋아요" 는 이미 상호 의향이 한쪽 확정된 풀이므로 별도
-// 정렬 신호가 필요 없다 (시간순이 사용자 직관에 부합).
+// 사전 필터: 성별/연령 (user_preferences) + viewer 본인 언어 동일 후보 제외 (cross-language
+// 정책) — 디스커버와 동일하게 적용. 언어/국가 선호는 SQL 단계에서 거르지 않고 티어
+// 정렬 신호로만 사용 (디스커버 동일 패턴).
+//
+// 정렬: (tier ASC, like 시각 DESC). 같은 티어 안에선 최근 받은 좋아요 우선.
+// reciprocity boost (+50) 는 모든 후보에 동일 적용되어 무력화되므로 intra score
+// 계산을 생략. 디스커버의 (tier ASC, intra DESC) 와 다른 점은 2차 키만.
 //
 // 일일 50장 한도와는 무관하게 GET 은 무료(조회는 카운트 안 함). 실제 스와이프
 // 행위(POST /swipe)는 디스커버 swipe 와 동일 엔드포인트를 공유하므로 quota 도 함께 적용됨.
@@ -316,16 +320,17 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  // 2) 내가 이미 스와이프한 상대 + 차단 양방향 + viewer 본인 언어를 병렬 조회.
+  // 2) 내가 이미 스와이프한 상대 + 차단 양방향 + viewer 본인 언어 + 선호도를 병렬 조회.
   //    likes-received 풀에서 제거할 ID 집합 (이미 응답 끝난 like 는 매치/패스 결과로
   //    별도 추적되므로 받은 좋아요 카드로 다시 노출할 의미 없음).
-  const [viewerSwipesResult, blocksResult, viewerProfileResult] = await Promise.all([
+  const [viewerSwipesResult, blocksResult, viewerProfileResult, prefsResult] = await Promise.all([
     supabase.from('swipes').select('swiped_id').eq('swiper_id', req.userId!),
     supabase
       .from('blocks')
       .select('blocker_id, blocked_id')
       .or(`blocker_id.eq.${req.userId!},blocked_id.eq.${req.userId!}`),
     supabase.from('profiles').select('language').eq('id', req.userId!).single(),
+    supabase.from('user_preferences').select('*').eq('user_id', req.userId!).single(),
   ]);
 
   const swipedSet = new Set<string>(
@@ -337,6 +342,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     ),
   );
   const viewerLanguage = (viewerProfileResult.data?.language as string | null) ?? '';
+  const prefs = prefsResult.data;
 
   const eligibleIds = likerIds.filter((id) => !swipedSet.has(id) && !blockedSet.has(id));
   if (eligibleIds.length === 0) {
@@ -344,14 +350,35 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  // 3) 프로필 일괄 조회 — discover hot path 와 동일한 컬럼 집합.
-  const { data: profiles, error: profilesError } = await supabase
+  // 3) 프로필 일괄 조회 — discover hot path 와 동일한 컬럼 집합 + 동일한 사전 필터
+  //    (성별/연령). 언어 선호는 티어 정렬 신호로 사용되므로 SQL 단계 IN 필터에서
+  //    제거하지 않는다 (미부합 후보는 T2/T3 로 밀려나 노출만 후순위).
+  let query = supabase
     .from('profiles')
     .select(
       'id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, photos, created_at',
     )
     .in('id', eligibleIds)
     .eq('is_active', true);
+
+  if (prefs) {
+    if (prefs.preferred_genders && prefs.preferred_genders.length > 0) {
+      query = query.in('gender', prefs.preferred_genders);
+    }
+    const now = new Date();
+    if (prefs.min_age) {
+      const maxBirthDate = new Date(now.getFullYear() - prefs.min_age, now.getMonth(), now.getDate())
+        .toISOString().split('T')[0];
+      query = query.lte('birth_date', maxBirthDate);
+    }
+    if (prefs.max_age) {
+      const minBirthDate = new Date(now.getFullYear() - prefs.max_age - 1, now.getMonth(), now.getDate())
+        .toISOString().split('T')[0];
+      query = query.gte('birth_date', minBirthDate);
+    }
+  }
+
+  const { data: profiles, error: profilesError } = await query;
 
   if (profilesError) {
     res.status(500).json({ error: profilesError.message });
@@ -368,17 +395,43 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return true;
   });
 
-  // 5) like 시각 역순으로 정렬 (1단계에서 받은 순서 유지) — `eligibleIds` 의
-  //    인덱스를 정렬 키로 사용.
+  // 5) 티어 계산 + 정렬: (tier ASC, like 시각 DESC).
+  //    like 시각 DESC 는 `eligibleIds` 인덱스 ASC 와 동치 (1단계에서 시간 역순으로
+  //    정렬됐으므로). reciprocity boost 는 모든 후보 동일 적용이라 무력화 → intra
+  //    score 미산정.
+  const viewerPrefs: ViewerPrefs = {
+    preferred_languages: (prefs?.preferred_languages as string[] | null) ?? [],
+    preferred_nationalities: (prefs?.preferred_nationalities as string[] | null) ?? [],
+  };
+
   const orderIndex = new Map<string, number>();
   eligibleIds.forEach((id, idx) => orderIndex.set(id, idx));
-  visible.sort((a: any, b: any) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
+
+  const scored = visible.map((row: any) => {
+    const candidate: Candidate = {
+      id: row.id,
+      language: row.language ?? '',
+      nationality: row.nationality,
+      interests: row.interests ?? [],
+      photos: row.photos ?? [],
+      created_at: row.created_at,
+    };
+    return {
+      ...row,
+      _tier: computeTier(candidate, viewerPrefs),
+      _likeIndex: orderIndex.get(row.id) ?? 0,
+    };
+  });
+
+  scored.sort((a, b) => {
+    if (a._tier !== b._tier) return a._tier - b._tier;
+    return a._likeIndex - b._likeIndex;
+  });
 
   // 6) 응답 가공 — discover 와 동일하게 사진 1장 / photo_access 잠금 / voice intro
   //    시청자 언어 슬롯 미러. FE SwipeCard 재사용을 보장하기 위해 shape 일치.
   const slot = pickViewerSlot(viewerLanguage);
-  const results = visible.map((row: any) => {
-    const { photos, voice_intro_audio_urls, created_at, ...rest } = row;
+  const results = scored.map(({ _tier, _likeIndex, photos, voice_intro_audio_urls, created_at, ...rest }) => {
     const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<
       Record<VoiceIntroSlotLanguage, string | null>
     >;

@@ -79,6 +79,14 @@ export interface Message {
   // read-at-removal-list-mask sprint (mig 018): 옛 read_at 컬럼 제거. "읽음" 의미는
   // listened_at 단일 진실원으로 일원화.
   listened_at: string | null;
+  // audio-expiry sprint (mig 025): sweep 이 음성을 폐기한 시각. audio_url=NULL
+  // 과 동시 set. FE 가 "재생성 가능한 purge 상태" 를 감지하는 단일 진실원
+  // (audio_status='ready' + audio_url=NULL + audio_purged_at NOT NULL).
+  // 재생성 시 NULL 로 reset.
+  audio_purged_at: string | null;
+  // audio-expiry sprint (mig 025): 가장 최근 재생성 시각. NULL = 한 번도 재생성
+  // 안 됨 (audio age = created_at). sweep 의 30일 age 체크에 사용.
+  audio_refreshed_at: string | null;
   created_at: string;
 }
 

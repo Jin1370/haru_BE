@@ -187,6 +187,20 @@ export const swaggerDocument = {
             description:
               'voice-first-message-gate (mig 015): 수신자가 음성을 1회 끝까지 재생한 시각. NULL = 미청취 → FE 가 텍스트를 숨기고 편지 UI 만 노출. 본인 발신 메시지는 항상 null.',
           },
+          audio_purged_at: {
+            type: 'string',
+            format: 'date-time',
+            nullable: true,
+            description:
+              'audio-expiry (mig 025): sweep 이 음성을 폐기한 시각. audio_url=NULL 과 동시 set. NOT NULL + audio_status=ready 조합으로 FE 가 재생성 가능 상태 감지.',
+          },
+          audio_refreshed_at: {
+            type: 'string',
+            format: 'date-time',
+            nullable: true,
+            description:
+              'audio-expiry (mig 025): 가장 최근 재생성 시각. NULL = 한 번도 재생성 안 됨. sweep 의 30일 age 체크용.',
+          },
           created_at: { type: 'string', format: 'date-time' },
         },
       },
@@ -617,6 +631,33 @@ export const swaggerDocument = {
     // mid-session UPDATE 패턴 폐기로 retry 의 status 전이 자체가 없어졌다.
     // 실패한 메시지는 audio_url=null, audio_status='failed' 로 INSERT 되며,
     // 사용자가 동일 텍스트로 새 메시지를 보내 재시도한다.
+
+    // audio-expiry sprint: 청취 + 30일 경과로 sweep 이 폐기한 음성을 ElevenLabs
+    // 로 on-demand 재합성. 매치 멤버 누구나 호출 가능.
+    '/api/matches/{matchId}/messages/{messageId}/audio': {
+      post: {
+        tags: ['Message'],
+        summary: '폐기된 음성 메시지 재합성 (on-demand)',
+        description:
+          'audio-expiry sprint: sweep 이 청취 + 30일 경과 후 폐기한 음성을 ElevenLabs 로 재합성. ' +
+          '매치 멤버 누구나 호출 가능 (송신자/수신자 본인 화면에서 재청취 가능해야 함). ' +
+          'audio_purged_at IS NOT NULL 인 ready 메시지만 대상 — 그 외 상태는 409. ' +
+          '재합성된 audio 는 versioned path (`{messageId}_v{ts}.mp3`) 로 업로드해 CDN 캐시 회피. ' +
+          'audio_purged_at 은 NULL 로 reset, audio_refreshed_at 은 now() 로 set.',
+        parameters: [
+          { name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+          { name: 'messageId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+        ],
+        responses: {
+          200: { description: '재합성된 Message row (audio_url 갱신)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
+          403: { description: '매치 비참여자 또는 freeze 된 사용자', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: '메시지 없음 또는 매치 불일치', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: { description: '재합성 불가 상태 (이미 활성 / 텍스트 전용 / no-speakable-content)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          410: { description: '송신자 voice clone 소실 (탈퇴 anonymize / 미보유)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          502: { description: 'ElevenLabs / Gemini / Storage 외부 호출 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
 
     // ── Block ──
     '/api/block': {

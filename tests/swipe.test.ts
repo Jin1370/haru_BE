@@ -392,6 +392,55 @@ describe('Swipe Routes', () => {
         expect(card).toHaveProperty('voice_intro_audio_url');
       }
     });
+
+    // 정렬 키 회귀 가드 — 라우트 내부 정렬 비교 함수를 직접 검증할 수 없으므로
+    // 동일 비교 함수를 재현. 디스커버는 (tier ASC, intra DESC) 였고 받은 좋아요는
+    // (tier ASC, like 시각 DESC) — 2차 키만 다름. like 시각 DESC 는 BE 에서
+    // `eligibleIds` 인덱스 ASC 와 동치 (1단계 시간 역순 조회).
+    describe('Sort key (tier ASC, like 시각 DESC)', () => {
+      type Scored = { _tier: number; _likeIndex: number; id: string };
+      const cmp = (a: Scored, b: Scored) =>
+        a._tier !== b._tier ? a._tier - b._tier : a._likeIndex - b._likeIndex;
+
+      it('티어가 다르면 like 시각에 관계없이 낮은 티어가 앞', () => {
+        // T1 이지만 가장 오래된 like 가, T2 의 가장 최근 like 보다 앞.
+        const list: Scored[] = [
+          { id: 't2_recent', _tier: 2, _likeIndex: 0 },
+          { id: 't1_old', _tier: 1, _likeIndex: 100 },
+        ];
+        list.sort(cmp);
+        expect(list.map((x) => x.id)).toEqual(['t1_old', 't2_recent']);
+      });
+
+      it('동일 티어 안에선 like 시각 DESC (인덱스 ASC = 시각 DESC)', () => {
+        // eligibleIds 가 시간 역순으로 정렬되어 있으므로 인덱스 0 = 가장 최근.
+        const list: Scored[] = [
+          { id: 'oldest', _tier: 1, _likeIndex: 5 },
+          { id: 'newest', _tier: 1, _likeIndex: 0 },
+          { id: 'middle', _tier: 1, _likeIndex: 2 },
+        ];
+        list.sort(cmp);
+        expect(list.map((x) => x.id)).toEqual(['newest', 'middle', 'oldest']);
+      });
+
+      it('티어 경계 + 같은 티어 내 시간순 종합', () => {
+        const list: Scored[] = [
+          { id: 't4_newest', _tier: 4, _likeIndex: 0 },
+          { id: 't1_old', _tier: 1, _likeIndex: 10 },
+          { id: 't2_recent', _tier: 2, _likeIndex: 1 },
+          { id: 't1_recent', _tier: 1, _likeIndex: 2 },
+          { id: 't2_old', _tier: 2, _likeIndex: 8 },
+        ];
+        list.sort(cmp);
+        expect(list.map((x) => x.id)).toEqual([
+          't1_recent', // T1 최근
+          't1_old',    // T1 오래
+          't2_recent', // T2 최근
+          't2_old',    // T2 오래
+          't4_newest', // T4 (시각 무관 후순위)
+        ]);
+      });
+    });
   });
 
   describe('POST /api/discover/swipe', () => {

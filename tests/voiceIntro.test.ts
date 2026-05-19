@@ -133,7 +133,7 @@ describe('normalizeAuthorLanguage', () => {
 });
 
 describe('generateVoiceIntroAudios', () => {
-  it('작성자 ko, 모든 단계 성공 → 3 슬롯 ready + 단일 컬럼 ko URL 미러', async () => {
+  it('작성자 ko, 모든 단계 성공 → 3 슬롯 ready + 슬롯별 URL', async () => {
     hoisted.translateVoiceIntroMock.mockResolvedValue({
       translations: { ja: 'こんにちは', en: 'Hello' },
       detectedSourceLanguage: 'ko',
@@ -154,8 +154,6 @@ describe('generateVoiceIntroAudios', () => {
     expect(profile.voice_intro_audio_urls.ko).toMatch(/voice-intro-ko-/);
     expect(profile.voice_intro_audio_urls.ja).toMatch(/voice-intro-ja-/);
     expect(profile.voice_intro_audio_urls.en).toMatch(/voice-intro-en-/);
-    // 단일 컬럼은 작성자 언어(ko) 슬롯과 동일 URL 미러.
-    expect(profile.voice_intro_audio_url).toBe(profile.voice_intro_audio_urls.ko);
     expect(profile.voice_intro_translations).toEqual({
       ko: '안녕하세요',
       ja: 'こんにちは',
@@ -163,7 +161,7 @@ describe('generateVoiceIntroAudios', () => {
     });
   });
 
-  it('작성자 ja, 모든 단계 성공 → 단일 컬럼 = ja URL', async () => {
+  it('작성자 ja, 모든 단계 성공', async () => {
     hoisted.translateVoiceIntroMock.mockResolvedValue({
       translations: { ko: '안녕', en: 'Hello' },
       detectedSourceLanguage: 'ja',
@@ -175,10 +173,10 @@ describe('generateVoiceIntroAudios', () => {
       targetLanguages: ['ko', 'en'],
     });
     const profile = hoisted.supabaseState.profile;
-    expect(profile.voice_intro_audio_url).toBe(profile.voice_intro_audio_urls.ja);
+    expect(profile.voice_intro_audio_urls.ja).toMatch(/voice-intro-ja-/);
   });
 
-  it('작성자 en, 모든 단계 성공 → 단일 컬럼 = en URL', async () => {
+  it('작성자 en, 모든 단계 성공', async () => {
     hoisted.translateVoiceIntroMock.mockResolvedValue({
       translations: { ko: '안녕', ja: 'こんにちは' },
       detectedSourceLanguage: 'en',
@@ -190,10 +188,10 @@ describe('generateVoiceIntroAudios', () => {
       targetLanguages: ['ko', 'ja'],
     });
     const profile = hoisted.supabaseState.profile;
-    expect(profile.voice_intro_audio_url).toBe(profile.voice_intro_audio_urls.en);
+    expect(profile.voice_intro_audio_urls.en).toMatch(/voice-intro-en-/);
   });
 
-  it('작성자 th (영문 강제 fallback) → en 슬롯으로 정규화, 단일 컬럼 = en URL', async () => {
+  it('작성자 th (영문 강제 fallback) → en 슬롯으로 정규화', async () => {
     hoisted.translateVoiceIntroMock.mockResolvedValue({
       translations: { ko: '안녕', ja: 'こんにちは' },
       detectedSourceLanguage: 'en',
@@ -205,7 +203,7 @@ describe('generateVoiceIntroAudios', () => {
       targetLanguages: ['ko', 'ja'],
     });
     const profile = hoisted.supabaseState.profile;
-    expect(profile.voice_intro_audio_url).toBe(profile.voice_intro_audio_urls.en);
+    expect(profile.voice_intro_audio_urls.en).toMatch(/voice-intro-en-/);
     expect(profile.voice_intro_audio_status).toEqual({ ko: 'ready', ja: 'ready', en: 'ready' });
   });
 
@@ -218,7 +216,7 @@ describe('generateVoiceIntroAudios', () => {
     expect(profile.voice_intro_audio_status.ko).toBe('ready');
     expect(profile.voice_intro_audio_status.ja).toBe('failed');
     expect(profile.voice_intro_audio_status.en).toBe('failed');
-    expect(profile.voice_intro_audio_url).toBe(profile.voice_intro_audio_urls.ko);
+    expect(profile.voice_intro_audio_urls.ko).toMatch(/voice-intro-ko-/);
   });
 
   it('translateVoiceIntro 응답에 일부 슬롯 누락(빈 문자열 포함) → 누락 슬롯 failed', async () => {
@@ -260,7 +258,7 @@ describe('generateVoiceIntroAudios', () => {
     expect(profile.voice_intro_audio_urls.ja).toBeUndefined();
   });
 
-  it('작성자 슬롯 TTS 실패 → 단일 컬럼 voice_intro_audio_url = null 잔존', async () => {
+  it('작성자 슬롯 TTS 실패 → 슬롯 url 미커밋, status=failed', async () => {
     hoisted.translateVoiceIntroMock.mockResolvedValue({
       translations: { ja: 'こんにちは', en: 'Hello' },
       detectedSourceLanguage: 'ko',
@@ -275,14 +273,13 @@ describe('generateVoiceIntroAudios', () => {
     await generateVoiceIntroAudios(USER_ID, '안녕하세요', VOICE_ID, 'ko');
     const profile = hoisted.supabaseState.profile;
     expect(profile.voice_intro_audio_status.ko).toBe('failed');
-    // 단일 컬럼은 (2) 단계의 NULL 리셋 후 작성자 슬롯이 실패라 미러 update 미발생 → null 잔존.
-    expect(profile.voice_intro_audio_url).toBeNull();
+    expect(profile.voice_intro_audio_urls.ko).toBeUndefined();
     // 다른 슬롯은 ready
     expect(profile.voice_intro_audio_status.ja).toBe('ready');
     expect(profile.voice_intro_audio_status.en).toBe('ready');
   });
 
-  it('uploadFile 실패 → 해당 슬롯 status=failed, 단일 컬럼 미러 update 안 됨', async () => {
+  it('uploadFile 실패 → 해당 슬롯 status=failed, url 미커밋', async () => {
     hoisted.translateVoiceIntroMock.mockResolvedValue({
       translations: { ja: 'こんにちは', en: 'Hello' },
       detectedSourceLanguage: 'ko',
@@ -292,13 +289,12 @@ describe('generateVoiceIntroAudios', () => {
     const profile = hoisted.supabaseState.profile;
     // 첫 번째 호출 = ko 작성자 슬롯 실패.
     expect(profile.voice_intro_audio_status.ko).toBe('failed');
-    expect(profile.voice_intro_audio_url).toBeNull();
+    expect(profile.voice_intro_audio_urls.ko).toBeUndefined();
   });
 
-  it('옛 URL cleanup 호출: snapshot 의 단일 + slot URL 모두 deleteFile', async () => {
-    // 사전 상태 — 옛 URL 들이 존재.
+  it('옛 URL cleanup 호출: snapshot 의 slot URL 모두 deleteFile', async () => {
+    // 사전 상태 — 옛 슬롯 URL 들이 존재.
     hoisted.supabaseState.profile = {
-      voice_intro_audio_url: 'https://cdn.test/old-mirror.mp3',
       voice_intro_audio_urls: {
         ko: 'https://cdn.test/old-ko.mp3',
         ja: 'https://cdn.test/old-ja.mp3',
@@ -310,17 +306,15 @@ describe('generateVoiceIntroAudios', () => {
       detectedSourceLanguage: 'ko',
     });
     await generateVoiceIntroAudios(USER_ID, '안녕하세요', VOICE_ID, 'ko');
-    // 옛 URL 3개 (단일 + ko + ja). 단일이 ko 와 동일하지 않으므로 deduped 셋 = 3.
     const calledPaths = hoisted.deleteFileMock.mock.calls.map((c: any[]) => c[1]);
-    expect(calledPaths).toContain('old-mirror.mp3');
     expect(calledPaths).toContain('old-ko.mp3');
     expect(calledPaths).toContain('old-ja.mp3');
-    expect(hoisted.deleteFileMock).toHaveBeenCalledTimes(3);
+    expect(hoisted.deleteFileMock).toHaveBeenCalledTimes(2);
   });
 
   it('cleanup 실패해도 generateVoiceIntroAudios 는 정상 종료', async () => {
     hoisted.supabaseState.profile = {
-      voice_intro_audio_url: 'https://cdn.test/old.mp3',
+      voice_intro_audio_urls: { ko: 'https://cdn.test/old.mp3' },
     };
     hoisted.translateVoiceIntroMock.mockResolvedValue({
       translations: { ja: 'こんにちは', en: 'Hello' },
@@ -374,8 +368,8 @@ describe('generateVoiceIntroAudios', () => {
       });
       // voice_intro_translations 가 카탈로그 3개 텍스트로 채워짐
       expect(profile.voice_intro_translations).toEqual(presetTranslations);
-      // 작성자 슬롯 단일 컬럼 미러 (작성자 ko)
-      expect(profile.voice_intro_audio_url).toBe(profile.voice_intro_audio_urls.ko);
+      // 작성자(ko) 슬롯 ready
+      expect(profile.voice_intro_audio_urls.ko).toMatch(/voice-intro-ko-/);
     });
 
     it('presetTranslations 주입 + TTS 텍스트는 카탈로그 텍스트 사용 (작성자 텍스트 무시)', async () => {
@@ -411,7 +405,7 @@ describe('generateVoiceIntroAudios', () => {
       expect(hoisted.translateVoiceIntroMock).toHaveBeenCalledTimes(1);
     });
 
-    it('presetTranslations 주입 + 작성자 ja → 단일 컬럼 = ja URL 미러', async () => {
+    it('presetTranslations 주입 + 작성자 ja → ja 슬롯 ready', async () => {
       const presetTranslations = {
         ko: 'ko text',
         ja: 'ja text',
@@ -420,7 +414,8 @@ describe('generateVoiceIntroAudios', () => {
       await generateVoiceIntroAudios(USER_ID, 'ja text', VOICE_ID, 'ja', presetTranslations);
       expect(hoisted.translateVoiceIntroMock).not.toHaveBeenCalled();
       const profile = hoisted.supabaseState.profile;
-      expect(profile.voice_intro_audio_url).toBe(profile.voice_intro_audio_urls.ja);
+      expect(profile.voice_intro_audio_urls.ja).toMatch(/voice-intro-ja-/);
     });
   });
+
 });

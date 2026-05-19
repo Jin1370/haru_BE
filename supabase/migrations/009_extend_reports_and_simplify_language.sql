@@ -1,4 +1,29 @@
--- 언어 모델 단순화: 다중 + level → 단일 scalar (profile) / 코드 배열 (preference).
+-- 원본 009_extend_report_reasons.sql + 009_simplify_language_model.sql 를
+-- 단일 파일로 통합 (Supabase CLI 의 schema_migrations 가 version=<prefix>
+-- 를 PRIMARY KEY 로 사용하기 때문에 같은 prefix 두 파일은 충돌).
+-- 두 변경은 다른 테이블(reports vs profiles/user_preferences)에 독립적이라
+-- 합쳐도 의미 동등.
+
+-- ---------- Part A — 신고 카테고리 확장 ----------
+--   underage             — 미성년자 의심 (즉시 운영자 검토 필요)
+--   voice_impersonation  — 보이스 도용/악용 (haru 도메인 특화)
+
+ALTER TABLE reports DROP CONSTRAINT reports_reason_check;
+
+ALTER TABLE reports ADD CONSTRAINT reports_reason_check
+  CHECK (reason IN (
+    'spam',
+    'inappropriate',
+    'fake_profile',
+    'harassment',
+    'underage',
+    'voice_impersonation',
+    'other'
+  ));
+
+-- ---------- Part B — 언어 모델 단순화 ----------
+--
+-- 다중 + level → 단일 scalar (profile) / 코드 배열 (preference).
 --
 -- 배경:
 --   * 프로필 등록은 사실상 단일 언어로 운영되어 왔고 (translation/TTS 파이프라인
@@ -15,8 +40,6 @@
 --                                              (현재는 NULLABLE).
 --     - `user_preferences.preferred_languages TEXT[]` : 다중 코드, level 없음.
 --                                                      빈 배열 = 제약 없음.
---
--- forward-only. 기존 마이그레이션(001~008)은 수정하지 않는다.
 
 -- 1) profiles.language (scalar) 추가 + languages 첫 항목에서 백필 + languages drop.
 ALTER TABLE public.profiles

@@ -4,6 +4,8 @@ import { authMiddleware } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
 import { swipeBodySchema, discoverQuerySchema, quotaQuerySchema } from '../schemas/swipe';
 import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
+import { sendPushToUser } from '../services/pushNotifications';
+import { requireNotFrozen } from '../utils/freezeGuard';
 
 // 시청자 언어 → 보이스 인트로 슬롯 매핑 (mig 011).
 // ko/ja/en 활성. th/hi/그 외/null 은 'en' 폴백 (FE 의 영문 강제 정책과 일관).
@@ -79,9 +81,17 @@ export function computeTier(candidate: Candidate, prefs: ViewerPrefs): number {
   return 4;
 }
 
-// 동일 티어 안에서의 2차 정렬 점수. 합산 최대치는 65 로 묶여 있어
-// 어떤 가산도 티어 경계를 넘지 않는다.
-export function computeIntraScore(candidate: Candidate, viewer: Viewer): number {
+// 동일 티어 안에서의 2차 정렬 점수.
+// - 기본 신호(관심사·사진·신규·jitter) 합산 상한은 65.
+// - reciprocity boost(+50): 후보가 이미 viewer 를 like 한 경우 가산. 같은 티어
+//   안에서 다른 모든 신호(최대 65) 를 압도해 매칭 확률을 끌어올리는 신호.
+// 티어 경계 보호는 정렬 키 우선순위 (tier ASC > intra DESC) 가 담당 —
+// reciprocity 가 +50 가산되어 합산이 65 를 넘어도 다른 티어 후보 위로 못 올라간다.
+export function computeIntraScore(
+  candidate: Candidate,
+  viewer: Viewer,
+  reciprocalLikerIds: Set<string> = new Set(),
+): number {
   let score = 0;
 
   // 관심사 겹침 (최대 30점)
@@ -102,6 +112,14 @@ export function computeIntraScore(candidate: Candidate, viewer: Viewer): number 
 
   // 결정적 jitter (다양성 확보, 페이지네이션 안정성)
   score += hashJitter(candidate.id, viewer.id, 15);
+
+  // reciprocity boost: 후보가 이미 viewer 를 like 한 경우.
+  // 같은 티어 안에서 다른 신호 합 (≤65) 을 압도하지만, 정렬 1차 키가 tier 라
+  // 티어 경계는 넘지 않는다. "내가 만나고 싶은 사람 중 나를 좋아하는 사람" 이
+  // 같은 티어 안에서 1순위로 노출되어 매칭 funnel 양방향 마주칠 확률을 끌어올린다.
+  if (reciprocalLikerIds.has(candidate.id)) {
+    score += 50;
+  }
 
   return score;
 }
@@ -128,13 +146,24 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     interests: (viewerProfile.interests as string[] | null) ?? [],
   };
 
-  // 스와이프/차단/선호도를 병렬 조회
-  const [swipedResult, blockedResult, prefsResult] = await Promise.all([
+  // 스와이프/차단/선호도/reciprocity 풀을 병렬 조회.
+  // reciprocity 풀 = 나를 like 한(direction='like') 사람들. idx_swipes_swiped 가
+  // swiped_id 인덱스를 제공하므로 swiped_id=viewer 필터는 인덱스 사용.
+  const [swipedResult, blockedResult, prefsResult, reciprocalResult] = await Promise.all([
     supabase.from('swipes').select('swiped_id').eq('swiper_id', req.userId!),
     supabase.from('blocks').select('blocker_id, blocked_id')
       .or(`blocker_id.eq.${req.userId!},blocked_id.eq.${req.userId!}`),
     supabase.from('user_preferences').select('*').eq('user_id', req.userId!).single(),
+    supabase
+      .from('swipes')
+      .select('swiper_id')
+      .eq('swiped_id', req.userId!)
+      .eq('direction', 'like'),
   ]);
+
+  const reciprocalLikerIds = new Set<string>(
+    (reciprocalResult.data ?? []).map((s: any) => s.swiper_id as string),
+  );
 
   const blockedIds = (blockedResult.data || []).map((b: any) =>
     b.blocker_id === req.userId! ? b.blocked_id : b.blocker_id
@@ -226,7 +255,7 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     return {
       ...row,
       _tier: computeTier(candidate, viewerPrefs),
-      _intra: computeIntraScore(candidate, viewer),
+      _intra: computeIntraScore(candidate, viewer, reciprocalLikerIds),
     };
   });
 
@@ -245,6 +274,114 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   const slot = pickViewerSlot(viewerLanguage);
   const results = scored.slice(0, limit).map(({ _tier, _intra, created_at, photos, voice_intro_audio_urls, ...rest }) => {
     const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<Record<VoiceIntroSlotLanguage, string | null>>;
+    return {
+      ...rest,
+      voice_intro_audio_url: (slotUrls[slot] as string | null | undefined) ?? null,
+      photos: (photos ?? []).slice(0, 1),
+      photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
+    };
+  });
+
+  res.json(results);
+});
+
+// 받은 좋아요 목록 — 나를 like 한 사용자 중, 내가 아직 응답 스와이프 하지 않았고
+// 차단 양방향에 걸리지 않은 active 후보. 응답 shape 은 디스커버 카드와 동일하게
+// 사진 1장 / photo_access 잠금 / voice_intro 시청자 언어 슬롯 미러 — FE 의 SwipeCard
+// 컴포넌트를 그대로 재사용할 수 있게 한다.
+//
+// 정렬은 like 한 시각의 내림차순(최근 받은 좋아요 우선). 디스커버의 tier/intra
+// 스코어와 무관 — "받은 좋아요" 는 이미 상호 의향이 한쪽 확정된 풀이므로 별도
+// 정렬 신호가 필요 없다 (시간순이 사용자 직관에 부합).
+//
+// 일일 50장 한도와는 무관하게 GET 은 무료(조회는 카운트 안 함). 실제 스와이프
+// 행위(POST /swipe)는 디스커버 swipe 와 동일 엔드포인트를 공유하므로 quota 도 함께 적용됨.
+router.get('/likes-received', async (req: AuthRequest, res: Response) => {
+  // 1) 나를 like 한 사람들 (시간 역순)
+  const { data: likes, error: likesError } = await supabase
+    .from('swipes')
+    .select('swiper_id, created_at')
+    .eq('swiped_id', req.userId!)
+    .eq('direction', 'like')
+    .order('created_at', { ascending: false });
+
+  if (likesError) {
+    res.status(500).json({ error: likesError.message });
+    return;
+  }
+
+  const likerIds = (likes ?? []).map((l: any) => l.swiper_id as string);
+  if (likerIds.length === 0) {
+    res.json([]);
+    return;
+  }
+
+  // 2) 내가 이미 스와이프한 상대 + 차단 양방향 + viewer 본인 언어를 병렬 조회.
+  //    likes-received 풀에서 제거할 ID 집합 (이미 응답 끝난 like 는 매치/패스 결과로
+  //    별도 추적되므로 받은 좋아요 카드로 다시 노출할 의미 없음).
+  const [viewerSwipesResult, blocksResult, viewerProfileResult] = await Promise.all([
+    supabase.from('swipes').select('swiped_id').eq('swiper_id', req.userId!),
+    supabase
+      .from('blocks')
+      .select('blocker_id, blocked_id')
+      .or(`blocker_id.eq.${req.userId!},blocked_id.eq.${req.userId!}`),
+    supabase.from('profiles').select('language').eq('id', req.userId!).single(),
+  ]);
+
+  const swipedSet = new Set<string>(
+    (viewerSwipesResult.data ?? []).map((s: any) => s.swiped_id as string),
+  );
+  const blockedSet = new Set<string>(
+    (blocksResult.data ?? []).map((b: any) =>
+      b.blocker_id === req.userId! ? (b.blocked_id as string) : (b.blocker_id as string),
+    ),
+  );
+  const viewerLanguage = (viewerProfileResult.data?.language as string | null) ?? '';
+
+  const eligibleIds = likerIds.filter((id) => !swipedSet.has(id) && !blockedSet.has(id));
+  if (eligibleIds.length === 0) {
+    res.json([]);
+    return;
+  }
+
+  // 3) 프로필 일괄 조회 — discover hot path 와 동일한 컬럼 집합.
+  const { data: profiles, error: profilesError } = await supabase
+    .from('profiles')
+    .select(
+      'id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, photos, created_at',
+    )
+    .in('id', eligibleIds)
+    .eq('is_active', true);
+
+  if (profilesError) {
+    res.status(500).json({ error: profilesError.message });
+    return;
+  }
+
+  // 4) 가시 후보 필터 — 사진 0장 / 언어 미설정 / viewer 와 같은 언어 후보 제외.
+  //    cross-language 정책은 디스커버와 동일하게 적용 (받은 좋아요 풀에 같은 언어가
+  //    있다면 그건 viewer 언어 설정 이전에 받은 좋아요. 현재 정책상 노출 차단).
+  const visible = (profiles ?? []).filter((row: any) => {
+    if (!Array.isArray(row.photos) || row.photos.length === 0) return false;
+    if (!row.language) return false;
+    if (viewerLanguage && row.language === viewerLanguage) return false;
+    return true;
+  });
+
+  // 5) like 시각 역순으로 정렬 (1단계에서 받은 순서 유지) — `eligibleIds` 의
+  //    인덱스를 정렬 키로 사용.
+  const orderIndex = new Map<string, number>();
+  eligibleIds.forEach((id, idx) => orderIndex.set(id, idx));
+  visible.sort((a: any, b: any) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
+
+  // 6) 응답 가공 — discover 와 동일하게 사진 1장 / photo_access 잠금 / voice intro
+  //    시청자 언어 슬롯 미러. FE SwipeCard 재사용을 보장하기 위해 shape 일치.
+  const slot = pickViewerSlot(viewerLanguage);
+  const results = visible.map((row: any) => {
+    const { photos, voice_intro_audio_urls, created_at, ...rest } = row;
+    const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<
+      Record<VoiceIntroSlotLanguage, string | null>
+    >;
     return {
       ...rest,
       voice_intro_audio_url: (slotUrls[slot] as string | null | undefined) ?? null,
@@ -305,7 +442,13 @@ router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, r
 });
 
 // 스와이프
-router.post('/swipe', validateBody(swipeBodySchema), async (req: AuthRequest, res: Response) => {
+//
+// message-moderation-v1 (PR2): freeze 사용자의 like 시도를 차단.
+// GET /api/discover 와 GET /likes-received 는 이미 SQL 단계에서 `.eq('is_active', true)`
+// 필터로 freeze 사용자를 다른 viewer 의 노출 풀에서 제거한다 (회귀 매트릭스 #1, #2).
+// 본 POST 만 가드 — 본인의 능동 swipe 행위를 막아 reciprocal like 매치 생성 경로
+// 자체를 차단.
+router.post('/swipe', requireNotFrozen, validateBody(swipeBodySchema), async (req: AuthRequest, res: Response) => {
   const { swiped_id, direction } = req.body;
 
   const { error: swipeError } = await supabase.from('swipes').insert({
@@ -323,7 +466,7 @@ router.post('/swipe', validateBody(swipeBodySchema), async (req: AuthRequest, re
     return;
   }
 
-  let match = null;
+  let match: { id: string; user1_id: string; user2_id: string } | null = null;
   if (direction === 'like') {
     const { data: reciprocal } = await supabase
       .from('swipes')
@@ -352,6 +495,39 @@ router.post('/swipe', validateBody(swipeBodySchema), async (req: AuthRequest, re
         match = existing;
       } else if (!matchError) {
         match = newMatch;
+      }
+
+      // push-notifications sprint: 매치 성사 시 양쪽 사용자에게 푸시 발송.
+      // 능동 like 한 사람도 "상대도 좋아함" 알림을 받는 표준 데이팅앱 UX.
+      // unmatch 후 재match (소프트 삭제 후 23505 fallback) 케이스에도 발송 — 매치 부활도 알림 가치 있음.
+      if (match) {
+        // 양쪽 display_name 조회 — 양쪽 모두에게 상대 이름이 들어간 푸시 발송.
+        const matchId = match.id;
+        supabase
+          .from('profiles')
+          .select('id, display_name')
+          .in('id', [req.userId!, swiped_id])
+          .then(({ data: profiles }) => {
+            if (!profiles) return;
+            const me = profiles.find((p: any) => p.id === req.userId!);
+            const other = profiles.find((p: any) => p.id === swiped_id);
+            const myName = (me?.display_name as string | null) ?? '';
+            const otherName = (other?.display_name as string | null) ?? '';
+
+            sendPushToUser(req.userId!, {
+              type: 'match',
+              match_id: matchId,
+              matched_user_id: swiped_id,
+              matched_name: otherName,
+            }).catch((err) => console.error('[sendPushToUser match→swiper]', err));
+
+            sendPushToUser(swiped_id, {
+              type: 'match',
+              match_id: matchId,
+              matched_user_id: req.userId!,
+              matched_name: myName,
+            }).catch((err) => console.error('[sendPushToUser match→swiped]', err));
+          });
       }
     }
   }

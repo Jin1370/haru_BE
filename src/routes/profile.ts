@@ -7,6 +7,9 @@ import { authMiddleware } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
 import { profileUpsertSchema } from '../schemas/profile';
 import { lookupBioPhrase } from '../constants/bioPhrasesCatalog';
+import { requireNotFrozen } from '../utils/freezeGuard';
+import { isBlocked } from '../constants/moderationDictionary';
+import { checkOpenAiModeration } from '../services/openaiModeration';
 import { AuthRequest, VoiceIntroTranslations } from '../types';
 
 const router = Router();
@@ -31,7 +34,8 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
 });
 
 // 내 프로필 수정 (생성 포함 - upsert)
-router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, res: Response) => {
+// message-moderation-v1 (PR2): freeze 사용자 mutating 차단.
+router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (req: AuthRequest, res: Response) => {
   const {
     display_name,
     birth_date,
@@ -76,6 +80,85 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
   const nextVoiceIntro = resolvedVoiceIntro;
   const voiceIntroChanged = prevVoiceIntro !== nextVoiceIntro;
 
+  // voice-intro-moderation-unification sprint: voice intro 변경 시 메시지와 동일한
+  // 모더레이션 게이트 (사전 키워드 차단 + OpenAI Moderation 2차 검수) 적용. 차별점
+  // 2 (송신자 클론 보이스 TTS) 의 평판 리스크 표면 (디스커버 노출 + 클론 보이스 합성)
+  // 을 메시지와 동일 인프라로 차단.
+  //
+  // 적용 조건: voiceIntroChanged === true 이고 resolvedVoiceIntro 가 비어있지 않으며
+  // preset 매칭이 아닌 경우. preset 경로 (voice-intro-preset-bypass sprint) 는 BE
+  // 카탈로그가 손번역 화이트리스트 + server-authoritative override 가 phrase_id 위조를
+  // 차단하므로 모더레이션 우회 안전. 카탈로그 변경 게이트 (`bioPhrasesCatalog.test.ts`
+  // EXPECTED_FE_FIXTURE drift 1차 방어선) 가 손번역의 안전성을 보장.
+  //
+  // 응답 shape (422 + code='message_blocked') 는 메시지와 의도적으로 동일 — FE
+  // 422 핸들러 + i18n 토스트 키 재사용.
+  if (voiceIntroChanged && resolvedVoiceIntro && !presetTranslations) {
+    const dictResult = isBlocked(resolvedVoiceIntro);
+    if (dictResult.blocked) {
+      console.warn('[moderation.block]', {
+        sender_id: req.userId,
+        category: dictResult.category,
+        language: dictResult.language,
+        surface: 'voice_intro',
+        layer: 'dictionary',
+        at: new Date().toISOString(),
+      });
+      void supabase
+        .from('moderation_blocks')
+        .insert({
+          sender_id: req.userId!,
+          category: dictResult.category!,
+          language: dictResult.language!,
+          surface: 'voice_intro',
+        })
+        .then(({ error }) => {
+          if (error) {
+            console.error('[moderation.block.audit_insert_failed]', error.message);
+          }
+        });
+      res.status(422).json({
+        error: 'Voice intro contains restricted expressions',
+        code: 'message_blocked',
+      });
+      return;
+    }
+
+    const openaiResult = await checkOpenAiModeration(resolvedVoiceIntro);
+    if (openaiResult.blocked) {
+      // OpenAI 는 multi-lingual 모델 — language 단정 어려움. 작성자 본인 profiles.language
+      // raw 값을 fallback 으로 사용 (normalizeAuthorLanguage 적용 전 — audit log 의
+      // 운영 의미는 작성자 declared language).
+      const authorLang = (language as string | null | undefined) ?? 'ko';
+      console.warn('[moderation.block]', {
+        sender_id: req.userId,
+        category: openaiResult.category,
+        raw_category: openaiResult.rawCategory,
+        surface: 'voice_intro',
+        layer: 'openai',
+        at: new Date().toISOString(),
+      });
+      void supabase
+        .from('moderation_blocks')
+        .insert({
+          sender_id: req.userId!,
+          category: openaiResult.category!,
+          language: authorLang,
+          surface: 'voice_intro',
+        })
+        .then(({ error }) => {
+          if (error) {
+            console.error('[moderation.block.audit_insert_failed]', error.message);
+          }
+        });
+      res.status(422).json({
+        error: 'Voice intro contains restricted expressions',
+        code: 'message_blocked',
+      });
+      return;
+    }
+  }
+
   const upsertPayload: Record<string, unknown> = {
     id: req.userId!,
     display_name,
@@ -87,11 +170,9 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
     interests: interests || [],
     updated_at: new Date().toISOString(),
   };
-  // voice_intro 가 바뀌면 FE 폴링이 재합성 구간을 감지할 수 있도록 오디오 URL을 먼저 리셋한다.
-  // mig 011: 단일 컬럼뿐 아니라 신규 다국어 슬롯 3컬럼도 빈 객체로 리셋해야 디스커버 응답에
-  // 옛 슬롯 URL 이 잔존하지 않는다. 신규 파이프라인이 비동기로 다시 채운다.
+  // voice_intro 가 바뀌면 FE 폴링이 재합성 구간을 감지할 수 있도록 다국어 슬롯
+  // 3컬럼을 빈 객체로 리셋한다. 신규 파이프라인이 비동기로 다시 채운다.
   if (voiceIntroChanged) {
-    upsertPayload.voice_intro_audio_url = null;
     upsertPayload.voice_intro_translations = {};
     upsertPayload.voice_intro_audio_urls = {};
     upsertPayload.voice_intro_audio_status = {};
@@ -118,6 +199,7 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
       data.elevenlabs_voice_id,
       language,
       presetTranslations,
+      gender,
     ).catch((err) => console.error('[Voice intro audios generation failed]', err));
   }
 
@@ -127,7 +209,8 @@ router.put('/me', validateBody(profileUpsertSchema), async (req: AuthRequest, re
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 // 프로필 사진 업로드
-router.post('/photos', upload.single('photo'), async (req: AuthRequest, res: Response) => {
+// message-moderation-v1 (PR2): freeze 사용자 mutating 차단.
+router.post('/photos', requireNotFrozen, upload.single('photo'), async (req: AuthRequest, res: Response) => {
   if (!req.file) {
     res.status(400).json({ error: 'No photo file provided' });
     return;
@@ -165,7 +248,8 @@ router.post('/photos', upload.single('photo'), async (req: AuthRequest, res: Res
 });
 
 // 프로필 사진 삭제
-router.delete('/photos/:index', async (req: AuthRequest, res: Response) => {
+// message-moderation-v1 (PR2): freeze 사용자 mutating 차단.
+router.delete('/photos/:index', requireNotFrozen, async (req: AuthRequest, res: Response) => {
   const index = parseInt(req.params.index as string, 10);
 
   const { data: profile } = await supabase

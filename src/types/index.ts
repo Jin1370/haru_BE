@@ -25,11 +25,7 @@ export interface Profile {
   interests: string[];
   photos: string[];
   elevenlabs_voice_id: string | null;
-  voice_sample_url: string | null;
   voice_clone_status: 'pending' | 'processing' | 'ready' | 'failed';
-  // 호환 유지(deprecate 후보) — 작성자 언어 슬롯 URL 의 미러.
-  // FE chat 파트너 detail 이 supabase 직접 select 로 RLS 통과 중이라 drop 보류.
-  voice_intro_audio_url: string | null;
   // mig 011 신규. 슬롯은 ko/ja/en 만. 키 미존재 가능.
   voice_intro_translations: VoiceIntroTranslations;
   voice_intro_audio_urls: Partial<Record<VoiceIntroSlotLanguage, string | null>>;
@@ -77,9 +73,21 @@ export interface Message {
   audio_url: string | null;
   audio_status: 'pending' | 'processing' | 'ready' | 'failed';
   emotion: Emotion | null;
-  read_at: string | null;
+  // voice-first-message-gate sprint (mig 015): 수신자가 음성을 1회 끝까지
+  // 재생한 시각. NULL = 미청취 → FE 가 텍스트를 숨기고 편지 UI 만 노출.
+  // 본인 발신 메시지는 항상 null (라우트가 sender_id == req.userId 호출을 403).
+  // read-at-removal-list-mask sprint (mig 018): 옛 read_at 컬럼 제거. "읽음" 의미는
+  // listened_at 단일 진실원으로 일원화.
+  listened_at: string | null;
   created_at: string;
 }
+
+// chat-audio-async-insert sprint: 메시지 POST 응답에서 match_after 제거.
+// mig 014 의 동봉 패턴은 BE 가 INSERT 직후 SELECT 한 matches snapshot 을
+// 응답에 nest 하던 흐름이었으나, 본 sprint 에서 POST 가 더 이상 동기 INSERT
+// 를 보장하지 않게 되면서 (voice clone 보유자는 stub 응답 + 비동기 INSERT)
+// snapshot 동봉 의미가 없어졌다. FE 는 realtime matches UPDATE 채널을 단일
+// 진실원으로 사용. 인터페이스 정의는 forward-compat 차원에서 유지하지 않음.
 
 export interface Block {
   id: string;

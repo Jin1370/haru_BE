@@ -32,14 +32,36 @@ router.post('/', validateBody(blockSchema), async (req: AuthRequest, res: Respon
     return;
   }
 
-  // 기존 매치가 있으면 soft delete
+  // 기존 매치가 있으면 soft delete + actor 의 hidden_by 자동 append.
+  // hidden_by 에 자기 user_id 가 들어가면 GET /api/matches 의
+  // `.not('hidden_by', 'cs', '{viewerId}')` 필터로 본인 시야에서만
+  // 즉시 사라진다 (mig 013). 상대방은 tombstone 으로 그대로 보유.
+  //
+  // 이미 언매치된 매치(상대가 먼저 차단/신고했던 케이스)에 대해서도
+  // hidden_by 만은 추가해야 하므로 unmatched_at 필터 없이 매치 행을
+  // 먼저 select 한 뒤 read-modify-write 한다.
   const [id1, id2] = [req.userId!, blocked_id].sort();
-  await supabase
+  const { data: match } = await supabase
     .from('matches')
-    .update({ unmatched_at: new Date().toISOString(), unmatched_by: req.userId! })
+    .select('id, hidden_by, unmatched_at')
     .eq('user1_id', id1)
     .eq('user2_id', id2)
-    .is('unmatched_at', null);
+    .maybeSingle();
+
+  if (match) {
+    const currentHidden = (match.hidden_by as string[] | null) ?? [];
+    const nextHidden = currentHidden.includes(req.userId!)
+      ? currentHidden
+      : [...currentHidden, req.userId!];
+
+    const updates: Record<string, unknown> = { hidden_by: nextHidden };
+    if (!match.unmatched_at) {
+      updates.unmatched_at = new Date().toISOString();
+      updates.unmatched_by = req.userId!;
+    }
+
+    await supabase.from('matches').update(updates).eq('id', match.id);
+  }
 
   res.status(201).json({ status: 'blocked' });
 });

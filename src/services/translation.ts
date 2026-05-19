@@ -38,10 +38,12 @@ Rules:
 - If the text is already in the target language, return it unchanged in
   "translation" and report the actual language in "detected_source_language".
 - Preserve meaning fully. Do NOT abbreviate or shorten.
-- Use polite/formal tone:
-  - Korean: 존댓말 (습니다/세요체)
-  - Japanese: です/ます
-  - Chinese: 您 (respectful pronoun)
+- CRITICAL: Inline ElevenLabs audio tags written as [laughs], [sad], or similar [single_word] forms in square brackets, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
+- Match the source register: default to polite tone, but preserve casual register if the source is clearly casual:
+  - Korean: 해요체 (편한 존댓말) by default. Avoid stiff 습니다체 unless the source is clearly formal. Allow 반말 only if the source is clearly 반말.
+  - Japanese: です/ます is the safe default. If the source is clearly casual, use natural casual forms (だ/だよ/だし) — do not force formal.
+  - English: contemporary conversational tone, contractions allowed (I'm, you'll). No business-speak.
+  - Chinese: 您 by default. Allow 你 if the source is clearly casual.
 - Keep proper nouns in their original or properly romanized form.
 - Do NOT respond to the content — only translate.
 - Return valid JSON only.
@@ -90,12 +92,13 @@ Text to translate: ${JSON.stringify(params.text)}`;
 
 // ─── Voice intro domain (mig 011) ─────────────────────────────────────────
 // translateMessage 와 분리 사유 (03_voice_i18n_plan.md 1.1):
-//   * 메시지 도메인의 존댓말 강제는 voice intro(첫인상·캐주얼 자기소개) 와 충돌.
+//   * register 정책 차이 — 메시지는 register-preserving(소스가 캐주얼이면 캐주얼), voice intro 는 더 적극적으로 캐주얼/playful 톤 유지 + ±20% 길이 보존.
 //   * 1회 호출에 N개 언어 동시 번역 → 응답 shape 가 다름.
 //   * 길이 균등 보존 (TTS 길이 일관성) 강조.
 const VOICE_INTRO_SYSTEM_PROMPT = `You translate dating-app voice intro texts (a short, first-person self-introduction line that the speaker will record with their cloned voice). The translation will be spoken aloud by a TTS engine using the speaker's cloned voice.
 
 Rules:
+- CRITICAL: Inline ElevenLabs audio tags written as [laughs], [sad], or similar [single_word] forms in square brackets, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
 - Preserve the speaker's intent, mood, and casual/playful register. Voice intros are typically 80-160 characters and aim to invite a stranger to swipe right.
 - Match natural spoken length within ±20% of the source character count. Do NOT pad or truncate to extremes.
 - Use a register appropriate for casual self-introduction in each language:

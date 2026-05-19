@@ -24,6 +24,21 @@ export const swaggerDocument = {
         type: 'object',
         properties: { error: { type: 'string' } },
       },
+      // message-moderation-v1 (PR2): freeze 사용자 mutating 라우트 가드 응답.
+      // FE 의 services/api.ts 글로벌 핸들러가 `code: 'account_frozen'` 매칭으로
+      // 모달 1회 + 로그아웃 흐름 발화. 가드 적용 라우트:
+      //   POST /api/discover/swipe / POST /api/matches/{matchId}/messages /
+      //   POST /api/matches/{matchId}/hide / PUT /api/profile/me /
+      //   POST /api/profile/photos / DELETE /api/profile/photos/{index} /
+      //   POST /api/voice/clone
+      AccountFrozenError: {
+        type: 'object',
+        properties: {
+          error: { type: 'string', example: 'Account frozen' },
+          code: { type: 'string', example: 'account_frozen' },
+        },
+        required: ['error', 'code'],
+      },
       Profile: {
         type: 'object',
         properties: {
@@ -37,14 +52,7 @@ export const swaggerDocument = {
           interests: { type: 'array', items: { type: 'string' } },
           photos: { type: 'array', items: { type: 'string', format: 'uri' } },
           elevenlabs_voice_id: { type: 'string', nullable: true },
-          voice_sample_url: { type: 'string', nullable: true },
           voice_clone_status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
-          voice_intro_audio_url: {
-            type: 'string',
-            format: 'uri',
-            nullable: true,
-            description: '작성자 언어 슬롯 URL 의 미러. 호환용 — voice_intro_audio_urls 로 마이그레이션 권장 (mig 011).',
-          },
           voice_intro_translations: {
             type: 'object',
             additionalProperties: { type: 'string' },
@@ -136,9 +144,28 @@ export const swaggerDocument = {
               original_text: { type: 'string' },
               sender_id: { type: 'string', format: 'uuid' },
               created_at: { type: 'string', format: 'date-time' },
+              audio_status: {
+                type: 'string',
+                enum: ['pending', 'processing', 'ready', 'failed'],
+                nullable: true,
+                description:
+                  'read-at-removal-list-mask (mig 017 v3): 마지막 메시지의 status. FE 마스킹 분기에서 ready 만 미리보기 후보로 처리.',
+              },
+              listened_at: {
+                type: 'string',
+                format: 'date-time',
+                nullable: true,
+                description:
+                  'read-at-removal-list-mask (mig 017 v3): viewer 가 마지막 메시지의 음성을 청취 완료한 시각. 상대 발신 + NULL 이면 FE 가 "새 메시지" 마스킹을 적용.',
+              },
             },
           },
           unread_count: { type: 'integer' },
+          muted: {
+            type: 'boolean',
+            description:
+              'mig 022: viewer 가 이 매치의 푸시 알림을 끈 상태인지. 채팅 목록 액션시트 "알림 끄기/켜기" 토글의 표시 진실원. user_preferences.notify_messages 전역 토글과 AND 결합 — 어느 쪽이든 OFF 면 푸시 미발송.',
+          },
         },
       },
       Message: {
@@ -153,7 +180,13 @@ export const swaggerDocument = {
           translated_language: { type: 'string', nullable: true },
           audio_url: { type: 'string', format: 'uri', nullable: true },
           audio_status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
-          read_at: { type: 'string', format: 'date-time', nullable: true },
+          listened_at: {
+            type: 'string',
+            format: 'date-time',
+            nullable: true,
+            description:
+              'voice-first-message-gate (mig 015): 수신자가 음성을 1회 끝까지 재생한 시각. NULL = 미청취 → FE 가 텍스트를 숨기고 편지 UI 만 노출. 본인 발신 메시지는 항상 null.',
+          },
           created_at: { type: 'string', format: 'date-time' },
         },
       },
@@ -236,6 +269,7 @@ export const swaggerDocument = {
           200: { description: '로그인 성공', content: { 'application/json': { schema: { type: 'object', properties: { access_token: { type: 'string' }, refresh_token: { type: 'string' }, user: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, email: { type: 'string', format: 'email' } } } } } } } },
           400: { description: 'email/password 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           401: { description: '인증 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 정지 (frozen) — code: account_frozen', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
@@ -252,6 +286,7 @@ export const swaggerDocument = {
           200: { description: '로그인 성공', content: { 'application/json': { schema: { type: 'object', properties: { access_token: { type: 'string' }, refresh_token: { type: 'string' }, user: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, email: { type: 'string', format: 'email' } } } } } } } },
           400: { description: 'id_token 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           401: { description: '인증 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 정지 (frozen) — code: account_frozen', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
@@ -268,6 +303,7 @@ export const swaggerDocument = {
           200: { description: '갱신 성공', content: { 'application/json': { schema: { type: 'object', properties: { access_token: { type: 'string' }, refresh_token: { type: 'string' } } } } } },
           400: { description: 'refresh_token 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           401: { description: '갱신 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 정지 (frozen) — code: account_frozen', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
@@ -308,6 +344,23 @@ export const swaggerDocument = {
         responses: {
           200: { description: '성공', content: { 'application/json': { schema: { $ref: '#/components/schemas/Profile' } } } },
           400: { description: '유효성 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
+          // voice-intro-moderation-unification sprint: voice_intro 변경 시 사전 차단 +
+          // OpenAI Moderation 2차 검수. 응답 shape 는 메시지와 동일 (FE 핸들러 재사용).
+          422: {
+            description: 'voice_intro 모더레이션 차단 — code: message_blocked',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', example: 'Voice intro contains restricted expressions' },
+                    code: { type: 'string', example: 'message_blocked' },
+                  },
+                },
+              },
+            },
+          },
         },
       },
     },
@@ -319,6 +372,7 @@ export const swaggerDocument = {
         responses: {
           200: { description: '업로드 성공', content: { 'application/json': { schema: { type: 'object', properties: { url: { type: 'string', format: 'uri' }, photos: { type: 'array', items: { type: 'string', format: 'uri' } } } } } } },
           400: { description: '파일 없음 또는 6장 초과', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
@@ -330,6 +384,7 @@ export const swaggerDocument = {
         responses: {
           200: { description: '삭제 성공', content: { 'application/json': { schema: { type: 'object', properties: { photos: { type: 'array', items: { type: 'string' } } } } } } },
           400: { description: '잘못된 인덱스', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
@@ -338,18 +393,16 @@ export const swaggerDocument = {
     '/api/voice/clone': {
       post: {
         tags: ['Voice'],
-        summary: '음성 샘플 업로드 + ElevenLabs 클론 생성',
+        summary: '음성 샘플 업로드 + ElevenLabs 클론 생성 (신규 등록 / 재등록 덮어쓰기)',
+        description:
+          '기존 voice_id 가 있을 경우 새 clone 생성 성공 후 옛 voice 를 ElevenLabs 측에서 자동 정리한다. ' +
+          '단독 삭제 라우트는 의도적으로 제공하지 않음 — voice-clone 없는 발신자 메시지가 채팅에서 "메시지 준비 중.." 영구 락을 만드는 회귀를 방지. ' +
+          '데이터 삭제권은 계정 탈퇴 라우트가 보장한다.',
         requestBody: { required: true, content: { 'multipart/form-data': { schema: { type: 'object', required: ['audio'], properties: { audio: { type: 'string', format: 'binary' } } } } } },
         responses: {
           200: { description: '클론 생성 완료', content: { 'application/json': { schema: { type: 'object', properties: { voice_id: { type: 'string' }, status: { type: 'string' } } } } } },
+          403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
           500: { description: '클론 생성 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-        },
-      },
-      delete: {
-        tags: ['Voice'],
-        summary: '음성 클론 삭제',
-        responses: {
-          200: { description: '삭제 성공', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string' } } } } } },
         },
       },
     },
@@ -374,6 +427,16 @@ export const swaggerDocument = {
         },
       },
     },
+    '/api/discover/likes-received': {
+      get: {
+        tags: ['Discover'],
+        summary: '받은 좋아요 목록 (나를 like 한 사용자 중 미스와이프·비차단 후보)',
+        description: '응답 shape 은 /api/discover 와 동일 (사진 1장, photo_access 잠금, voice intro 시청자 언어 슬롯 미러). 정렬은 like 한 시각 내림차순.',
+        responses: {
+          200: { description: '받은 좋아요 목록', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/ProfileCandidate' } } } } },
+        },
+      },
+    },
     '/api/discover/swipe': {
       post: {
         tags: ['Discover'],
@@ -389,6 +452,7 @@ export const swaggerDocument = {
         responses: {
           200: { description: '스와이프 완료', content: { 'application/json': { schema: { type: 'object', properties: { direction: { type: 'string' }, match: { $ref: '#/components/schemas/Match', nullable: true } } } } } },
           400: { description: '파라미터 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
           409: { description: '이미 스와이프함', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
@@ -408,18 +472,64 @@ export const swaggerDocument = {
         },
       },
     },
-    '/api/matches/{matchId}': {
-      delete: {
+    '/api/matches/{matchId}/partner': {
+      get: {
         tags: ['Match'],
-        summary: '언매치 (soft delete)',
-        parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        summary: '채팅 상대의 부가 프로필 (시청자 언어 보이스 인트로 미러)',
+        description:
+          'birth_date / interests / 시청자 언어 슬롯의 voice_intro_audio_url 을 반환. ' +
+          'voice_intro_audio_url 은 viewer 의 profiles.language → ko/ja/en 슬롯 매핑으로 ' +
+          'voice_intro_audio_urls JSONB 에서 추출해 미러한다(디스커버 응답과 동일 정책). ' +
+          'FE 가 supabase 에서 단일 voice_intro_audio_url 컬럼을 직접 select 하던 경로를 대체.',
+        parameters: [
+          { name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+        ],
         responses: {
-          200: { description: '언매치 성공', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', example: 'unmatched' } } } } } },
-          404: { description: '매치 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          200: {
+            description: 'PartnerDetail',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['birth_date', 'interests', 'voice_intro_audio_url'],
+                  properties: {
+                    birth_date: { type: 'string', format: 'date' },
+                    interests: { type: 'array', items: { type: 'string' } },
+                    voice_intro_audio_url: { type: 'string', format: 'uri', nullable: true },
+                  },
+                },
+              },
+            },
+          },
+          404: { description: '매치 없음 또는 상대 프로필 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },
-
+    '/api/matches/{matchId}/mute': {
+      post: {
+        tags: ['Match'],
+        summary: '매치별 푸시 알림 끄기 (mig 022, 멱등)',
+        description:
+          'long-press 액션시트의 "알림 끄기" 토글. match_mutes 에 (match_id, user_id) upsert. '
+          + 'user_preferences.notify_messages 전역 토글과 AND 결합 — 어느 쪽이든 OFF 면 푸시 미발송. '
+          + '여러 번 호출해도 행 1개. 멤버십 검증만 적용 (tombstone 매치도 허용).',
+        parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: {
+          200: { description: 'mute 적용', content: { 'application/json': { schema: { type: 'object', properties: { muted: { type: 'boolean', example: true } } } } } },
+          404: { description: '매치 없음 또는 비참여자', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+      delete: {
+        tags: ['Match'],
+        summary: '매치별 푸시 알림 켜기 (mig 022, 멱등)',
+        description: 'match_mutes 에서 (match_id, user_id) 삭제. 이미 켜져 있어도 200.',
+        parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: {
+          200: { description: 'mute 해제', content: { 'application/json': { schema: { type: 'object', properties: { muted: { type: 'boolean', example: false } } } } } },
+          404: { description: '매치 없음 또는 비참여자', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
     // ── Messages ──
     '/api/matches/{matchId}/messages': {
       get: {
@@ -437,40 +547,76 @@ export const swaggerDocument = {
       },
       post: {
         tags: ['Message'],
-        summary: '메시지 전송 (번역 + 음성 더빙 자동 처리)',
-        description: '텍스트 즉시 저장/응답, 음성 더빙 비동기 처리. 차단된 유저에게는 전송 불가.',
+        summary: '메시지 전송 (큐잉 → 비동기 INSERT)',
+        description:
+          'POST 는 stub 메시지(id=확정된 UUID, audio_status=pending)를 즉시 반환하며 DB INSERT 는 하지 않는다. ' +
+          '비동기 파이프라인(번역 + ElevenLabs TTS + Storage 업로드)이 완료되면 마지막에 한 번만 INSERT — ' +
+          'realtime INSERT 가 1회만 발생해 expo-audio 의 mid-session player resource 회수 트리거를 회피한다. ' +
+          '파이프라인 실패 시에도 audio_url=null, audio_status=failed 로 INSERT 되어 텍스트는 전달된다.',
         parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['text'], properties: { text: { type: 'string', minLength: 1, maxLength: 1000 } } } } } },
         responses: {
-          201: { description: '전송 성공', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
+          202: { description: '큐잉 성공 — INSERT 는 realtime 으로 도착', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
           400: { description: 'text 누락/초과', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          403: { description: '매치 비참여자 / 차단됨', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: {
+            description: '매치 비참여자 / 차단됨 / 계정 freeze (message-moderation-v1 PR2)',
+            content: {
+              'application/json': {
+                schema: {
+                  oneOf: [
+                    { $ref: '#/components/schemas/Error' },
+                    { $ref: '#/components/schemas/AccountFrozenError' },
+                  ],
+                },
+              },
+            },
+          },
+          // message-moderation-v1 (PR1): 사전 키워드 매칭 시 422.
+          // body 에 카테고리/매칭 토큰 미노출 — 송신자 우회 패턴 학습 차단.
+          422: {
+            description: '사전 키워드 차단 (모더레이션) — code: message_blocked',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', example: 'Message contains restricted expressions' },
+                    code: { type: 'string', example: 'message_blocked' },
+                  },
+                },
+              },
+            },
+          },
         },
       },
     },
-    '/api/matches/{matchId}/messages/read': {
-      patch: {
-        tags: ['Message'],
-        summary: '메시지 읽음 처리 (상대가 보낸 미읽 메시지 일괄)',
-        parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
-        responses: {
-          200: { description: '읽음 처리 완료', content: { 'application/json': { schema: { type: 'object', properties: { read_count: { type: 'integer' } } } } } },
-          403: { description: '매치 비참여자', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-        },
-      },
-    },
-    '/api/matches/{messageId}/retry': {
+    // read-at-removal-list-mask sprint: PATCH /api/matches/{matchId}/messages/read 제거.
+    // "읽음" 의미를 listened_at 로 일원화하면서 read_at 컬럼이 사라졌고, 일괄 read
+    // 처리 동선 자체가 무의미해졌다. 메시지별 listened 마킹은 아래 listened
+    // 라우트가 단일 진실원.
+    '/api/matches/{matchId}/messages/{messageId}/listened': {
       post: {
         tags: ['Message'],
-        summary: '실패한 음성 더빙 재시도',
-        parameters: [{ name: 'messageId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        summary: '메시지 음성 청취 완료 마킹 (수신자 전용, idempotent)',
+        description:
+          'voice-first-message-gate sprint: 수신자가 음성을 1회 끝까지 재생한 시점에 FE 가 호출. ' +
+          'BE 는 messages.listened_at 를 now() 로 단 한 번만 set 하며, 이후 호출은 그대로 현재 row 반환. ' +
+          'Realtime UPDATE 로 본인의 다른 기기에도 자동 전파되어 텍스트 노출이 동기화된다.',
+        parameters: [
+          { name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+          { name: 'messageId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+        ],
         responses: {
-          200: { description: '재시도 시작', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string' } } } } } },
-          400: { description: 'failed 상태 아님 / voice clone 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          404: { description: '메시지 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          200: { description: '업데이트된 (또는 이미 listened 상태인) Message row', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
+          403: { description: '매치 비참여자 또는 송신자 본인 호출', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: '메시지 없음 또는 매치 불일치', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },
+    // chat-audio-async-insert sprint: /api/matches/{messageId}/retry 제거.
+    // mid-session UPDATE 패턴 폐기로 retry 의 status 전이 자체가 없어졌다.
+    // 실패한 메시지는 audio_url=null, audio_status='failed' 로 INSERT 되며,
+    // 사용자가 동일 텍스트로 새 메시지를 보내 재시도한다.
 
     // ── Block ──
     '/api/block': {

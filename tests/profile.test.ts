@@ -66,8 +66,6 @@ describe('Profile Routes', () => {
       expect(res.body.voice_intro_translations).toEqual({});
       expect(res.body.voice_intro_audio_urls).toEqual({});
       expect(res.body.voice_intro_audio_status).toEqual({});
-      // 단일 컬럼 호환 — voice_clone 없으니 NULL 잔존.
-      expect(res.body.voice_intro_audio_url).toBeNull();
     });
 
     it('프로필 수정 성공', async () => {

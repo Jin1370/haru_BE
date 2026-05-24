@@ -4,7 +4,7 @@
 // 본 파일은 services/openaiModeration.ts 의 OpenAI SDK 응답 → 카테고리 매핑 로직
 // 단위 검증만.
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 
 // openai SDK 모킹 — moderations.create 응답을 per-test 제어.
 const moderationsCreate = vi.fn();
@@ -15,8 +15,22 @@ vi.mock('openai', () => ({
 }));
 
 // env.openai.moderationApiKey 가 truthy 여야 client 가 생성됨.
-// env.ts 는 process.env 를 startup 1회 평가 — test 시작 전 설정.
-process.env.OPENAI_API_KEY = 'test-key-placeholder';
+// 본 파일은 services/openaiModeration.ts 를 매 beforeEach 마다 vi.resetModules()
+// 후 동적 import 하므로 import 시점에 process.env.OPENAI_API_KEY 가 set 돼 있으면
+// 충분. top-level 에서 set 하면 vitest 가 같은 worker 안에서 실행하는 다른 테스트
+// 파일에 leak 되므로 beforeAll/afterAll 로 본 파일 동안만 set + 원복.
+let originalOpenAiKey: string | undefined;
+beforeAll(() => {
+  originalOpenAiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'test-key-placeholder';
+});
+afterAll(() => {
+  if (originalOpenAiKey === undefined) {
+    delete process.env.OPENAI_API_KEY;
+  } else {
+    process.env.OPENAI_API_KEY = originalOpenAiKey;
+  }
+});
 
 // services/openaiModeration.ts 동적 import (env 평가 후).
 let checkOpenAiModeration: typeof import('../src/services/openaiModeration').checkOpenAiModeration;
@@ -104,7 +118,12 @@ describe('checkOpenAiModeration — 카테고리 매핑', () => {
 
 describe('checkOpenAiModeration — fail-open: API key 미설정', () => {
   it('OPENAI_API_KEY 미설정 → 즉시 통과 (SDK 호출 X)', async () => {
-    delete process.env.OPENAI_API_KEY;
+    // 빈 string 으로 set (delete 가 아님). dotenv/dotenvx 는 process.env 에
+    // 값이 이미 있으면 .env 파일을 load 해도 덮어쓰지 않으므로, 로컬 .env 에
+    // OPENAI_API_KEY 가 채워져 있어도 vi.resetModules() 후 env.ts 재평가
+    // 시점에 빈 string 이 보존된다. env.ts:70 의 `|| ''` 가 falsy 그대로
+    // 통과 → openaiModeration.ts:45 의 early return.
+    process.env.OPENAI_API_KEY = '';
     vi.resetModules();
     const { checkOpenAiModeration: fn } = await import('../src/services/openaiModeration');
     const r = await fn('any text including 마약');

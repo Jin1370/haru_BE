@@ -144,9 +144,9 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
   //
   // mig 014 이후 photo_access 산출 우선순위:
   //   1차 = matches.*_unlocked_at IS NOT NULL (트리거가 단조 set 한 컬럼 진실)
-  //   폴백 = get_match_summaries_v2 RPC 의 *_unlocked (rt>=임계치 즉석 계산)
-  //          — 014b 백필 실패로 *_unlocked_at 이 NULL 인 매치에 대비.
-  // round_trip_count 도 컬럼 우선, NULL 이면 v2 RPC 결과, 그래도 없으면 0.
+  //   폴백 = get_match_summaries_v3 RPC 의 *_unlocked (rt>=임계치 즉석 계산)
+  //          — 014 백필 실패로 *_unlocked_at 이 NULL 인 매치에 대비.
+  // round_trip_count 도 컬럼 우선, NULL 이면 v3 RPC 결과, 그래도 없으면 0.
   const results = matches.map((match) => {
     const partnerId = match.user1_id === req.userId! ? match.user2_id : match.user1_id;
     const summary = summaryMap.get(match.id);

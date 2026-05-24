@@ -73,10 +73,15 @@ export function startAuditCleanupScheduler(): void {
 
   // 부팅 직후 1 회. 다중 인스턴스 배포 시 동시 DELETE 도 멱등 (cutoff 이전 row 가
   // 0 개면 no-op). audio-expiry sweep 보다 30 초 늦게 시작해 동시 부담 분산.
+  // 0 건이면 silent — tick 과 동일 패턴 (출시 직후 매 부팅마다 빈 sweep 로그 노이즈 회피).
   bootTimer = setTimeout(() => {
     bootTimer = null;
     sweepAuditTables()
-      .then((r) => console.log('[audit-cleanup.sweep] boot', r))
+      .then((r) => {
+        if (r.moderationDeleted > 0 || r.freezeDeleted > 0) {
+          console.log('[audit-cleanup.sweep] boot', r);
+        }
+      })
       .catch((err) => console.error('[audit-cleanup.sweep] boot error', err));
   }, BOOT_DELAY_MS);
   bootTimer.unref();

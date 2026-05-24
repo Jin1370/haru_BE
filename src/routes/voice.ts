@@ -56,17 +56,25 @@ router.post('/clone', requireNotFrozen, upload.single('audio'), async (req: Auth
       .single();
     const prevVoiceId = (prevProfile?.elevenlabs_voice_id as string | null) ?? null;
 
-    // 상태를 processing으로 업데이트
-    await supabase
+    // silent-success 룰 (CLAUDE.md): UPDATE error 가시화. processing 마킹
+    // 실패해도 ElevenLabs 호출은 진행할 수 있어 응답 자체 막진 않으나, 운영
+    // 모니터링용 로그는 남긴다.
+    const { error: processingErr } = await supabase
       .from('profiles')
       .update({ voice_clone_status: 'processing' })
       .eq('id', req.userId!);
+    if (processingErr) {
+      console.error('[voice.clone.processing_update_failed]', processingErr.message);
+    }
 
     // ElevenLabs 클론 생성
     const voiceId = await createVoiceClone(req.userId!, req.file.buffer, req.file.originalname);
 
-    // 프로필 업데이트 (새 voice_id 로 덮어쓰기)
-    await supabase
+    // 프로필 업데이트 (새 voice_id 로 덮어쓰기). 본 UPDATE 실패는 critical —
+    // ElevenLabs 측에는 새 clone 이 만들어졌는데 profile.voice_id 가 옛 값으로 남으면
+    // 사용자가 응답에서 받은 voice_id 와 다음 fetch 결과가 불일치하는 inconsistent
+    // state. 500 으로 즉시 가시화 + 옛 voice cleanup 도 스킵.
+    const { error: readyErr } = await supabase
       .from('profiles')
       .update({
         elevenlabs_voice_id: voiceId,
@@ -74,6 +82,11 @@ router.post('/clone', requireNotFrozen, upload.single('audio'), async (req: Auth
         updated_at: new Date().toISOString(),
       })
       .eq('id', req.userId!);
+    if (readyErr) {
+      console.error('[voice.clone.ready_update_failed]', readyErr.message);
+      res.status(500).json({ error: 'Voice clone profile update failed' });
+      return;
+    }
 
     // 옛 voice 정리 (fire-and-forget) — 새 voice 가 이미 profile 에 set 됐으므로
     // 실패해도 ElevenLabs storage 누적 외 사용자 영향 없음.
@@ -98,11 +111,19 @@ router.post('/clone', requireNotFrozen, upload.single('audio'), async (req: Auth
 
 // 클론 상태 확인
 router.get('/status', async (req: AuthRequest, res: Response) => {
-  const { data } = await supabase
+  // silent-success 룰 (CLAUDE.md): error 가시화. 일시 장애로 SELECT 가 실패하면
+  // 사용자에게 'pending' 으로 잘못 표시되어 polling 무한 반복 + UX 혼란.
+  const { data, error } = await supabase
     .from('profiles')
     .select('voice_clone_status, elevenlabs_voice_id')
     .eq('id', req.userId!)
     .single();
+
+  if (error) {
+    console.error('[voice.status.select_failed]', error.message);
+    res.status(500).json({ error: error.message });
+    return;
+  }
 
   res.json({
     status: data?.voice_clone_status || 'pending',

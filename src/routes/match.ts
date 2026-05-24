@@ -286,6 +286,13 @@ router.get('/:matchId/partner', async (req: AuthRequest, res: Response) => {
     res.status(404).json({ error: 'Partner profile not found' });
     return;
   }
+  // viewer profile 조회 실패는 silent 통과 시 viewerLanguage=null → 'en' 슬롯
+  // fallback → ko/ja viewer 에게 영어 보이스가 들리는 회귀. silent-success 룰
+  // (CLAUDE.md) 정합 — error 가시화 후 500 응답.
+  if (viewerResult.error) {
+    res.status(500).json({ error: viewerResult.error.message });
+    return;
+  }
 
   const viewerLanguage = (viewerResult.data?.language as string | null) ?? null;
   const slot = pickViewerSlot(viewerLanguage);

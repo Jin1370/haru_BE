@@ -100,9 +100,12 @@ router.patch('/preferences', validateBody(updatePreferencesSchema), async (req: 
     return;
   }
 
+  // upsert+select+single 이 정상 응답해도 PostgREST 가 0 행 반환 가능 — optional
+  // chain 으로 GET 핸들러 패턴과 통일. silent-success 룰 (CLAUDE.md): error 가
+  // null 이면 OK 응답, 그러나 data null 케이스도 안전 폴백.
   res.json({
-    notify_messages: data.notify_messages ?? true,
-    notify_matches: data.notify_matches ?? true,
+    notify_messages: data?.notify_messages ?? true,
+    notify_matches: data?.notify_matches ?? true,
   });
 });
 

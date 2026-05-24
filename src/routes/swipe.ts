@@ -521,13 +521,20 @@ router.post('/swipe', requireNotFrozen, validateBody(swipeBodySchema), async (re
 
   let match: { id: string; user1_id: string; user2_id: string } | null = null;
   if (direction === 'like') {
-    const { data: reciprocal } = await supabase
+    // silent-success 룰 (CLAUDE.md): PGRST116 (no rows) 는 정상 케이스 (상대가
+    // 아직 like 안 함) 이지만 그 외 error 는 가시화. silent 통과 시 reciprocal
+    // 매치 trigger 가 안 일어나는 회귀 가능.
+    const { data: reciprocal, error: reciprocalErr } = await supabase
       .from('swipes')
       .select('id')
       .eq('swiper_id', swiped_id)
       .eq('swiped_id', req.userId!)
       .eq('direction', 'like')
       .single();
+    if (reciprocalErr && reciprocalErr.code !== 'PGRST116') {
+      res.status(500).json({ error: reciprocalErr.message });
+      return;
+    }
 
     if (reciprocal) {
       const [user1, user2] = [req.userId!, swiped_id].sort();
@@ -538,16 +545,27 @@ router.post('/swipe', requireNotFrozen, validateBody(swipeBodySchema), async (re
         .single();
 
       if (matchError?.code === '23505') {
-        // 동시 like로 인한 중복 — 기존 매치 조회
-        const { data: existing } = await supabase
+        // 동시 like로 인한 중복 — 기존 매치 조회. error 가시화 (silent-success
+        // 룰): 옛 코드는 existing null 시 match 가 그대로 null 이 되어 사용자가
+        // "매치됐는데 안 됨" 응답 받는 회귀가 가능.
+        const { data: existing, error: existingErr } = await supabase
           .from('matches')
           .select()
           .eq('user1_id', user1)
           .eq('user2_id', user2)
           .single();
+        if (existingErr || !existing) {
+          res.status(500).json({
+            error: existingErr?.message ?? 'Match concurrency fallback failed',
+          });
+          return;
+        }
         match = existing;
       } else if (!matchError) {
         match = newMatch;
+      } else {
+        res.status(500).json({ error: matchError.message });
+        return;
       }
 
       // push-notifications sprint: 매치 성사 시 양쪽 사용자에게 푸시 발송.

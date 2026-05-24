@@ -52,6 +52,9 @@ Express 5 + Supabase + ElevenLabs 기반 크로스언어 소개팅 API 서버.
 - 비동기 처리 (메시지 번역/TTS, voice intro 오디오): fire-and-forget + `.catch()` 로깅. 상태 필드로 추적.
 - 번역은 `src/services/translation.ts`의 `translateMessage()` (Vertex AI Gemini 2.5 Flash, `responseMimeType: application/json`, `temperature=0.3`, `BLOCK_ONLY_HIGH` safety). source/target 은 송수신자의 `profiles.language` 스칼라 값. TTS는 `src/services/elevenlabs.ts`의 `synthesizeSpeech()` — `eleven_v3` 모델, `stability=1.0`, 언어 코드는 안 보내고 텍스트에서 자동 감지. emotion 값이 있으면 텍스트 앞에 `[emotion]` 프리픽스로 전달.
 - Supabase `.update()` / `.delete()`에서 count가 필요하면 `{ count: 'exact' }` 옵션 사용
+- **외부 의존성 호출 시 error 가시화 룰** (silent-success 금지): Supabase / ElevenLabs / OpenAI / Vertex AI / Storage 호출 결과에서 반드시 `error` 를 destructure 하고 (a) 응답 status 적절히 set 또는 (b) `console.error` 로 가시화한다. 무가시 silent skip 금지. 회귀 사례 2건 (voice-first-message-gate listened POST schema-drift / read-at-removal-list-mask v3 RPC error 가드 누락) 모두 같은 패턴으로 발견됨. fire-and-forget 패턴이라도 `.then(({ error }) => ...)` 로 명시 노출.
+- **신규 user-linked 테이블 추가 시 `auth.ts:deleteAccount` 동기 정리 룰**: profiles FK CASCADE 가 fire 되지 않는다 (deleteAccount 가 anonymize 만 함). 신규 테이블이 `user_id` / `sender_id` 등 사용자 참조 컬럼을 가지면 deleteAccount 의 cleanup task 에 동기 DELETE 를 추가해야 GDPR/PIPA 데이터 삭제권 충족. 회귀 사례 2건 (push-notifications device_tokens / message-moderation-v1 moderation_blocks+freeze_events) 모두 sprint 내 follow-up 으로 처리됨.
+- **moderation_blocks audit INSERT 는 `logModerationBlock` helper 사용** (`src/utils/moderationAudit.ts`). 4 위치 (메시지 dictionary/openai + voice intro dictionary/openai) 통합. surface (`message` / `voice_intro`) 와 layer (`dictionary` / `openai`) 만 호출처 분기로 전달.
 
 ## DB Migrations
 

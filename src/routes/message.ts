@@ -17,6 +17,7 @@ import { sendPushToUser } from '../services/pushNotifications';
 import { isBlocked } from '../constants/moderationDictionary';
 import { checkOpenAiModeration } from '../services/openaiModeration';
 import { requireNotFrozen } from '../utils/freezeGuard';
+import { logModerationBlock } from '../utils/moderationAudit';
 import { randomUUID } from 'crypto';
 
 const router = Router();
@@ -178,25 +179,13 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   //      원문/매칭 토큰/매치 id 미보존 (사용자 결정 PR1 스키마).
   const moderationResult = isBlocked(text);
   if (moderationResult.blocked) {
-    console.warn('[moderation.block]', {
-      sender_id: req.userId,
-      category: moderationResult.category,
-      language: moderationResult.language,
+    logModerationBlock({
+      senderId: req.userId!,
+      category: moderationResult.category!,
+      language: moderationResult.language!,
       layer: 'dictionary',
-      at: new Date().toISOString(),
+      surface: 'message',
     });
-    void supabase
-      .from('moderation_blocks')
-      .insert({
-        sender_id: req.userId!,
-        category: moderationResult.category!,
-        language: moderationResult.language!,
-      })
-      .then(({ error }) => {
-        if (error) {
-          console.error('[moderation.block.audit_insert_failed]', error.message);
-        }
-      });
     res.status(422).json({
       error: 'Message contains restricted expressions',
       code: 'message_blocked',
@@ -212,29 +201,16 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   // fail-open: 키 미설정 / OpenAI 다운 시 통과 (사전 차단이 1차 방어선).
   const openaiResult = await checkOpenAiModeration(text);
   if (openaiResult.blocked) {
-    console.warn('[moderation.block]', {
-      sender_id: req.userId,
-      category: openaiResult.category,
-      raw_category: openaiResult.rawCategory,
+    // OpenAI 는 multi-lingual 모델이라 language 단정 어려움 — 송신자
+    // profiles.language 를 fallback (omni-moderation-latest 는 language 미명시).
+    logModerationBlock({
+      senderId: req.userId!,
+      category: openaiResult.category!,
+      language: senderLang ?? 'ko',
       layer: 'openai',
-      at: new Date().toISOString(),
+      surface: 'message',
+      rawCategory: openaiResult.rawCategory,
     });
-    void supabase
-      .from('moderation_blocks')
-      .insert({
-        sender_id: req.userId!,
-        category: openaiResult.category!,
-        // OpenAI 는 multi-lingual 한 모델이라 language 단정 어려움 — 메시지 언어
-        // 추정은 별도 로직 필요. v1 에선 송신자 profiles.language 를 fallback 으로
-        // 사용. 추후 OpenAI 응답의 language field 활용 검토 (omni-moderation-latest
-        // 는 language 명시 안 함).
-        language: senderLang ?? 'ko',
-      })
-      .then(({ error }) => {
-        if (error) {
-          console.error('[moderation.block.audit_insert_failed]', error.message);
-        }
-      });
     res.status(422).json({
       error: 'Message contains restricted expressions',
       code: 'message_blocked',

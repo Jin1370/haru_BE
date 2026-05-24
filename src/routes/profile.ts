@@ -10,6 +10,7 @@ import { lookupBioPhrase } from '../constants/bioPhrasesCatalog';
 import { requireNotFrozen } from '../utils/freezeGuard';
 import { isBlocked } from '../constants/moderationDictionary';
 import { checkOpenAiModeration } from '../services/openaiModeration';
+import { logModerationBlock } from '../utils/moderationAudit';
 import { AuthRequest, VoiceIntroTranslations } from '../types';
 
 const router = Router();
@@ -96,27 +97,13 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
   if (voiceIntroChanged && resolvedVoiceIntro && !presetTranslations) {
     const dictResult = isBlocked(resolvedVoiceIntro);
     if (dictResult.blocked) {
-      console.warn('[moderation.block]', {
-        sender_id: req.userId,
-        category: dictResult.category,
-        language: dictResult.language,
-        surface: 'voice_intro',
+      logModerationBlock({
+        senderId: req.userId!,
+        category: dictResult.category!,
+        language: dictResult.language!,
         layer: 'dictionary',
-        at: new Date().toISOString(),
+        surface: 'voice_intro',
       });
-      void supabase
-        .from('moderation_blocks')
-        .insert({
-          sender_id: req.userId!,
-          category: dictResult.category!,
-          language: dictResult.language!,
-          surface: 'voice_intro',
-        })
-        .then(({ error }) => {
-          if (error) {
-            console.error('[moderation.block.audit_insert_failed]', error.message);
-          }
-        });
       res.status(422).json({
         error: 'Voice intro contains restricted expressions',
         code: 'message_blocked',
@@ -126,31 +113,17 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
 
     const openaiResult = await checkOpenAiModeration(resolvedVoiceIntro);
     if (openaiResult.blocked) {
-      // OpenAI 는 multi-lingual 모델 — language 단정 어려움. 작성자 본인 profiles.language
-      // raw 값을 fallback 으로 사용 (normalizeAuthorLanguage 적용 전 — audit log 의
-      // 운영 의미는 작성자 declared language).
+      // OpenAI 는 multi-lingual 모델 — language 단정 어려움. 작성자 declared
+      // language (normalizeAuthorLanguage 적용 전 raw 값) 를 fallback.
       const authorLang = (language as string | null | undefined) ?? 'ko';
-      console.warn('[moderation.block]', {
-        sender_id: req.userId,
-        category: openaiResult.category,
-        raw_category: openaiResult.rawCategory,
-        surface: 'voice_intro',
+      logModerationBlock({
+        senderId: req.userId!,
+        category: openaiResult.category!,
+        language: authorLang,
         layer: 'openai',
-        at: new Date().toISOString(),
+        surface: 'voice_intro',
+        rawCategory: openaiResult.rawCategory,
       });
-      void supabase
-        .from('moderation_blocks')
-        .insert({
-          sender_id: req.userId!,
-          category: openaiResult.category!,
-          language: authorLang,
-          surface: 'voice_intro',
-        })
-        .then(({ error }) => {
-          if (error) {
-            console.error('[moderation.block.audit_insert_failed]', error.message);
-          }
-        });
       res.status(422).json({
         error: 'Voice intro contains restricted expressions',
         code: 'message_blocked',

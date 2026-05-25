@@ -101,4 +101,15 @@ export const env = {
       .default(3)
       .parse(process.env.AUTO_FREEZE_REPORT_THRESHOLD),
   },
+
+  // Email confirmation flow (Supabase enable_confirmations=true 정합).
+  // signUp 시 emailRedirectTo 로 전달되며 Supabase Auth 가 보낸 확인 메일의
+  // 링크 destination 이 된다. Supabase Dashboard 의 Redirect URLs allow-list
+  // 에 동일 URL 이 등록되어야 거부되지 않음. 기본값은 dev local — production
+  // 은 .env 의 EMAIL_CONFIRM_REDIRECT_URL 로 https://haruvoice.com/auth/callback.
+  auth: {
+    emailConfirmRedirectUrl:
+      process.env.EMAIL_CONFIRM_REDIRECT_URL ||
+      'http://localhost:3000/auth/callback',
+  },
 };

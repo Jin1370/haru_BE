@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { randomBytes } from 'crypto';
+import { env } from '../config/env';
 import { supabase, supabaseAuth } from '../config/supabase';
 import { authMiddleware } from '../middleware/auth';
 import { deleteVoiceClone } from '../services/elevenlabs';
@@ -149,6 +150,9 @@ router.post('/signup', async (req: Request, res: Response) => {
   const { data, error } = await supabaseAuth.auth.signUp({
     email,
     password,
+    options: {
+      emailRedirectTo: env.auth.emailConfirmRedirectUrl,
+    },
   });
 
   if (error) {
@@ -166,9 +170,25 @@ router.post('/signup', async (req: Request, res: Response) => {
     return;
   }
 
+  // When Supabase's "Confirm email" toggle is ON, signUp returns a user but
+  // no session — the FE must show a "check your inbox" state and block
+  // login until the user clicks the confirmation link. The presence of
+  // session decides this without the FE having to introspect Supabase
+  // config.
+  if (!data.session) {
+    res.status(201).json({
+      needs_email_confirmation: true,
+      user: {
+        id: data.user?.id,
+        email: data.user?.email,
+      },
+    });
+    return;
+  }
+
   res.status(201).json({
-    access_token: data.session?.access_token,
-    refresh_token: data.session?.refresh_token,
+    access_token: data.session.access_token,
+    refresh_token: data.session.refresh_token,
     user: {
       id: data.user?.id,
       email: data.user?.email,

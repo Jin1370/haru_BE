@@ -53,6 +53,7 @@ function mapSignupError(message: string | undefined): AuthErrorCode | null {
   ) {
     return 'PASSWORD_FORMAT';
   }
+  if (m.includes('email not confirmed')) return 'EMAIL_NOT_CONFIRMED';
   return null;
 }
 

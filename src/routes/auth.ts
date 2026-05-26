@@ -62,7 +62,11 @@ function mapSignupError(message: string | undefined): AuthErrorCode | null {
 // addresses. For our login form we want to tell the *real* user "no account
 // for this email" without that probe leaking through the public sign-in
 // flow. Same need on signup so EMAIL_TAKEN can win over PASSWORD_FORMAT
-// when both are wrong.
+// when both are wrong, and so an *already-confirmed* user retrying signup
+// is told "email taken" instead of getting the misleading "check your
+// inbox" toast (Supabase's signUp() returns a fake/no-session payload for
+// already-registered users to prevent enumeration, but never actually
+// sends a new mail when the existing row is confirmed).
 //
 // GoTrue's admin /users endpoint does NOT honour an `?email=` filter (it
 // silently ignores unknown query params and returns the first page of all
@@ -72,13 +76,15 @@ function mapSignupError(message: string | undefined): AuthErrorCode | null {
 // Fails closed: any error returns null and the caller falls back to whatever
 // code Supabase returned originally.
 //
-// TODO: replace with a Postgres RPC ('SELECT 1 FROM auth.users WHERE
-// email = $1') once the user base outgrows the scan window — current cap
-// (50 pages × 1000 = 50k users) is comfortable for early-stage but not
-// production-scale.
-async function emailExists(email: string): Promise<boolean | null> {
+// TODO: replace with a Postgres RPC ('SELECT id, email_confirmed_at FROM
+// auth.users WHERE email = $1') once the user base outgrows the scan window
+// — current cap (50 pages × 1000 = 50k users) is comfortable for early-stage
+// but not production-scale.
+type EmailIdentity = { exists: boolean; confirmed: boolean };
+
+async function findEmailIdentity(email: string): Promise<EmailIdentity | null> {
   const target = email.trim().toLowerCase();
-  if (target.length === 0) return false;
+  if (target.length === 0) return { exists: false, confirmed: false };
   try {
     const PER_PAGE = 1000;
     const MAX_PAGES = 50;
@@ -88,16 +94,24 @@ async function emailExists(email: string): Promise<boolean | null> {
         perPage: PER_PAGE,
       });
       if (error || !data) return null;
-      const found = data.users.some(
+      const found = data.users.find(
         (u) => typeof u.email === 'string' && u.email.toLowerCase() === target,
       );
-      if (found) return true;
-      if (data.users.length < PER_PAGE) return false;
+      if (found) {
+        return { exists: true, confirmed: Boolean(found.email_confirmed_at) };
+      }
+      if (data.users.length < PER_PAGE) return { exists: false, confirmed: false };
     }
     return null;
   } catch {
     return null;
   }
+}
+
+async function emailExists(email: string): Promise<boolean | null> {
+  const identity = await findEmailIdentity(email);
+  if (identity === null) return null;
+  return identity.exists;
 }
 
 // Server-side password policy. Mirrors haru_FE/src/utils/validators.ts so a
@@ -176,7 +190,20 @@ router.post('/signup', async (req: Request, res: Response) => {
   // login until the user clicks the confirmation link. The presence of
   // session decides this without the FE having to introspect Supabase
   // config.
+  //
+  // Caveat: Supabase obfuscates "email already registered" by returning the
+  // SAME shape (fake user, no session) for users that *already* exist, to
+  // prevent enumeration. For already-confirmed users no confirmation mail
+  // is actually sent, so the FE's "check your inbox" toast would lie. Probe
+  // here and upgrade the response to EMAIL_TAKEN when the address is
+  // already confirmed; unconfirmed accounts still flow through the
+  // confirmation path because Supabase does resend the mail in that case.
   if (!data.session) {
+    const identity = await findEmailIdentity(email);
+    if (identity?.exists && identity.confirmed) {
+      res.status(400).json({ error: 'email already registered', code: 'EMAIL_TAKEN' });
+      return;
+    }
     res.status(201).json({
       needs_email_confirmation: true,
       user: {

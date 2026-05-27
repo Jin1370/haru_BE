@@ -400,8 +400,16 @@ async function cleanupDeletedUserAssets(userId: string, voiceCloneId: string | n
     if (rmErr) throw new Error(`remove ${bucket}/${folder}: ${rmErr.message}`);
   };
 
+  // photo-watercolor-pipeline sprint: photos 버킷 하위 폴더 cleanup.
+  //   * photos/{userId}/ — 옛 평면 구조 (mig 028 이전 업로드)
+  //   * photos/{userId}/originals/ — 비동기 변환 전 원본 (변환 성공 시 즉시 폐기되지만
+  //     실패/대기 중인 원본이 잔존 가능)
+  //   * photos/{userId}/converted/ — 변환본 (현재 응답에서 노출 중인 사진)
+  // list/remove 가 재귀적이지 않으므로 폴더별 호출. 빈 폴더는 무해 (list 가 빈 배열).
   const tasks: Array<{ name: string; run: () => Promise<unknown> }> = [
     { name: 'photos', run: () => removeFolder('photos', userId) },
+    { name: 'photos-originals', run: () => removeFolder('photos', `${userId}/originals`) },
+    { name: 'photos-converted', run: () => removeFolder('photos', `${userId}/converted`) },
     { name: 'voice-intro-audio', run: () => removeFolder('voice-intro-audio', userId) },
   ];
 
@@ -478,29 +486,13 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
     return;
   }
 
-  // (1.6) message-moderation-v1 sprint: moderation_blocks + freeze_events 동기 DELETE.
-  // mig 020/021 의 FK CASCADE 는 profiles 가 실제 DELETE 될 때만 발화하는데
-  // (1) 단계에서 profiles 는 anonymize 만 한다 — device_tokens 와 동일 회귀.
-  // 미정리 시 userId-linked 모더레이션 차단 이력 + freeze audit 가 90일+
-  // 누적 보존되어 GDPR/PIPA 데이터 삭제권 위반.
-  // 두 테이블 모두 service_role 전용 RLS 라 운영자 view 가 핵심 보존 대상 —
-  // anonymize 이전 동기 경로 + 실패 시 500 으로 inconsistent state 노출.
-  const { error: modBlocksErr } = await supabase
-    .from('moderation_blocks')
-    .delete()
-    .eq('sender_id', userId);
-  if (modBlocksErr) {
-    res.status(500).json({ error: modBlocksErr.message });
-    return;
-  }
-  const { error: freezeEventsErr } = await supabase
-    .from('freeze_events')
-    .delete()
-    .eq('frozen_user_id', userId);
-  if (freezeEventsErr) {
-    res.status(500).json({ error: freezeEventsErr.message });
-    return;
-  }
+  // (1.6) 폐기됨 — evidence-hold-on-delete sprint (2026-05-27) 에서
+  // moderation_blocks + freeze_events 동기 DELETE 를 제거하고
+  // cleanupAuditTables.ts 의 365 일 cron sweep 으로 이전 (PIPA §21(1) 단서 +
+  // §21(3) 분리 저장 + 정통망법 §44조의10 명예훼손 분쟁조정부 + 전기통신사업법
+  // §83 수사기관 통신자료 제공 요청). 동기 DELETE 정책은 GDPR/PIPA 데이터
+  // 삭제권을 즉시 충족하는 대신 audit 보존을 손실시켰음. 1년 시한부 보존이
+  // 두 요건의 균형점.
 
   // (1.7) mig 022 match_mutes 동기 DELETE — device_tokens / moderation_blocks
   // 와 동일 회귀 (anonymize 가 CASCADE 를 fire 시키지 않음). mute 이력은 보존
@@ -512,6 +504,60 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
     .eq('user_id', userId);
   if (matchMutesErr) {
     res.status(500).json({ error: matchMutesErr.message });
+    return;
+  }
+
+  // (1.8) photo-watercolor-pipeline sprint: profile_photos 동기 DELETE.
+  // mig 028 의 FK CASCADE (profiles ON DELETE CASCADE) 는 profiles 가 실제 DELETE
+  // 될 때만 fire 하는데 (1) 단계가 anonymize 만 함 — device_tokens / moderation_blocks
+  // 와 동일 회귀. profile_photos 미정리 시 (a) discover/match 라우트가 join 으로
+  // 옛 변환본 노출 (b) Storage 객체 잔존 으로 GDPR/PIPA 데이터 삭제권 위반.
+  // 신규 user-linked 테이블 추가 시 deleteAccount 동기 정리 룰 (CLAUDE.md) 적용.
+  const { error: photoRowsErr } = await supabase
+    .from('profile_photos')
+    .delete()
+    .eq('user_id', userId);
+  if (photoRowsErr) {
+    res.status(500).json({ error: photoRowsErr.message });
+    return;
+  }
+
+  // (1.9) evidence-hold-on-delete sprint: swipes 양방향 동기 DELETE.
+  // mig 001 의 swipes FK CASCADE 는 profiles 가 실제 DELETE 될 때만 발화하는데
+  // (1) 단계에서 profiles 는 anonymize 만 한다 — push-notifications /
+  // message-moderation-v1 / match-mutes 와 동일 회귀.
+  // 잔존 가치 0 — 본인 디스커버는 어차피 is_active=false 로 빠지고, 상대방
+  // "받은 좋아요" 탭은 swipes JOIN 후 is_active 필터로 자연 제외. 두 row
+  // 그룹 (swiper / swiped) 가 동일 row 를 가리킬 수 없으므로 atomic-failure
+  // 모드 없음. 2 호출 각각의 error 를 destructure 해 가시화 (silent-success 룰).
+  const { error: swipesSwiperErr } = await supabase
+    .from('swipes')
+    .delete()
+    .eq('swiper_id', userId);
+  if (swipesSwiperErr) {
+    res.status(500).json({ error: swipesSwiperErr.message });
+    return;
+  }
+  const { error: swipesSwipedErr } = await supabase
+    .from('swipes')
+    .delete()
+    .eq('swiped_id', userId);
+  if (swipesSwipedErr) {
+    res.status(500).json({ error: swipesSwipedErr.message });
+    return;
+  }
+
+  // (1.10) evidence-hold-on-delete sprint: user_preferences 동기 DELETE.
+  // mig 002 의 FK CASCADE 는 profiles 가 실제 DELETE 될 때만 발화하는데 동일
+  // anonymize 한계 — strategist G1 표면화 (push-notifications/message-moderation-v1
+  // 의 반복 패턴). 매칭 선호도 + 알림 옵트아웃 (notify_messages/notify_matches)
+  // 은 PIPA §21 즉시 파기 대상. 재가입 시 새 row INSERT 라 잔존 가치 0.
+  const { error: prefsErr } = await supabase
+    .from('user_preferences')
+    .delete()
+    .eq('user_id', userId);
+  if (prefsErr) {
+    res.status(500).json({ error: prefsErr.message });
     return;
   }
 

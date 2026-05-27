@@ -3,14 +3,24 @@ import { supabase } from '../config/supabase';
 // audit 테이블 365 일 cleanup sweep.
 //
 // 대상:
-//   * moderation_blocks (mig 020) — 차단 audit. blocked_at 기준.
-//   * freeze_events (mig 021)     — 자동 freeze audit. triggered_at 기준.
+//   * moderation_blocks (mig 020) — 콘텐츠 차단 audit. blocked_at 기준.
+//   * freeze_events     (mig 021) — 자동 freeze audit. triggered_at 기준.
+//   * reports           (mig 002) — 사용자 신고 audit. created_at 기준.
+//     evidence-hold-on-delete sprint (2026-05-27) 에서 365 일 sweep 추가.
+//     분쟁·수사 협조 보존 근거 (PIPA §21(1) 단서 + §21(3) 분리 저장 +
+//     정통망법 §44조의10 명예훼손 분쟁조정부 + 전기통신사업법 §83 수사기관
+//     통신자료 제공 요청).
+//   * blocks            (mig 002) — 사용자 차단 audit. created_at 기준.
+//     동일 sprint, 동일 근거. 가해자 차단 패턴 추적용 audit 성격으로 분류.
 //
 // 정책:
-//   사용자 결정 (2026-05-24) — 90 일 → 1 년 보관으로 변경. 운영 관점 (재범자 식별,
-//   신고 패턴 분석) 가치 확보 + PIPA §3 (data minimization) / GDPR Art.5(1)(e)
-//   storage limitation 정합. 무기한 보관은 PIPA §21 (목적 달성 시 지체 없이 파기)
-//   위배라 cleanup 자체는 필수.
+//   사용자 결정 (2026-05-24) — 90 일 → 1 년 보관. 운영 관점 (재범자 식별,
+//   신고 패턴 분석) 가치 확보 + PIPA §3 / GDPR Art.5(1)(e) storage limitation
+//   정합. 무기한 보관은 PIPA §21 위배라 cleanup 자체는 필수.
+//
+//   evidence-hold-on-delete (2026-05-27) — deleteAccount 가 moderation_blocks /
+//   freeze_events 를 동기 DELETE 하던 회귀를 폐기하고 본 sweep 에 일임. reports /
+//   blocks 도 발생 시점 기준 365 일 보존 후 자동 폐기로 통일.
 //
 // 실패 정책:
 //   sweep 실패는 console.error 후 다음 tick. 다른 sweep 과 직교 (한 테이블 실패
@@ -25,43 +35,59 @@ function cutoffIso(daysAgo: number): string {
   return new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString();
 }
 
+type AuditTable = {
+  table: 'moderation_blocks' | 'freeze_events' | 'reports' | 'blocks';
+  timeColumn: 'blocked_at' | 'triggered_at' | 'created_at';
+  key: 'moderation' | 'freeze' | 'reports' | 'blocks';
+};
+
+const AUDIT_TABLES: AuditTable[] = [
+  { table: 'moderation_blocks', timeColumn: 'blocked_at',   key: 'moderation' },
+  { table: 'freeze_events',     timeColumn: 'triggered_at', key: 'freeze'     },
+  { table: 'reports',           timeColumn: 'created_at',   key: 'reports'    },
+  { table: 'blocks',            timeColumn: 'created_at',   key: 'blocks'     },
+];
+
+async function sweepAuditTable(
+  table: AuditTable['table'],
+  timeColumn: string,
+  cutoff: string,
+): Promise<{ deleted: number; error: boolean }> {
+  // silent-success 룰 (CLAUDE.md): 외부 의존성 호출 결과의 error 를
+  // destructure 후 console.error 로 가시화. PGRST205 같은 테이블 부재
+  // 에러도 동일 경로 — silent skip 금지.
+  const result = await supabase
+    .from(table)
+    .delete({ count: 'exact' })
+    .lt(timeColumn, cutoff);
+  if (result.error) {
+    console.error(`[audit-cleanup] ${table} delete failed`, result.error.message);
+    return { deleted: 0, error: true };
+  }
+  return { deleted: result.count ?? 0, error: false };
+}
+
 export async function sweepAuditTables(): Promise<{
   moderationDeleted: number;
   freezeDeleted: number;
+  reportsDeleted: number;
+  blocksDeleted: number;
   errors: number;
 }> {
   const cutoff = cutoffIso(RETENTION_DAYS);
-  let errors = 0;
-
-  // moderation_blocks
-  const moderationResult = await supabase
-    .from('moderation_blocks')
-    .delete({ count: 'exact' })
-    .lt('blocked_at', cutoff);
-
-  let moderationDeleted = 0;
-  if (moderationResult.error) {
-    console.error('[audit-cleanup] moderation_blocks delete failed', moderationResult.error.message);
-    errors += 1;
-  } else {
-    moderationDeleted = moderationResult.count ?? 0;
-  }
-
-  // freeze_events
-  const freezeResult = await supabase
-    .from('freeze_events')
-    .delete({ count: 'exact' })
-    .lt('triggered_at', cutoff);
-
-  let freezeDeleted = 0;
-  if (freezeResult.error) {
-    console.error('[audit-cleanup] freeze_events delete failed', freezeResult.error.message);
-    errors += 1;
-  } else {
-    freezeDeleted = freezeResult.count ?? 0;
-  }
-
-  return { moderationDeleted, freezeDeleted, errors };
+  const results = await Promise.all(
+    AUDIT_TABLES.map((t) => sweepAuditTable(t.table, t.timeColumn, cutoff)),
+  );
+  const lookup = Object.fromEntries(
+    AUDIT_TABLES.map((t, i) => [t.key, results[i]]),
+  ) as Record<AuditTable['key'], { deleted: number; error: boolean }>;
+  return {
+    moderationDeleted: lookup.moderation.deleted,
+    freezeDeleted:     lookup.freeze.deleted,
+    reportsDeleted:    lookup.reports.deleted,
+    blocksDeleted:     lookup.blocks.deleted,
+    errors: results.filter((r) => r.error).length,
+  };
 }
 
 let scheduler: NodeJS.Timeout | null = null;
@@ -78,7 +104,12 @@ export function startAuditCleanupScheduler(): void {
     bootTimer = null;
     sweepAuditTables()
       .then((r) => {
-        if (r.moderationDeleted > 0 || r.freezeDeleted > 0) {
+        if (
+          r.moderationDeleted > 0 ||
+          r.freezeDeleted > 0 ||
+          r.reportsDeleted > 0 ||
+          r.blocksDeleted > 0
+        ) {
           console.log('[audit-cleanup.sweep] boot', r);
         }
       })
@@ -89,7 +120,12 @@ export function startAuditCleanupScheduler(): void {
   scheduler = setInterval(() => {
     sweepAuditTables()
       .then((r) => {
-        if (r.moderationDeleted > 0 || r.freezeDeleted > 0) {
+        if (
+          r.moderationDeleted > 0 ||
+          r.freezeDeleted > 0 ||
+          r.reportsDeleted > 0 ||
+          r.blocksDeleted > 0
+        ) {
           console.log('[audit-cleanup.sweep] tick', r);
         }
       })

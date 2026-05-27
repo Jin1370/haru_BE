@@ -17,6 +17,7 @@ import notificationsRoutes from './routes/notifications';
 import adminRoutes from './routes/admin';
 import { startAudioExpiryScheduler } from './jobs/purgeExpiredAudio';
 import { startAuditCleanupScheduler } from './jobs/cleanupAuditTables';
+import { startPhotoConversionRetryScheduler } from './jobs/retryFailedPhotoConversions';
 
 export const app = express();
 
@@ -115,4 +116,7 @@ if (process.env.NODE_ENV !== 'test') {
   // audit-cleanup sprint: moderation_blocks / freeze_events 365일 보관 정책
   // (PIPA §21 + GDPR Art.5(1)(e) data minimization). 같은 24h interval + unref 패턴.
   startAuditCleanupScheduler();
+  // photo-watercolor-pipeline sprint: pending/failed 사진 변환 재시도 sweep.
+  // 부팅 120s 후 1회 + 10 분 interval. 백필 row 처리 + transient 실패 자동 복구.
+  startPhotoConversionRetryScheduler();
 }

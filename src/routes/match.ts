@@ -87,6 +87,8 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
   // mig 009 이후 단일 scalar `language` 컬럼이 source of truth.
   // mig 012 이후 deleted_at 가 tombstone 마커 — FE 가 이 값을 보고
   // "탈퇴한 사용자" 라벨로 렌더링한다 (display_name 은 비어있음).
+  // photo-watercolor-pipeline sprint: photos 는 호환 유지 동안만 select.
+  // 응답 photos 배열은 profile_photos 의 status='ready' converted_url 만 사용.
   const { data: profiles } = await supabase
     .from('profiles')
     .select('id, display_name, photos, nationality, language, deleted_at')
@@ -95,6 +97,28 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
   const profileMap = new Map(
     (profiles || []).map((p) => [p.id, { ...p, language: (p.language as string | null) ?? '' }]),
   );
+
+  // photo-watercolor-pipeline sprint: partner 별 ready 사진 일괄 조회. position ASC.
+  // 디스커버와 동일 패턴 + position 0~4 전체 (매치는 unlock 도달 시 전체 노출).
+  const readyPhotosByPartner = new Map<string, string[]>();
+  if (partnerIds.length > 0) {
+    const { data: photoRows, error: photoErr } = await supabase
+      .from('profile_photos')
+      .select('user_id, position, converted_url, status')
+      .in('user_id', partnerIds)
+      .eq('status', 'ready')
+      .order('position', { ascending: true });
+    if (photoErr) {
+      console.error('[match.list.profile_photos_select_failed]', photoErr.message);
+    } else {
+      ((photoRows ?? []) as Array<{ user_id: string; converted_url: string | null }>).forEach((r) => {
+        if (!r.converted_url) return;
+        const list = readyPhotosByPartner.get(r.user_id) ?? [];
+        list.push(r.converted_url);
+        readyPhotosByPartner.set(r.user_id, list);
+      });
+    }
+  }
 
   // 3. 매치별 마지막 메시지 + 읽지 않은 수 + 라운드트립 기반 unlock 플래그 (RPC v3)
   //
@@ -108,7 +132,7 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
   //     (FE 마스킹 분기용 raw 필드).
   const matchIds = matches.map((m) => m.id);
   const [{ data: summaries, error: rpcError }, mutesResult] = await Promise.all([
-    supabase.rpc('get_match_summaries_v3', {
+    supabase.rpc('get_match_summaries_v4', {
       match_ids: matchIds,
       viewer_id: req.userId!,
     }),
@@ -178,6 +202,13 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
         ? cols.round_trip_count
         : Number(summary?.round_trip_count ?? 0);
 
+    // photo-watercolor-pipeline sprint: photos 는 profile_photos.converted_url
+    //   (status='ready' 사진만, position ASC). main_photo_unlocked / all_photos_unlocked
+    //   는 v4 로 단일 unlock 단계 (10회 도달 시 양쪽 동시 true). 폴백: profile_photos
+    //   ready 사진이 0장이면 옛 photos 배열 사용 (mig 028 미적용 / 백필 sweep 미완).
+    const convertedPhotos = readyPhotosByPartner.get(partnerId) ?? [];
+    const legacyPhotos = (rawPartner?.photos as string[] | null) ?? [];
+    const sourcePhotos = convertedPhotos.length > 0 ? convertedPhotos : legacyPhotos;
     const partner = rawPartner
       ? {
           id: rawPartner.id,
@@ -186,8 +217,8 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
           language: rawPartner.language,
           deleted_at: (rawPartner.deleted_at as string | null) ?? null,
           photos: photoAccess.all_photos_unlocked
-            ? (rawPartner.photos ?? [])
-            : (rawPartner.photos ?? []).slice(0, 1),
+            ? sourcePhotos
+            : sourcePhotos.slice(0, 1),
         }
       : null;
 

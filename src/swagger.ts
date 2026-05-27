@@ -68,6 +68,28 @@ export const swaggerDocument = {
             additionalProperties: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] },
             description: '슬롯별 합성 상태. 키 ko/ja/en. 키 없음 = 미시도.',
           },
+          photo_statuses: {
+            type: 'array',
+            description:
+              'photo-watercolor-pipeline sprint: 사진별 변환 status. position ASC. FE 가 폴링하여 processing/failed/rejected 인디케이터 분기.',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', format: 'uuid' },
+                position: { type: 'integer', minimum: 0, maximum: 4 },
+                status: {
+                  type: 'string',
+                  enum: ['pending', 'processing', 'ready', 'failed', 'rejected'],
+                },
+                failure_reason: {
+                  type: 'string',
+                  nullable: true,
+                  description: 'moderation_rejected / openai_timeout / openai_error / network / upload_failed / download_failed / unknown.',
+                },
+              },
+              required: ['id', 'position', 'status'],
+            },
+          },
           is_active: { type: 'boolean' },
           created_at: { type: 'string', format: 'date-time' },
           updated_at: { type: 'string', format: 'date-time' },
@@ -381,22 +403,82 @@ export const swaggerDocument = {
     '/api/profile/photos': {
       post: {
         tags: ['Profile'],
-        summary: '프로필 사진 업로드 (최대 6장, 5MB)',
+        summary: '프로필 사진 업로드 (최대 5장, 5MB, 비동기 변환)',
+        description:
+          'photo-watercolor-pipeline sprint: 업로드된 원본은 OpenAI gpt-image-2 로 수채화 톤으로 비동기 변환된다. 응답은 202 + status="processing" — FE 는 GET /me 폴링으로 status="ready" 전이 감지. ' +
+          '모더레이션 거부는 비동기 (status="rejected") — FE 가 폴링 후 토스트. 원본은 변환 성공 직후 즉시 폐기.',
         requestBody: { required: true, content: { 'multipart/form-data': { schema: { type: 'object', required: ['photo'], properties: { photo: { type: 'string', format: 'binary' } } } } } },
         responses: {
-          200: { description: '업로드 성공', content: { 'application/json': { schema: { type: 'object', properties: { url: { type: 'string', format: 'uri' }, photos: { type: 'array', items: { type: 'string', format: 'uri' } } } } } } },
-          400: { description: '파일 없음 또는 6장 초과', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          202: {
+            description: '업로드 성공 + 비동기 변환 시작',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    photo_id: { type: 'string', format: 'uuid' },
+                    position: { type: 'integer', minimum: 0, maximum: 4 },
+                    status: { type: 'string', enum: ['processing'] },
+                    url: { type: 'string', format: 'uri', description: '변환 미완료 시 원본 URL (FE 폴링 후 converted_url 로 갱신).' },
+                  },
+                  required: ['photo_id', 'position', 'status'],
+                },
+              },
+            },
+          },
+          400: { description: '파일 없음 / 5장 초과 / 허용되지 않는 MIME', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
+          500: { description: 'Storage 업로드 / DB INSERT 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/profile/photos/{photoId}/retry': {
+      post: {
+        tags: ['Profile'],
+        summary: '실패한 사진 변환 수동 재시도 (photo-watercolor-pipeline sprint)',
+        description: 'status="failed" 인 사진만 재시도 허용. rejected 는 422 (모더레이션 사유 — 다른 사진 업로드 유도).',
+        parameters: [{ name: 'photoId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: {
+          202: { description: '재시도 시작 — status="processing"', content: { 'application/json': { schema: { type: 'object', properties: { photo_id: { type: 'string', format: 'uuid' }, status: { type: 'string', enum: ['processing'] } } } } } },
+          404: { description: '사진 없음 / 본인 사진 아님', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: { description: 'failed 상태가 아님', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          422: { description: 'rejected — 다른 사진 업로드 필요. code="photo_blocked".', content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string' }, code: { type: 'string', example: 'photo_blocked' } } } } } },
+          403: { description: '계정 freeze', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },
       },
     },
     '/api/profile/photos/{index}': {
       delete: {
         tags: ['Profile'],
-        summary: '프로필 사진 삭제',
-        parameters: [{ name: 'index', in: 'path', required: true, schema: { type: 'integer', minimum: 0 } }],
+        summary: '프로필 사진 삭제 (position 기준)',
+        description: 'photo-watercolor-pipeline sprint: profile_photos.position 기반. row DELETE + Storage cleanup (converted + original).',
+        parameters: [{ name: 'index', in: 'path', required: true, schema: { type: 'integer', minimum: 0, maximum: 4 } }],
         responses: {
-          200: { description: '삭제 성공', content: { 'application/json': { schema: { type: 'object', properties: { photos: { type: 'array', items: { type: 'string' } } } } } } },
+          200: {
+            description: '삭제 성공',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    photo_statuses: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'string', format: 'uuid' },
+                          position: { type: 'integer', minimum: 0, maximum: 4 },
+                          status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed', 'rejected'] },
+                          failure_reason: { type: 'string', nullable: true },
+                        },
+                      },
+                    },
+                    photos: { type: 'array', items: { type: 'string', format: 'uri' } },
+                  },
+                },
+              },
+            },
+          },
           400: { description: '잘못된 인덱스', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
         },

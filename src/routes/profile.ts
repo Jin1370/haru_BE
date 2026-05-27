@@ -3,6 +3,7 @@ import multer from 'multer';
 import { supabase } from '../config/supabase';
 import { uploadFile, deleteFile, extractPath } from '../services/storage';
 import { generateVoiceIntroAudios, normalizeAuthorLanguage } from '../services/voiceIntro';
+import { convertProfilePhoto } from '../services/photoConversion';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
 import { profileUpsertSchema } from '../schemas/profile';
@@ -13,12 +14,24 @@ import { checkOpenAiModeration } from '../services/openaiModeration';
 import { logModerationBlock } from '../utils/moderationAudit';
 import { AuthRequest, VoiceIntroTranslations } from '../types';
 
+// photo-watercolor-pipeline sprint: 사진 최대 5장 (slot 0~4).
+// 기존 라우트가 6장까지 허용하던 drift 를 본 sprint 에서 5장으로 정정.
+const MAX_PHOTOS = 5;
+
 const router = Router();
 const upload = multer({ limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB
 
 router.use(authMiddleware);
 
 // 내 프로필 조회
+//
+// photo-watercolor-pipeline sprint: 응답에 photo_statuses 배열 추가.
+// FE 가 setup/step5 / settings/profile 화면에서 사진별 변환 status (processing /
+// failed / rejected / ready) 를 폴링하여 인디케이터/재시도 UX 분기.
+//
+// 호환성 유지: photos 배열 (Profile.photos) 은 status='ready' 인 converted_url
+// 만 position ASC 순으로 노출. 변환 미완료 사진은 photos 배열에 미포함 → 디스커버
+// 노출 조건 (photos.length > 0) 자연 정합.
 router.get('/me', async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabase
     .from('profiles')
@@ -31,7 +44,50 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  res.json(data);
+  // profile_photos 조회. mig 028 미적용 환경 가드 — error 가시화 + 빈 배열 폴백.
+  const photoStatusesResult = await supabase
+    .from('profile_photos')
+    .select('id, position, status, failure_reason, converted_url')
+    .eq('user_id', req.userId!)
+    .order('position', { ascending: true });
+
+  let photoStatuses: Array<{
+    id: string;
+    position: number;
+    status: string;
+    failure_reason: string | null;
+  }> = [];
+  let readyPhotos: string[] = [];
+
+  if (photoStatusesResult.error) {
+    console.error('[profile.me.photo_statuses_select_failed]', photoStatusesResult.error.message);
+  } else {
+    const rows = (photoStatusesResult.data ?? []) as Array<{
+      id: string;
+      position: number;
+      status: string;
+      failure_reason: string | null;
+      converted_url: string | null;
+    }>;
+    photoStatuses = rows.map((r) => ({
+      id: r.id,
+      position: r.position,
+      status: r.status,
+      failure_reason: r.failure_reason,
+    }));
+    readyPhotos = rows
+      .filter((r) => r.status === 'ready' && r.converted_url)
+      .map((r) => r.converted_url as string);
+  }
+
+  // 호환성: profile_photos 테이블이 비어있고 옛 profiles.photos 배열만 있는 환경
+  // (mig 028 미적용 또는 백필 미실행 dev DB) 에선 photos 배열 폴백 사용.
+  const responsePhotos =
+    readyPhotos.length > 0
+      ? readyPhotos
+      : ((data.photos as string[] | null) ?? []);
+
+  res.json({ ...data, photos: responsePhotos, photo_statuses: photoStatuses });
 });
 
 // 내 프로필 수정 (생성 포함 - upsert)
@@ -181,7 +237,18 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
 
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
-// 프로필 사진 업로드
+// 프로필 사진 업로드 (photo-watercolor-pipeline sprint — 비동기 변환).
+//
+// 흐름:
+//   1) multer 가 받은 raw bytes 검증 + Storage `photos/{userId}/originals/{ts}_{uuid}.{ext}` 업로드.
+//   2) profile_photos INSERT — position = 다음 빈 자리, status='processing'.
+//   3) 비동기 convertProfilePhoto fire-and-forget 트리거.
+//   4) 202 응답 — { photo_id, position, status: 'processing' }. FE 는 GET /me 폴링으로
+//      ready 전이 감지.
+//
+// 모더레이션 거부 (status='rejected') 는 비동기 분기 — FE 폴링이 감지 후 토스트.
+// 동기 422 거부는 본 sprint 범위 외 (raw bytes 단계의 pre-check 는 비용 cap 후속).
+//
 // message-moderation-v1 (PR2): freeze 사용자 mutating 차단.
 router.post('/photos', requireNotFrozen, upload.single('photo'), async (req: AuthRequest, res: Response) => {
   if (!req.file) {
@@ -194,62 +261,267 @@ router.post('/photos', requireNotFrozen, upload.single('photo'), async (req: Aut
     return;
   }
 
-  // 현재 사진 개수 확인
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('photos')
-    .eq('id', req.userId!)
-    .single();
+  // 현재 사진 개수 — profile_photos 테이블 기준 (5장 cap).
+  // mig 028 미적용 환경 폴백: profiles.photos 배열 사용.
+  const photosCountResult = await supabase
+    .from('profile_photos')
+    .select('id, position', { count: 'exact' })
+    .eq('user_id', req.userId!);
 
-  const currentPhotos: string[] = profile?.photos || [];
-  if (currentPhotos.length >= 6) {
-    res.status(400).json({ error: 'Maximum 6 photos allowed' });
+  let currentCount = 0;
+  const usedPositions = new Set<number>();
+  if (photosCountResult.error) {
+    console.error('[profile.photos.count_select_failed]', photosCountResult.error.message);
+    // 폴백: 옛 photos 배열 length.
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('photos')
+      .eq('id', req.userId!)
+      .single();
+    const currentPhotos: string[] = (profile?.photos as string[] | null) ?? [];
+    currentCount = currentPhotos.length;
+  } else {
+    const rows = (photosCountResult.data ?? []) as Array<{ id: string; position: number }>;
+    currentCount = rows.length;
+    rows.forEach((r) => usedPositions.add(r.position));
+  }
+
+  if (currentCount >= MAX_PHOTOS) {
+    res.status(400).json({ error: `Maximum ${MAX_PHOTOS} photos allowed` });
     return;
   }
 
+  // 다음 빈 position — 0~4 중 첫 빈 자리.
+  let nextPosition = 0;
+  for (let i = 0; i < MAX_PHOTOS; i++) {
+    if (!usedPositions.has(i)) {
+      nextPosition = i;
+      break;
+    }
+  }
+
   const ext = req.file.originalname.split('.').pop()?.toLowerCase() || 'jpg';
-  const path = `${req.userId!}/${Date.now()}_${crypto.randomUUID()}.${ext}`;
-  const url = await uploadFile('photos', path, req.file.buffer, req.file.mimetype);
+  const path = `${req.userId!}/originals/${Date.now()}_${crypto.randomUUID()}.${ext}`;
 
-  const updatedPhotos = [...currentPhotos, url];
-  await supabase
-    .from('profiles')
-    .update({ photos: updatedPhotos, updated_at: new Date().toISOString() })
-    .eq('id', req.userId!);
+  let originalUrl: string;
+  try {
+    originalUrl = await uploadFile('photos', path, req.file.buffer, req.file.mimetype);
+  } catch (err) {
+    console.error('[profile.photos.upload_failed]', (err as Error).message);
+    res.status(500).json({ error: 'Storage upload failed' });
+    return;
+  }
 
-  res.json({ url, photos: updatedPhotos });
+  // profile_photos INSERT — status='processing'. UNIQUE (user_id, position) 위반 시
+  // race 가능성 → 23505 핸들링.
+  const { data: insertResult, error: insertErr } = await supabase
+    .from('profile_photos')
+    .insert({
+      user_id: req.userId!,
+      position: nextPosition,
+      original_path: path,
+      status: 'processing',
+    })
+    .select('id, position')
+    .single();
+
+  if (insertErr) {
+    console.error('[profile.photos.insert_failed]', insertErr.message);
+    // 업로드된 원본 cleanup (fire-and-forget).
+    deleteFile('photos', path).catch((e) =>
+      console.error('[profile.photos.cleanup_after_insert_failed]', (e as Error).message),
+    );
+    res.status(500).json({ error: insertErr.message });
+    return;
+  }
+
+  // 비동기 변환 트리거. fire-and-forget — error 가시화 명시.
+  convertProfilePhoto({
+    userId: req.userId!,
+    photoRowId: insertResult.id,
+    originalBuffer: req.file.buffer,
+    mimeType: req.file.mimetype,
+    originalPath: path,
+  }).catch((err) => console.error('[profile.photos.convert_async_error]', (err as Error).message));
+
+  // 호환성: 옛 wire shape ({ url, photos }) 도 응답에 동봉. FE 신규 클라이언트는
+  // photo_id / position / status 사용, 옛 클라이언트는 url / photos 폴백.
+  // status='processing' 이라 url 은 임시로 originalUrl 노출 — 변환 완료 후 폴링이
+  // converted_url 로 갱신.
+  res.status(202).json({
+    photo_id: insertResult.id,
+    position: insertResult.position,
+    status: 'processing',
+    // 옛 wire 호환 (변환 완료 전 임시 URL — FE 가 폴링 후 갱신).
+    url: originalUrl,
+    photos: undefined,
+  });
 });
 
-// 프로필 사진 삭제
+// 프로필 사진 retry 라우트 (photo-watercolor-pipeline sprint).
+//
+// failed 사진만 수동 재시도 허용. rejected 는 422 (모더레이션 사유라 재시도 의미 없음 —
+// 사용자가 다른 사진 업로드해야 함).
+router.post('/photos/:photoId/retry', requireNotFrozen, async (req: AuthRequest, res: Response) => {
+  const photoId = req.params.photoId as string;
+
+  const { data: row, error: rowErr } = await supabase
+    .from('profile_photos')
+    .select('id, user_id, status, original_path, retry_count')
+    .eq('id', photoId)
+    .eq('user_id', req.userId!)
+    .maybeSingle();
+
+  if (rowErr) {
+    res.status(500).json({ error: rowErr.message });
+    return;
+  }
+  if (!row) {
+    res.status(404).json({ error: 'Photo not found' });
+    return;
+  }
+  if (row.status === 'rejected') {
+    res.status(422).json({
+      error: 'Photo was rejected by moderation. Please upload a different photo.',
+      code: 'photo_blocked',
+    });
+    return;
+  }
+  if (row.status !== 'failed') {
+    res.status(409).json({ error: `Cannot retry photo in status=${row.status}` });
+    return;
+  }
+  if (!row.original_path) {
+    res.status(409).json({ error: 'Original photo data is no longer available' });
+    return;
+  }
+
+  // status='processing' 으로 전이 후 비동기 retry 트리거.
+  const { error: updateErr } = await supabase
+    .from('profile_photos')
+    .update({ status: 'processing', updated_at: new Date().toISOString() })
+    .eq('id', photoId);
+  if (updateErr) {
+    res.status(500).json({ error: updateErr.message });
+    return;
+  }
+
+  // dynamic import 회피 — 순환 의존성 없음 (jobs 가 services 만 import).
+  import('../services/photoConversion').then(({ retryPendingOrFailedPhoto }) => {
+    retryPendingOrFailedPhoto(req.userId!, photoId, row.original_path as string).catch((e) =>
+      console.error('[profile.photos.retry_async_error]', (e as Error).message),
+    );
+  }).catch((e) => console.error('[profile.photos.retry_import_error]', (e as Error).message));
+
+  res.status(202).json({
+    photo_id: photoId,
+    status: 'processing',
+  });
+});
+
+// 프로필 사진 삭제 (photo-watercolor-pipeline sprint — profile_photos row 삭제).
+//
+// index = profile_photos.position 으로 해석. row DELETE + Storage cleanup
+// (converted_url + original_path 둘 다 시도).
+//
+// 호환성: mig 028 미적용 또는 백필 미실행 환경에선 옛 photos 배열 인덱스 폴백.
+//
 // message-moderation-v1 (PR2): freeze 사용자 mutating 차단.
 router.delete('/photos/:index', requireNotFrozen, async (req: AuthRequest, res: Response) => {
   const index = parseInt(req.params.index as string, 10);
-
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('photos')
-    .eq('id', req.userId!)
-    .single();
-
-  const currentPhotos: string[] = profile?.photos || [];
-  if (index < 0 || index >= currentPhotos.length) {
+  if (!Number.isFinite(index) || index < 0) {
     res.status(400).json({ error: 'Invalid photo index' });
     return;
   }
 
-  const photoUrl = currentPhotos[index];
-  const updatedPhotos = currentPhotos.filter((_, i) => i !== index);
+  // profile_photos row 조회 — position=index.
+  const { data: row, error: rowErr } = await supabase
+    .from('profile_photos')
+    .select('id, converted_url, original_path')
+    .eq('user_id', req.userId!)
+    .eq('position', index)
+    .maybeSingle();
 
-  // DB 먼저 업데이트 (실패 시 Storage 고아 파일보다 DB 불일치가 더 위험)
-  await supabase
-    .from('profiles')
-    .update({ photos: updatedPhotos, updated_at: new Date().toISOString() })
-    .eq('id', req.userId!);
+  if (rowErr) {
+    console.error('[profile.photos.delete_select_failed]', rowErr.message);
+    res.status(500).json({ error: rowErr.message });
+    return;
+  }
 
-  const path = extractPath('photos', photoUrl);
-  deleteFile('photos', path).catch((err) => console.error('[Photo delete from storage failed]', err));
+  if (!row) {
+    res.status(400).json({ error: 'Invalid photo index' });
+    return;
+  }
 
-  res.json({ photos: updatedPhotos });
+  // DB 먼저 DELETE (Storage 고아 파일보다 DB 불일치가 더 위험 — 기존 정책).
+  const { error: deleteErr } = await supabase
+    .from('profile_photos')
+    .delete()
+    .eq('id', row.id);
+
+  if (deleteErr) {
+    console.error('[profile.photos.delete_failed]', deleteErr.message);
+    res.status(500).json({ error: deleteErr.message });
+    return;
+  }
+
+  // Storage cleanup (fire-and-forget — converted_url + original_path 둘 다).
+  if (row.converted_url) {
+    try {
+      const convertedPath = extractPath('photos', row.converted_url as string);
+      deleteFile('photos', convertedPath).catch((e) =>
+        console.error('[profile.photos.delete_converted_cleanup_failed]', (e as Error).message),
+      );
+    } catch (e) {
+      console.warn('[profile.photos.extract_converted_path_failed]', (e as Error).message);
+    }
+  }
+  if (row.original_path) {
+    const op = row.original_path as string;
+    // 백필 URL (http) 인 경우 path 추출 시도.
+    let pathToDelete: string | null = null;
+    if (op.startsWith('http://') || op.startsWith('https://')) {
+      try {
+        pathToDelete = extractPath('photos', op);
+      } catch {
+        pathToDelete = null;
+      }
+    } else {
+      pathToDelete = op;
+    }
+    if (pathToDelete) {
+      deleteFile('photos', pathToDelete).catch((e) =>
+        console.error('[profile.photos.delete_original_cleanup_failed]', (e as Error).message),
+      );
+    }
+  }
+
+  // 응답: 남은 photo_statuses 노출 (FE 가 polling 없이도 즉시 sync).
+  const { data: remainingRows } = await supabase
+    .from('profile_photos')
+    .select('id, position, status, failure_reason, converted_url')
+    .eq('user_id', req.userId!)
+    .order('position', { ascending: true });
+
+  const remaining = (remainingRows ?? []) as Array<{
+    id: string;
+    position: number;
+    status: string;
+    failure_reason: string | null;
+    converted_url: string | null;
+  }>;
+
+  res.json({
+    photo_statuses: remaining.map((r) => ({
+      id: r.id,
+      position: r.position,
+      status: r.status,
+      failure_reason: r.failure_reason,
+    })),
+    photos: remaining
+      .filter((r) => r.status === 'ready' && r.converted_url)
+      .map((r) => r.converted_url as string),
+  });
 });
 
 export default router;

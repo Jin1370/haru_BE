@@ -4,6 +4,7 @@ import { supabase } from '../config/supabase';
 import { uploadFile, deleteFile, extractPath } from '../services/storage';
 import { generateVoiceIntroAudios, normalizeAuthorLanguage } from '../services/voiceIntro';
 import { convertProfilePhoto } from '../services/photoConversion';
+import { addWatermark } from '../services/photoWatermark';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
 import { profileUpsertSchema } from '../schemas/profile';
@@ -417,6 +418,68 @@ router.post('/photos/:photoId/retry', requireNotFrozen, async (req: AuthRequest,
     photo_id: photoId,
     status: 'processing',
   });
+});
+
+// 프로필 사진 워터마크 다운로드 (사진 저장용).
+//
+// 본인 사진(profile_photos.user_id == viewer)의 ready 변환본에 우하단 "haru"
+// 텍스트 워터마크를 합성해 image/jpeg 로 반환한다. 원본/Storage 는 무변경 —
+// 응답용 사본만 매 요청 생성 (다운로드 버튼 탭 시점에만 도는 cold path).
+// position 기반 (DELETE 라우트와 동일 소유권 검증 패턴).
+router.get('/photos/:position/download', async (req: AuthRequest, res: Response) => {
+  const position = parseInt(req.params.position as string, 10);
+  if (!Number.isFinite(position) || position < 0) {
+    res.status(400).json({ error: 'Invalid photo position' });
+    return;
+  }
+
+  const { data: row, error: rowErr } = await supabase
+    .from('profile_photos')
+    .select('converted_url, status')
+    .eq('user_id', req.userId!)
+    .eq('position', position)
+    .maybeSingle();
+
+  if (rowErr) {
+    console.error('[profile.photos.download_select_failed]', rowErr.message);
+    res.status(500).json({ error: rowErr.message });
+    return;
+  }
+  if (!row) {
+    res.status(404).json({ error: 'Photo not found' });
+    return;
+  }
+  if (row.status !== 'ready' || !row.converted_url) {
+    res.status(409).json({ error: `Photo is not ready (status=${row.status})` });
+    return;
+  }
+
+  // converted_url 은 public URL — fetch 로 bytes 획득.
+  let imageBytes: Buffer;
+  try {
+    const upstream = await fetch(row.converted_url as string);
+    if (!upstream.ok) {
+      throw new Error(`HTTP ${upstream.status}`);
+    }
+    imageBytes = Buffer.from(await upstream.arrayBuffer());
+  } catch (err) {
+    console.error('[profile.photos.download_fetch_failed]', (err as Error).message);
+    res.status(502).json({ error: 'Failed to fetch source image' });
+    return;
+  }
+
+  let watermarked: Buffer;
+  try {
+    watermarked = await addWatermark(imageBytes);
+  } catch (err) {
+    console.error('[profile.photos.watermark_failed]', (err as Error).message);
+    res.status(500).json({ error: 'Failed to render watermark' });
+    return;
+  }
+
+  res.set('Content-Type', 'image/jpeg');
+  res.set('Content-Disposition', `attachment; filename="haru-photo-${position}.jpg"`);
+  res.send(watermarked);
 });
 
 // 프로필 사진 삭제 (photo-watercolor-pipeline sprint — profile_photos row 삭제).

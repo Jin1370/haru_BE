@@ -64,7 +64,7 @@ router.get('/accounts', adminSecretGuard, async (_req, res) => {
     const { data: profiles, error: profileError } = await supabase
       .from('profiles')
       .select(
-        'id, display_name, gender, nationality, language, photos, voice_intro, elevenlabs_voice_id, voice_clone_status',
+        'id, display_name, gender, nationality, language, voice_intro, elevenlabs_voice_id, voice_clone_status',
       )
       .in('id', ids);
 
@@ -74,6 +74,28 @@ router.get('/accounts', adminSecretGuard, async (_req, res) => {
     }
 
     const profileMap = new Map(profiles?.map((p) => [p.id, p]) ?? []);
+
+    // photo-watercolor-pipeline (mig 028): 프로필 사진은 더 이상 profiles.photos
+    // 배열이 아니라 profile_photos 테이블(converted_url)에 산다. 디스커버
+    // (swipe.ts) 와 동일하게 status='ready' 사진을 position 오름차순으로 가져와
+    // 사용자별 메인(가장 낮은 position)의 converted_url 을 사용한다.
+    const photoByUser = new Map<string, string>();
+    const { data: photoRows, error: photoError } = await supabase
+      .from('profile_photos')
+      .select('user_id, position, converted_url, status')
+      .in('user_id', ids)
+      .eq('status', 'ready')
+      .order('position', { ascending: true });
+    if (photoError) {
+      console.error('[admin.profile_photos_select_failed]', photoError.message);
+    } else {
+      ((photoRows ?? []) as Array<{ user_id: string; converted_url: string | null }>).forEach((r) => {
+        // order by position ASC → 첫 entry 가 메인. 이미 있으면 덮어쓰지 않음.
+        if (r.converted_url && !photoByUser.has(r.user_id)) {
+          photoByUser.set(r.user_id, r.converted_url);
+        }
+      });
+    }
 
     const accounts = seedUsers
       .map((u) => {
@@ -86,9 +108,7 @@ router.get('/accounts', adminSecretGuard, async (_req, res) => {
           gender: profile?.gender ?? null,
           nationality: profile?.nationality ?? null,
           language: profile?.language ?? null,
-          photo: Array.isArray(profile?.photos) && profile.photos.length > 0
-            ? profile.photos[0]
-            : null,
+          photo: photoByUser.get(u.id) ?? null,
           voice_intro: profile?.voice_intro ?? null,
           voice_clone_status: profile?.voice_clone_status ?? null,
         };

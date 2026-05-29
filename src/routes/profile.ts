@@ -7,7 +7,7 @@ import { convertProfilePhoto } from '../services/photoConversion';
 import { addWatermark } from '../services/photoWatermark';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
-import { profileUpsertSchema } from '../schemas/profile';
+import { profileUpsertSchema, photoOrderSchema } from '../schemas/profile';
 import { lookupBioPhrase } from '../constants/bioPhrasesCatalog';
 import { requireNotFrozen } from '../utils/freezeGuard';
 import { isBlocked } from '../constants/moderationDictionary';
@@ -23,6 +23,40 @@ const router = Router();
 const upload = multer({ limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB
 
 router.use(authMiddleware);
+
+// 사진 변경(삭제/재배치) 후 즉시 sync 응답 조립용 공통 스냅샷 로더.
+// DELETE /photos/:index 와 PATCH /photos/order 가 동일 응답 shape
+// ({photo_statuses, photos}) 를 반환하므로 drift 방지를 위해 추출
+// (evidence-hold-on-delete sprint 의 sweepAuditTable 헬퍼 추출 패턴).
+async function loadPhotoSnapshot(
+  userId: string,
+): Promise<{ photo_statuses: Array<{ id: string; position: number; status: string; failure_reason: string | null }>; photos: string[] }> {
+  const { data: rows } = await supabase
+    .from('profile_photos')
+    .select('id, position, status, failure_reason, converted_url')
+    .eq('user_id', userId)
+    .order('position', { ascending: true });
+
+  const list = (rows ?? []) as Array<{
+    id: string;
+    position: number;
+    status: string;
+    failure_reason: string | null;
+    converted_url: string | null;
+  }>;
+
+  return {
+    photo_statuses: list.map((r) => ({
+      id: r.id,
+      position: r.position,
+      status: r.status,
+      failure_reason: r.failure_reason,
+    })),
+    photos: list
+      .filter((r) => r.status === 'ready' && r.converted_url)
+      .map((r) => r.converted_url as string),
+  };
+}
 
 // 내 프로필 조회
 //
@@ -235,6 +269,56 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
 
   res.json(data);
 });
+
+// 프로필 사진 재배치 (photo-reorder-no-reconvert sprint).
+//
+// 재변환 없이 profile_photos.position 만 원자적으로 재배치한다. order = 본인 소유
+// 사진 id 의 배열, 배열 인덱스가 곧 새 position (order[0] → position 0 = 메인).
+// 메인설정 = "특정 사진을 맨 앞으로", 순서변경 = "전체 순서 명시" — 둘 다 같은 연산.
+//
+// 동적 세그먼트(/photos/:index 등)보다 위에 등록해 매칭 충돌 회피 (PATCH 메서드라
+// GET/POST/DELETE 와 어차피 안 겹치지만 안전 차원).
+//
+// message-moderation-v1 (PR2): freeze 사용자 mutating 차단.
+router.patch(
+  '/photos/order',
+  requireNotFrozen,
+  validateBody(photoOrderSchema),
+  async (req: AuthRequest, res: Response) => {
+    const order = req.body.order as string[];
+
+    // mig 030 미적용 시 RPC not found → error 가시화 (silent-degrade 금지).
+    const { error } = await supabase.rpc('reorder_profile_photos', {
+      p_user_id: req.userId!,
+      p_order: order,
+    });
+
+    if (error) {
+      const msg = error.message || '';
+      if (msg.includes('main_photo_not_ready')) {
+        res.status(422).json({
+          error: 'Main photo must be a ready (converted) photo',
+          code: 'main_photo_not_ready',
+        });
+        return;
+      }
+      if (msg.includes('photo_not_owned')) {
+        res.status(404).json({ error: 'Photo not found' });
+        return;
+      }
+      if (msg.includes('order_count_mismatch')) {
+        res.status(400).json({ error: 'order must include every photo' });
+        return;
+      }
+      console.error('[profile.photos.reorder_rpc_failed]', msg);
+      res.status(500).json({ error: msg });
+      return;
+    }
+
+    // 성공 시 새 position 기준 스냅샷 즉시 반환 (FE 폴링 없이 sync).
+    res.json(await loadPhotoSnapshot(req.userId!));
+  },
+);
 
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
@@ -560,31 +644,7 @@ router.delete('/photos/:index', requireNotFrozen, async (req: AuthRequest, res: 
   }
 
   // 응답: 남은 photo_statuses 노출 (FE 가 polling 없이도 즉시 sync).
-  const { data: remainingRows } = await supabase
-    .from('profile_photos')
-    .select('id, position, status, failure_reason, converted_url')
-    .eq('user_id', req.userId!)
-    .order('position', { ascending: true });
-
-  const remaining = (remainingRows ?? []) as Array<{
-    id: string;
-    position: number;
-    status: string;
-    failure_reason: string | null;
-    converted_url: string | null;
-  }>;
-
-  res.json({
-    photo_statuses: remaining.map((r) => ({
-      id: r.id,
-      position: r.position,
-      status: r.status,
-      failure_reason: r.failure_reason,
-    })),
-    photos: remaining
-      .filter((r) => r.status === 'ready' && r.converted_url)
-      .map((r) => r.converted_url as string),
-  });
+  res.json(await loadPhotoSnapshot(req.userId!));
 });
 
 export default router;

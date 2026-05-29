@@ -31,3 +31,17 @@ export const profileUpsertSchema = z.object({
   voice_intro_phrase_id: z.string().min(1).max(64).nullable().optional(),
   interests: z.array(z.string().max(30)).max(10).optional(),
 });
+
+// photo-reorder-no-reconvert sprint — PATCH /api/profile/photos/order.
+// order = 본인 소유 사진 id 의 배열. 배열의 인덱스가 곧 새 position
+// (order[0] → position 0 = 메인). id 배열 채택 근거: position 배열은 stale
+// position 을 보내면 엉뚱한 row 를 옮기지만 id 는 row 의 안정적 식별자.
+// 길이 1~5 (MAX_PHOTOS), 중복 금지. 완전성(전체 row 포함)/소유권/position0-ready
+// 검증은 RPC(mig 030) 가 담당.
+export const photoOrderSchema = z.object({
+  order: z
+    .array(z.string().uuid())
+    .min(1)
+    .max(5)
+    .refine((a) => new Set(a).size === a.length, { message: 'duplicate photo id' }),
+});

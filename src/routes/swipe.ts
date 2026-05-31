@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { supabase } from '../config/supabase';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
-import { swipeBodySchema, discoverQuerySchema, quotaQuerySchema } from '../schemas/swipe';
+import { swipeBodySchema, swipeQuerySchema, discoverQuerySchema, quotaQuerySchema } from '../schemas/swipe';
 import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
 import { sendPushToUser } from '../services/pushNotifications';
 import { requireNotFrozen } from '../utils/freezeGuard';
@@ -21,6 +21,14 @@ const router = Router();
 // 디스커버 일일 카드 한도. FE 의 utils/discoverDaily.MAX_PER_DAY 와 동일 값.
 // 기기 간 동기화를 위해 BE 의 swipes 테이블을 source of truth 로 한다.
 export const DISCOVER_MAX_PER_DAY = 50;
+
+// 받은 좋아요(GET /likes-received) 가 한 번에 처리할 최신 좋아요 상한.
+// (E) 옛 코드는 likers/프로필/사진을 무제한 로드 → 인기 사용자가 수천 개 좋아요를
+// 받으면 거대한 IN 쿼리 + 수천 행 materialization. 최신 N 개로 바운드해 핫패스를
+// 안정화한다. FE 는 일일 50 한도로 어차피 천천히 소화하므로 N 개 일괄 반환으로 충분.
+// 트레이드오프: 최신 N 개를 모두 이미 응답(스와이프)한 사용자는 그보다 오래된
+// 미응답 좋아요가 있어도 노출 안 됨 (A1 과 동일한 freshness 편향, 후속 페이지네이션 대상).
+export const LIKES_RECEIVED_MAX = 300;
 
 router.use(authMiddleware);
 
@@ -178,8 +186,11 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
 
   const prefs = prefsResult.data;
 
-  // 점수 계산을 위해 넉넉히 가져옴 (limit의 5배, 최대 200)
-  const fetchLimit = Math.min(limit * 5, 200);
+  // 점수 계산용 후보 풀 크기. limit 의 5배를 기본으로 하되 최소 200·최대 500 으로
+  // 클램프 — JS 스코어링(tier/intra)이 의미 있는 모집단 위에서 동작하도록 한다.
+  // (A1: 옛 코드는 min(limit*5,200) 이라 기본 limit=10 에서 풀이 50 에 불과했고,
+  //  ORDER BY 부재로 그 50 도 임의 물리순서 슬라이스였다.)
+  const fetchLimit = Math.min(Math.max(limit * 5, 200), 500);
 
   // mig 011: voice_intro_audio_urls (jsonb) 가 시청자 언어 슬롯의 source. 단일
   // voice_intro_audio_url 은 응답에 미러로 출력하기 위해 슬롯에서 추출.
@@ -200,7 +211,19 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     query = query.not('language', 'eq', viewerLanguage);
   }
 
-  query = query.limit(fetchLimit);
+  // A1: 결정적 ORDER BY 로 스코어링 풀 윈도우를 안정화. ORDER BY 부재 시 Postgres
+  // 가 호출마다 다른 물리순서 슬라이스를 돌려줘 (a) 같은 viewer 가 호출마다 다른
+  // 후보 셋을 점수 매기는 비일관 (b) 풀 바깥 후보 영구 누락 가능성이 있었다.
+  // created_at DESC 로 "가장 최근 가입한 fetchLimit 명" 을 결정적으로 모집 →
+  // 신규 유저 부스트(intra +10)와도 정합. id 는 동시각 가입 tie-breaker.
+  // 풀 안에서의 최종 노출 순서는 아래 JS 의 (tier ASC, intra DESC) 가 결정하므로
+  // 이 ORDER BY 는 "어떤 후보를 점수 대상에 넣을지" 만 좌우한다.
+  // 인덱스: idx_profiles_active_created (mig 031) 가 is_active=true 부분 +
+  // created_at DESC 정렬을 지원.
+  query = query
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(fetchLimit);
 
   // 사전 필터: 성별/연령만. 언어 선호는 티어 정렬 신호로 사용되므로
   // 여기서 IN 필터로 후보를 제거하지 않는다(미부합 후보는 T2 로 밀려남).
@@ -318,7 +341,8 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
 });
 
 // 받은 좋아요 목록 — 나를 like 한 사용자 중, 내가 아직 응답 스와이프 하지 않았고
-// 차단 양방향에 걸리지 않은 active 후보. 응답 shape 은 디스커버 카드와 동일하게
+// 차단 양방향에 걸리지 않은 active 후보. 최신 LIKES_RECEIVED_MAX 개 좋아요만 스캔
+// 해 다운스트림 페치를 바운드한다 (E). 응답 shape 은 디스커버 카드와 동일하게
 // 사진 1장 / photo_access 잠금 / voice_intro 시청자 언어 슬롯 미러 — FE 의 SwipeCard
 // 컴포넌트를 그대로 재사용할 수 있게 한다.
 //
@@ -333,13 +357,16 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
 // 일일 50장 한도와는 무관하게 GET 은 무료(조회는 카운트 안 함). 실제 스와이프
 // 행위(POST /swipe)는 디스커버 swipe 와 동일 엔드포인트를 공유하므로 quota 도 함께 적용됨.
 router.get('/likes-received', async (req: AuthRequest, res: Response) => {
-  // 1) 나를 like 한 사람들 (시간 역순)
+  // 1) 나를 like 한 사람들 (시간 역순, 최신 LIKES_RECEIVED_MAX 개로 바운드).
+  //    (E) UNIQUE(swiper_id, swiped_id) 라 distinct liker. 인기 사용자가 수천 명에게
+  //    좋아요를 받아도 다운스트림(프로필/사진 IN 페치)이 최신 N 명으로 묶인다.
   const { data: likes, error: likesError } = await supabase
     .from('swipes')
     .select('swiper_id, created_at')
     .eq('swiped_id', req.userId!)
     .eq('direction', 'like')
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(LIKES_RECEIVED_MAX);
 
   if (likesError) {
     res.status(500).json({ error: likesError.message });
@@ -562,8 +589,33 @@ router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, r
 // 필터로 freeze 사용자를 다른 viewer 의 노출 풀에서 제거한다 (회귀 매트릭스 #1, #2).
 // 본 POST 만 가드 — 본인의 능동 swipe 행위를 막아 reciprocal like 매치 생성 경로
 // 자체를 차단.
-router.post('/swipe', requireNotFrozen, validateBody(swipeBodySchema), async (req: AuthRequest, res: Response) => {
+router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validateBody(swipeBodySchema), async (req: AuthRequest, res: Response) => {
   const { swiped_id, direction } = req.body;
+  const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
+
+  // 서버측 하드 캡 — FE 소프트 캡(quota 동기화 + 로컬 카운트)의 최종 방어선.
+  // 사용자 로컬 하루 [from, to) 범위에서 오늘 스와이프 수를 세고 한도 도달 시 429.
+  // 변조 클라이언트/멀티기기 동시 사용으로 50 초과를 막는다. quota 엔드포인트와
+  // 동일한 computeLocalDayRangeUtc 를 써서 소프트 캡과 경계가 정확히 일치.
+  // count→insert 가 원자적이지 않아 동시 요청 시 ±1 오버슈트 가능하나 남용 차단
+  // 목적상 허용 (정확한 결제/한도가 아닌 인게이지먼트 캡).
+  const { fromIso, toIso } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
+  const { count: usedToday, error: countError } = await supabase
+    .from('swipes')
+    .select('id', { count: 'exact', head: true })
+    .eq('swiper_id', req.userId!)
+    .gte('created_at', fromIso)
+    .lt('created_at', toIso);
+
+  if (countError) {
+    res.status(500).json({ error: countError.message });
+    return;
+  }
+
+  if ((usedToday ?? 0) >= DISCOVER_MAX_PER_DAY) {
+    res.status(429).json({ error: 'Daily swipe limit reached', code: 'daily_limit_reached' });
+    return;
+  }
 
   const { error: swipeError } = await supabase.from('swipes').insert({
     swiper_id: req.userId!,

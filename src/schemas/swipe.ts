@@ -5,6 +5,12 @@ export const swipeBodySchema = z.object({
   direction: z.enum(['like', 'pass']),
 });
 
+// POST /swipe 의 서버측 하드 캡 계산용 tz. quotaQuerySchema 와 동일 의미
+// (UTC - local, 분). 미전달 시 0(UTC) 폴백 — 구버전 클라이언트 호환.
+export const swipeQuerySchema = z.object({
+  tz_offset_minutes: z.coerce.number().int().min(-840).max(840).optional().default(0),
+});
+
 export const discoverQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).optional().default(10),
 });

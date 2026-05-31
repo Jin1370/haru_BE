@@ -527,7 +527,7 @@ export const swaggerDocument = {
       get: {
         tags: ['Discover'],
         summary: '받은 좋아요 목록 (나를 like 한 사용자 중 미스와이프·비차단 후보)',
-        description: '응답 shape 은 /api/discover 와 동일 (사진 1장, photo_access 잠금, voice intro 시청자 언어 슬롯 미러). 정렬은 like 한 시각 내림차순.',
+        description: '응답 shape 은 /api/discover 와 동일 (사진 1장, photo_access 잠금, voice intro 시청자 언어 슬롯 미러). 정렬은 (tier ASC, like 시각 DESC). 최신 300 개 좋아요만 스캔(서버측 상한).',
         responses: {
           200: { description: '받은 좋아요 목록', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/ProfileCandidate' } } } } },
         },
@@ -537,6 +537,14 @@ export const swaggerDocument = {
       post: {
         tags: ['Discover'],
         summary: '스와이프 (like/pass). 상호 like 시 매치 자동 생성',
+        parameters: [
+          {
+            name: 'tz_offset_minutes',
+            in: 'query',
+            schema: { type: 'integer', minimum: -840, maximum: 840, default: 0 },
+            description: '서버측 일일 한도 하드 캡의 로컬 자정 경계 계산용 (Date#getTimezoneOffset() 의미: UTC-local 분). 미전달 시 0(UTC) 폴백.',
+          },
+        ],
         requestBody: {
           required: true,
           content: {
@@ -550,6 +558,7 @@ export const swaggerDocument = {
           400: { description: '파라미터 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
           409: { description: '이미 스와이프함', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          429: { description: '일일 스와이프 한도(50) 도달 — 서버측 하드 캡', content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string', example: 'Daily swipe limit reached' }, code: { type: 'string', example: 'daily_limit_reached' } }, required: ['error', 'code'] } } } },
         },
       },
     },

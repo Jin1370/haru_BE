@@ -48,6 +48,13 @@ export const PHOTO_CONVERSION_MODEL = 'gpt-image-2' as const;
 // 1024x1024 대비 75% pixel 수 → 토큰 사용량 ~75% (quality='low' 와 결합 시 가장 저렴).
 export const PHOTO_CONVERSION_SIZE = '768x1024' as const;
 
+// 변환 입력 사진 다운스케일 상한. gpt-image-2 비용의 ~80% 는 *입력 이미지 토큰*
+// 이고 그건 입력 해상도에 좌우된다. 출력이 768x1024 이므로 입력을 그보다 크게
+// 보낼 이유가 없다(OpenAI 가 내부 다운스케일하므로 초과분은 토큰 낭비). 변환 직전
+// 원본이 이 박스보다 클 때만 비율 유지 축소(작으면 그대로 — 업스케일 안 함).
+export const PHOTO_CONVERSION_INPUT_MAX_WIDTH = 768;
+export const PHOTO_CONVERSION_INPUT_MAX_HEIGHT = 1024;
+
 // 변환 품질. 'low' = 가장 저렴 (~$0.005~0.01/장), 디스커버 카드 노출 해상도에 충분.
 // 'medium'/'high'/'auto' 는 비용 2~4 배 증가. 출시 후 만족도 데이터 보고 'medium' 검토.
 export const PHOTO_CONVERSION_QUALITY = 'low' as const;

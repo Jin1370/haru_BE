@@ -20,6 +20,7 @@
 //     실패하면 skip — 백필 URL 이 외부 Storage 일 가능성 0 이지만 방어적).
 
 import OpenAI, { toFile } from 'openai';
+import Jimp from 'jimp';
 import { env } from '../config/env';
 import { supabase } from '../config/supabase';
 import { uploadFile, deleteFile, extractPath } from './storage';
@@ -32,7 +33,33 @@ import {
   PHOTO_CONVERSION_QUALITY,
   PHOTO_CONVERSION_OUTPUT_FORMAT,
   PHOTO_CONVERSION_OUTPUT_COMPRESSION,
+  PHOTO_CONVERSION_INPUT_MAX_WIDTH,
+  PHOTO_CONVERSION_INPUT_MAX_HEIGHT,
 } from '../constants/photoConversion';
+
+// 변환 입력 사진을 출력 해상도(768x1024) 박스로 다운스케일 — 원본이 더 클 때만.
+// gpt-image-2 입력 이미지 토큰(비용 ~80%)을 절감. 비율 유지, 업스케일 안 함.
+// jimp 디코드 실패(손상/미지원 포맷 등) 시 원본 그대로 폴백 — 리사이즈 실패가
+// 변환 자체를 막지 않게 한다.
+async function downscaleForConversion(
+  buffer: Buffer,
+  mimeType: string,
+): Promise<{ buffer: Buffer; mimeType: string }> {
+  try {
+    const image = await Jimp.read(buffer);
+    if (
+      image.bitmap.width > PHOTO_CONVERSION_INPUT_MAX_WIDTH ||
+      image.bitmap.height > PHOTO_CONVERSION_INPUT_MAX_HEIGHT
+    ) {
+      image.scaleToFit(PHOTO_CONVERSION_INPUT_MAX_WIDTH, PHOTO_CONVERSION_INPUT_MAX_HEIGHT);
+      const resized = await image.getBufferAsync(Jimp.MIME_JPEG);
+      return { buffer: resized, mimeType: 'image/jpeg' };
+    }
+  } catch (e) {
+    console.warn('[photoConversion.resize_skipped]', (e as Error).message);
+  }
+  return { buffer, mimeType };
+}
 
 // SDK 클라이언트는 module top-level lazy init — env 미설정 시 null.
 // openaiModeration.ts 와 동일 키 (`OPENAI_API_KEY`) 재사용 — 별도 quota 분리는 후속 카드.
@@ -172,9 +199,13 @@ export async function convertProfilePhoto(input: ConversionInput): Promise<Conve
   // gpt-image-2 호출. SDK 의 ImageEditParamsNonStreaming 시그니처 정합.
   let b64: string | undefined;
   try {
-    const file = await toFile(originalBuffer, `original-${photoRowId}.${mimeTypeToExt(mimeType)}`, {
-      type: mimeType,
-    });
+    // 변환 직전 입력 사진을 768x1024 박스로 다운스케일 (입력 토큰 절감).
+    const downscaled = await downscaleForConversion(originalBuffer, mimeType);
+    const file = await toFile(
+      downscaled.buffer,
+      `original-${photoRowId}.${mimeTypeToExt(downscaled.mimeType)}`,
+      { type: downscaled.mimeType },
+    );
     const response = await c.images.edit({
       model: PHOTO_CONVERSION_MODEL,
       image: file,

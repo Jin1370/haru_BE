@@ -496,8 +496,9 @@ export const swaggerDocument = {
           '데이터 삭제권은 계정 탈퇴 라우트가 보장한다.',
         requestBody: { required: true, content: { 'multipart/form-data': { schema: { type: 'object', required: ['audio'], properties: { audio: { type: 'string', format: 'binary' } } } } } },
         responses: {
-          200: { description: '클론 생성 완료', content: { 'application/json': { schema: { type: 'object', properties: { voice_id: { type: 'string' }, status: { type: 'string' } } } } } },
+          200: { description: '클론 생성 완료 (+ 갱신된 재생성 잔여 상태)', content: { 'application/json': { schema: { type: 'object', properties: { voice_id: { type: 'string' }, status: { type: 'string' }, reclone_remaining: { type: 'integer' }, reclone_cap: { type: 'integer' }, reclone_reset_at: { type: 'string', format: 'date-time', nullable: true } } } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
+          429: { description: '재녹음 한도 초과 (윈도우당 recloneMonthlyCap 회). 최초 등록은 미적용', content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string', example: 'Re-record limit reached for this period' }, code: { type: 'string', example: 'reclone_limit' }, retry_after: { type: 'string', format: 'date-time' } }, required: ['error', 'code'] } } } },
           500: { description: '클론 생성 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
@@ -507,7 +508,7 @@ export const swaggerDocument = {
         tags: ['Voice'],
         summary: '음성 클론 상태 확인',
         responses: {
-          200: { description: '상태', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] }, voice_id: { type: 'string', nullable: true } } } } } },
+          200: { description: '상태 + 재녹음 잔여(미리 노출용)', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'processing', 'ready', 'failed'] }, voice_id: { type: 'string', nullable: true }, reclone_remaining: { type: 'integer', description: '현재 윈도우 재녹음 잔여 횟수' }, reclone_cap: { type: 'integer', description: '윈도우당 재녹음 상한' }, reclone_reset_at: { type: 'string', format: 'date-time', nullable: true, description: '윈도우 초기화 시각(윈도우 미활성 시 null)' } } } } } },
         },
       },
     },

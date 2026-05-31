@@ -102,6 +102,18 @@ export const env = {
       .parse(process.env.AUTO_FREEZE_REPORT_THRESHOLD),
   },
 
+  // 재녹음(voice clone 재생성) 레이트리밋 — ElevenLabs 월간 voice operations
+  // 쿼터(계정 공유 풀)를 1인 어뷰즈로부터 보호. 최초 등록은 카운트 제외, 재등록만
+  // 윈도우당 캡. 기본 2회 / 30일 (사용자 결정). routes/voice.ts POST /clone 적용.
+  // 삭제는 op 아님 → 재녹음 1회 = 1 op. 정상 사용(가입 분산 + 드문 재녹음)은
+  // 절대 안 걸리고, 인위적 몰림/어뷰즈만 차단.
+  voice: {
+    recloneMonthlyCap: z.coerce.number().int().min(1).max(100).default(2)
+      .parse(process.env.VOICE_RECLONE_MONTHLY_CAP),
+    recloneWindowDays: z.coerce.number().int().min(1).max(365).default(30)
+      .parse(process.env.VOICE_RECLONE_WINDOW_DAYS),
+  },
+
   // Email confirmation flow (Supabase enable_confirmations=true 정합).
   // signUp 시 emailRedirectTo 로 전달되며 Supabase Auth 가 보낸 확인 메일의
   // 링크 destination 이 된다. Supabase Dashboard 의 Redirect URLs allow-list

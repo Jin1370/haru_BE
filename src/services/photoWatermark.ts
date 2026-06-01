@@ -4,7 +4,7 @@ const WATERMARK_TEXT = 'haruvoice.com';
 // 워터마크 텍스트 폭을 이미지 폭의 몇 %로 둘지. jimp 비트맵 폰트는 64/128 단위라
 // 중간 크기를 못 만들기에, 64px 로 그린 임시 레이어를 이 비율에 맞춰 scale 한다.
 // 키우거나 줄이려면 이 값만 조정하면 된다.
-const WIDTH_RATIO = 0.22;
+const WIDTH_RATIO = 0.3;
 
 // 변환본 이미지 bytes 에 우하단 "haru" 텍스트 워터마크를 합성해 JPEG 로 반환.
 // 다운로드 버튼을 누른 시점에만 호출되는 cold path 라 매번 디코드 → 합성 → 인코드

@@ -24,34 +24,47 @@ const upload = multer({ limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB
 
 router.use(authMiddleware);
 
+type PhotoRow = {
+  id: string;
+  position: number;
+  status: string;
+  failure_reason: string | null;
+  converted_url: string | null;
+};
+
+type PhotoStatusDto = {
+  id: string;
+  position: number;
+  status: string;
+  failure_reason: string | null;
+};
+
+function toPhotoStatusDto(r: PhotoRow): PhotoStatusDto {
+  return {
+    id: r.id,
+    position: r.position,
+    status: r.status,
+    failure_reason: r.failure_reason,
+  };
+}
+
 // 사진 변경(삭제/재배치) 후 즉시 sync 응답 조립용 공통 스냅샷 로더.
 // DELETE /photos/:index 와 PATCH /photos/order 가 동일 응답 shape
 // ({photo_statuses, photos}) 를 반환하므로 drift 방지를 위해 추출
 // (evidence-hold-on-delete sprint 의 sweepAuditTable 헬퍼 추출 패턴).
 async function loadPhotoSnapshot(
   userId: string,
-): Promise<{ photo_statuses: Array<{ id: string; position: number; status: string; failure_reason: string | null }>; photos: string[] }> {
+): Promise<{ photo_statuses: PhotoStatusDto[]; photos: string[] }> {
   const { data: rows } = await supabase
     .from('profile_photos')
     .select('id, position, status, failure_reason, converted_url')
     .eq('user_id', userId)
     .order('position', { ascending: true });
 
-  const list = (rows ?? []) as Array<{
-    id: string;
-    position: number;
-    status: string;
-    failure_reason: string | null;
-    converted_url: string | null;
-  }>;
+  const list = (rows ?? []) as PhotoRow[];
 
   return {
-    photo_statuses: list.map((r) => ({
-      id: r.id,
-      position: r.position,
-      status: r.status,
-      failure_reason: r.failure_reason,
-    })),
+    photo_statuses: list.map(toPhotoStatusDto),
     photos: list
       .filter((r) => r.status === 'ready' && r.converted_url)
       .map((r) => r.converted_url as string),
@@ -86,30 +99,14 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
     .eq('user_id', req.userId!)
     .order('position', { ascending: true });
 
-  let photoStatuses: Array<{
-    id: string;
-    position: number;
-    status: string;
-    failure_reason: string | null;
-  }> = [];
+  let photoStatuses: PhotoStatusDto[] = [];
   let readyPhotos: string[] = [];
 
   if (photoStatusesResult.error) {
     console.error('[profile.me.photo_statuses_select_failed]', photoStatusesResult.error.message);
   } else {
-    const rows = (photoStatusesResult.data ?? []) as Array<{
-      id: string;
-      position: number;
-      status: string;
-      failure_reason: string | null;
-      converted_url: string | null;
-    }>;
-    photoStatuses = rows.map((r) => ({
-      id: r.id,
-      position: r.position,
-      status: r.status,
-      failure_reason: r.failure_reason,
-    }));
+    const rows = (photoStatusesResult.data ?? []) as PhotoRow[];
+    photoStatuses = rows.map(toPhotoStatusDto);
     readyPhotos = rows
       .filter((r) => r.status === 'ready' && r.converted_url)
       .map((r) => r.converted_url as string);
@@ -640,6 +637,38 @@ router.delete('/photos/:index', requireNotFrozen, async (req: AuthRequest, res: 
       deleteFile('photos', pathToDelete).catch((e) =>
         console.error('[profile.photos.delete_original_cleanup_failed]', (e as Error).message),
       );
+    }
+  }
+
+  // 삭제 후 position 압축 — 지운 자리(index) 뒤의 사진들을 한 칸씩 앞으로 당긴다.
+  // ascending 순서로 한 row 씩 position-1 로 UPDATE: 지운 자리가 비어 있고 각 row 가
+  // 직전에 비워진 슬롯으로 내려가므로 UNIQUE(user_id, position) 충돌이 없다. gap 을
+  // 남기면 (a) 그리드 중간에 빈 칸 (b) 메인(position 0) 삭제 시 다음 사진이 0 으로
+  // 안 올라와 디스커버 노출 누락. 변환 중 row 도 합성은 id 기준 갱신이라 이동과 무관.
+  const { data: toShift, error: shiftSelErr } = await supabase
+    .from('profile_photos')
+    .select('id, position')
+    .eq('user_id', req.userId!)
+    .gt('position', index)
+    .order('position', { ascending: true });
+
+  if (shiftSelErr) {
+    console.error('[profile.photos.delete_compact_select_failed]', shiftSelErr.message);
+  } else {
+    for (const r of (toShift ?? []) as Array<{ id: string; position: number }>) {
+      const { error: shiftErr } = await supabase
+        .from('profile_photos')
+        .update({ position: r.position - 1 })
+        .eq('id', r.id);
+      if (shiftErr) {
+        console.error('[profile.photos.delete_compact_update_failed]', {
+          photo_id: r.id,
+          from: r.position,
+          to: r.position - 1,
+          error: shiftErr.message,
+        });
+        break; // 부분 압축은 다음 삭제/재배치가 복구 — 무한 진행 방지
+      }
     }
   }
 

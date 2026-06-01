@@ -30,6 +30,9 @@ export interface Profile {
   voice_intro_translations: VoiceIntroTranslations;
   voice_intro_audio_urls: Partial<Record<VoiceIntroSlotLanguage, string | null>>;
   voice_intro_audio_status: Partial<Record<VoiceIntroSlotLanguage, VoiceIntroAudioStatus>>;
+  // 프리미엄 entitlement (mig 033). NULL/과거 = 무료, 미래 = 프리미엄.
+  // 쿠폰 + 향후 구독이 공유. 판정은 utils/premium.isPremium.
+  premium_until: string | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;

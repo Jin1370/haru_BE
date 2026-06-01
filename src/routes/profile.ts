@@ -112,10 +112,14 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
       .map((r) => r.converted_url as string);
   }
 
-  // 호환성: profile_photos 테이블이 비어있고 옛 profiles.photos 배열만 있는 환경
-  // (mig 028 미적용 또는 백필 미실행 dev DB) 에선 photos 배열 폴백 사용.
+  // 호환성: profile_photos 테이블에 행이 하나도 없는 환경(mig 028 미적용 또는 백필
+  // 미실행 dev DB)에서만 옛 profiles.photos 배열로 폴백한다. 행이 있으면(설령 전부
+  // 변환 중이라 ready 가 0개여도) readyPhotos([])를 그대로 쓴다. 옛 조건
+  // (readyPhotos.length>0)은 "1장뿐인 사진이 변환 중"일 때 옛 legacy 배열의 삭제된
+  // URL 로 폴백해, 메인 슬롯이 inflight(스피너/blur) 대신 깨진 ready 이미지로
+  // 렌더되던 버그를 유발했다.
   const responsePhotos =
-    readyPhotos.length > 0
+    photoStatuses.length > 0
       ? readyPhotos
       : ((data.photos as string[] | null) ?? []);
 
@@ -645,29 +649,36 @@ router.delete('/photos/:index', requireNotFrozen, async (req: AuthRequest, res: 
   // 직전에 비워진 슬롯으로 내려가므로 UNIQUE(user_id, position) 충돌이 없다. gap 을
   // 남기면 (a) 그리드 중간에 빈 칸 (b) 메인(position 0) 삭제 시 다음 사진이 0 으로
   // 안 올라와 디스커버 노출 누락. 변환 중 row 도 합성은 id 기준 갱신이라 이동과 무관.
-  const { data: toShift, error: shiftSelErr } = await supabase
-    .from('profile_photos')
-    .select('id, position')
-    .eq('user_id', req.userId!)
-    .gt('position', index)
-    .order('position', { ascending: true });
+  //
+  // ?compact=false: "변경(replace)" 흐름이 사용 — gap 을 그 자리에 남겨 직후
+  // 업로드(POST /photos)가 "첫 빈 자리"=원래 슬롯을 채우게 한다(순서 유지). 단독
+  // 삭제는 기본(압축).
+  const skipCompact = req.query.compact === 'false';
+  if (!skipCompact) {
+    const { data: toShift, error: shiftSelErr } = await supabase
+      .from('profile_photos')
+      .select('id, position')
+      .eq('user_id', req.userId!)
+      .gt('position', index)
+      .order('position', { ascending: true });
 
-  if (shiftSelErr) {
-    console.error('[profile.photos.delete_compact_select_failed]', shiftSelErr.message);
-  } else {
-    for (const r of (toShift ?? []) as Array<{ id: string; position: number }>) {
-      const { error: shiftErr } = await supabase
-        .from('profile_photos')
-        .update({ position: r.position - 1 })
-        .eq('id', r.id);
-      if (shiftErr) {
-        console.error('[profile.photos.delete_compact_update_failed]', {
-          photo_id: r.id,
-          from: r.position,
-          to: r.position - 1,
-          error: shiftErr.message,
-        });
-        break; // 부분 압축은 다음 삭제/재배치가 복구 — 무한 진행 방지
+    if (shiftSelErr) {
+      console.error('[profile.photos.delete_compact_select_failed]', shiftSelErr.message);
+    } else {
+      for (const r of (toShift ?? []) as Array<{ id: string; position: number }>) {
+        const { error: shiftErr } = await supabase
+          .from('profile_photos')
+          .update({ position: r.position - 1 })
+          .eq('id', r.id);
+        if (shiftErr) {
+          console.error('[profile.photos.delete_compact_update_failed]', {
+            photo_id: r.id,
+            from: r.position,
+            to: r.position - 1,
+            error: shiftErr.message,
+          });
+          break; // 부분 압축은 다음 삭제/재배치가 복구 — 무한 진행 방지
+        }
       }
     }
   }

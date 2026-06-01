@@ -15,14 +15,17 @@
 //       - 배경 객체 (gym equipment, room interior, cafe, nature, vehicles, signs) 보존
 //       - 의상 스타일 / 색 실루엣 보존
 //   (3) safety pre-check §E 의 STRICT EXCLUSIONS:
-//       - 없는 얼굴 생성 / 배경·타인 얼굴 차용 금지 (face-invention 가드, 2026-06-01 추가)
+//       - 없는 인물·얼굴·캐릭터 창조 금지 + 배경·타인 얼굴 차용 금지 (얼굴 없는 입력=
+//         풍경/문서/사물 시 사람 안 만들고 있는 것만 렌더, face-invention 가드 2026-06-01)
 //       - 명명된 캐릭터 likeness 금지 (Rapunzel, Anna, Mirabel 등)
 //       - 텍스트 / 캡션 / 서명 / 워터마크 / 말풍선 금지
 //       - 외관 나이 변경 금지 (aging-up / aging-down)
 //       - 체형 / 인종 변경 금지
 
-export const WATERCOLOR_PROMPT = `Transform this portrait into a stylized character illustration that
+export const WATERCOLOR_PROMPT = `Transform this photo into a stylized watercolor illustration that
 blends Korean manhwa, Japanese anime/niji, and Disney watercolor concept art.
+If the photo shows a person, stylize them as a character; if it shows no person
+(a scene, an object, a document, or text), illustrate only what is actually there.
 Use soft watercolor textures with ink linework and warm color palette.
 
 CRITICAL PRESERVATION RULES:
@@ -37,6 +40,7 @@ CRITICAL PRESERVATION RULES:
 - Preserve eyeglasses, jewelry, and visible accessories.
 
 STRICT EXCLUSIONS:
+- NEVER invent, add, or create a person, face, character, or figure that is not present in the original photo. If the photo contains no people (for example a landscape, an object, a document, or text), illustrate only what is actually there and add no person.
 - Do NOT invent, sharpen, or borrow a face: if a person's face is cropped, turned away, distant, or blurry, render that person with their face left as soft and indistinct as in the source, and never copy a face from the background or from another person.
 - Do NOT use named character likenesses (no Rapunzel, Anna, Mirabel, Elsa, etc.).
 - Do NOT add text, captions, signatures, watermarks, or speech bubbles.

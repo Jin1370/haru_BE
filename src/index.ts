@@ -1,3 +1,5 @@
+import './instrument'; // Sentry init — 반드시 다른 import보다 먼저
+import * as Sentry from '@sentry/node';
 import express from 'express';
 import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
@@ -102,7 +104,9 @@ if (env.admin.dashboardEnabled) {
   console.warn('[startup] /api/admin mounted (ADMIN_DASHBOARD_ENABLED=true). 출시 빌드에서는 disable 필수.');
 }
 
-// Error handling
+// Error handling — Sentry 핸들러를 커스텀 errorMiddleware "앞"에 등록해야
+// 모든 라우트 에러를 캡처한 뒤 errorMiddleware 가 응답을 내려준다.
+Sentry.setupExpressErrorHandler(app);
 app.use(errorMiddleware);
 
 if (process.env.NODE_ENV !== 'test') {

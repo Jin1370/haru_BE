@@ -22,6 +22,7 @@
   "dependencies": {
     "@elevenlabs/elevenlabs-js": "^2.42.0",
     "@google-cloud/vertexai": "^1.12.0",
+    "@sentry/node": "^10.55.0",
     "@supabase/supabase-js": "^2.103.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",

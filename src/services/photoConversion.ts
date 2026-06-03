@@ -62,13 +62,35 @@ async function downscaleForConversion(
 }
 
 // SDK 클라이언트는 module top-level lazy init — env 미설정 시 null.
-// openaiModeration.ts 와 동일 키 (`OPENAI_API_KEY`) 재사용 — 별도 quota 분리는 후속 카드.
+// 우선순위: Azure OpenAI(APIM) 설정이 있으면 그쪽으로 구성, 없으면 OpenAI 직접
+// (openaiModeration.ts 와 동일한 `OPENAI_API_KEY` 재사용) fallback.
+// Azure 경유: baseURL = .../deployments/<name> (경로에 /openai 없음 — APIM 매핑),
+// 인증은 `api-key` 헤더, `api-version` 쿼리. SDK 가 함께 보내는 Authorization Bearer 는
+// APIM 이 무시하므로 충돌 없음 (라이브 검증 완료). `images.edit` 호출부는 무변경 —
+// 클라이언트 구성만 바뀌므로 vi.mock('openai') 기반 단위 테스트도 그대로 통과.
 let client: OpenAI | null = null;
 function getClient(): OpenAI | null {
   if (client) return client;
-  if (!env.openai.moderationApiKey) return null;
-  client = new OpenAI({ apiKey: env.openai.moderationApiKey });
-  return client;
+  if (env.image.azureBaseUrl && env.image.azureApiKey) {
+    client = new OpenAI({
+      apiKey: env.image.azureApiKey,
+      baseURL: env.image.azureBaseUrl,
+      defaultQuery: { 'api-version': env.image.azureApiVersion },
+      defaultHeaders: { 'api-key': env.image.azureApiKey },
+    });
+    // 어떤 provider 가 실제 활성화됐는지 가시화 — 배포 env 에 AZURE_IMAGE_* 누락 시
+    // 조용히 OpenAI 로 폴백하는 상황을 부팅 로그(첫 변환 시점)에서 잡기 위함.
+    console.log('[photoConversion] image provider = Azure OpenAI (APIM):', env.image.azureBaseUrl);
+    return client;
+  }
+  if (env.openai.moderationApiKey) {
+    console.warn(
+      '[photoConversion] image provider = OpenAI direct (fallback) — AZURE_IMAGE_BASE_URL/AZURE_IMAGE_API_KEY 미설정',
+    );
+    client = new OpenAI({ apiKey: env.openai.moderationApiKey });
+    return client;
+  }
+  return null;
 }
 
 export interface ConversionInput {
@@ -111,11 +133,13 @@ function detectModerationRejection(err: unknown): {
   const codeIsModeration =
     code === 'moderation_blocked' ||
     code === 'content_policy_violation' ||
+    code === 'content_filter' || // Azure OpenAI content filter
     code === 'image_generation_user_error';
 
   const messageIsModeration =
     message.includes('safety system') ||
     message.includes('content policy') ||
+    message.includes('content management policy') || // Azure OpenAI wording
     message.includes('moderation') ||
     message.includes('safety filter');
 

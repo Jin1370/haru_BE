@@ -70,6 +70,18 @@ export const env = {
     moderationApiKey: process.env.OPENAI_API_KEY || '',
   },
 
+  // 프로필 사진 워터컬러 변환 (photo-watercolor-pipeline) — Azure OpenAI(APIM 프록시).
+  // 회사 제공 키. baseUrl + apiKey 둘 다 set 되면 photoConversion 의 getClient 가
+  // OpenAI 직접 대신 Azure 경유 클라이언트를 구성한다 (baseURL + api-key 헤더 + api-version 쿼리).
+  // 미설정 시 openai.moderationApiKey 로 OpenAI 직접 호출 (fallback, 옛 동작).
+  //   * baseUrl 은 deployment 까지 포함 (.../deployments/<name>). APIM 매핑상 경로에 /openai 없음.
+  //   * ⚠️ 발급 키는 dev/test 전용 — 총 모델 호출 500회 캡. 출시 전 prod 한도 별도 협의 필요.
+  image: {
+    azureBaseUrl: process.env.AZURE_IMAGE_BASE_URL || '',
+    azureApiKey: process.env.AZURE_IMAGE_API_KEY || '',
+    azureApiVersion: process.env.AZURE_IMAGE_API_VERSION || '2025-04-01-preview',
+  },
+
   vertexAi: {
     projectId: required('GCP_PROJECT_ID'),
     location: process.env.GCP_LOCATION || 'us-central1',

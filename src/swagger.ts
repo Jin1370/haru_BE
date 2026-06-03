@@ -563,6 +563,41 @@ export const swaggerDocument = {
         },
       },
     },
+    '/api/discover/quota': {
+      get: {
+        tags: ['Discover'],
+        summary: '디스커버 일일 카드 카운트 (오늘 사용한 스와이프 수)',
+        description: 'swipes 테이블이 source of truth. 기기 간 동기화용. pass_reset_enabled 는 "넘긴 사람 다시 보기" 버튼 노출 여부 게이트(DISCOVER_PASS_RESET_ENABLED env).',
+        parameters: [
+          { name: 'tz_offset_minutes', in: 'query', schema: { type: 'integer', minimum: -840, maximum: 840, default: 0 }, description: '로컬 자정 경계 계산용 (Date#getTimezoneOffset() 의미). 미전달 시 0(UTC).' },
+        ],
+        responses: {
+          200: {
+            description: '일일 카운트',
+            content: { 'application/json': { schema: { type: 'object', properties: {
+              count: { type: 'integer', example: 12 },
+              limit: { type: 'integer', example: 50 },
+              remaining: { type: 'integer', example: 38 },
+              date: { type: 'string', example: '2026-06-03' },
+              pass_reset_enabled: { type: 'boolean', description: 'pass 리셋 라우트 활성 여부. false 면 FE 가 "넘긴 사람 다시 보기" 버튼 숨김.' },
+            }, required: ['count', 'limit', 'remaining', 'date', 'pass_reset_enabled'] } } },
+          },
+        },
+      },
+    },
+    '/api/discover/passes': {
+      delete: {
+        tags: ['Discover'],
+        summary: '지나친 카드 다시 보기 — 본인 pass 스와이프 행 일괄 삭제',
+        description: 'viewer 의 direction=pass 스와이프 행을 일괄 삭제해 pass 했던 후보를 디스커버 풀에 재등장시킨다. like 행·매치 무변경. 차단 상대는 blocks 양방향 필터로 계속 제외. DISCOVER_PASS_RESET_ENABLED=false 시 403.',
+        responses: {
+          200: { description: '리셋 완료', content: { 'application/json': { schema: { type: 'object', properties: { reset_count: { type: 'integer', example: 7, description: '삭제된 pass 행 수' } }, required: ['reset_count'] } } } },
+          401: { description: '미인증', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 freeze 또는 pass 리셋 비활성', content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string' }, code: { type: 'string', enum: ['account_frozen', 'pass_reset_disabled'] } }, required: ['error', 'code'] } } } },
+          500: { description: '삭제 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
 
     // ── Matches ──
     '/api/matches': {

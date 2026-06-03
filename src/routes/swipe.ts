@@ -6,6 +6,7 @@ import { swipeBodySchema, swipeQuerySchema, discoverQuerySchema, quotaQuerySchem
 import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
 import { sendPushToUser } from '../services/pushNotifications';
 import { requireNotFrozen } from '../utils/freezeGuard';
+import { env } from '../config/env';
 
 // 시청자 언어 → 보이스 인트로 슬롯 매핑 (mig 011).
 // ko/ja/en 활성. th/hi/그 외/null 은 'en' 폴백 (FE 의 영문 강제 정책과 일관).
@@ -579,7 +580,57 @@ router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, r
     limit: DISCOVER_MAX_PER_DAY,
     remaining: Math.max(0, DISCOVER_MAX_PER_DAY - used),
     date: localDate,
+    // pass 리셋 일몰 게이트 (strategist C2). FE 가 이 플래그로 빈 화면/한도 화면의
+    // "넘긴 사람 다시 보기" 버튼 노출을 결정한다 — 새 config 엔드포인트 신설 대신
+    // 이미 마운트 시 호출하는 quota 응답에 boolean 1개를 얹어 가장 가볍게 전달.
+    pass_reset_enabled: env.discover.passResetEnabled,
   });
+});
+
+// 디스커버 "지나친 카드 다시 보기" (pass 스와이프 리셋).
+//
+// viewer 의 direction='pass' 스와이프 행을 일괄 삭제 → 다음 디스커버 재조회 시
+// pass 했던 후보가 풀에 다시 등장한다. like 행·매치는 절대 무변경 (direction='pass'
+// eq 로 본인 pass 행만 타겟). 코어 POST /swipe 의 INSERT/409/매치 로직과 완전 독립.
+//
+// 일일 50장 카운트는 swipes 행 수에서 파생(GET /quota)되므로 pass 행 삭제 시
+// 오늘 친 pass 만큼 카운트가 자연 회복된다 — 별도 카운트 리셋 로직 불필요.
+//
+// 차단 상대 재노출 안전 (strategist C3): 디스커버 excludeIds 가 blocks 양방향을
+// swipes 와 별개로 항상 제외하므로(GET / 의 blockedResult), pass 행을 지워도 차단
+// 상대는 계속 제외된다 — 구조적 보장.
+//
+// IDOR 차단: .eq('swiper_id', req.userId!) 로 본인 행만 삭제. authMiddleware 가
+// 검증한 JWT sub 외 다른 사용자의 pass 행은 절대 건드리지 못한다.
+//
+// requireNotFrozen 가드: POST /swipe 와 동일하게 mutating 행위라 freeze 사용자
+// 차단. freeze 된 사용자가 pass 리셋으로 디스커버 풀을 회복시켜 like 시도하는
+// 경로를 사전 차단(POST /swipe 자체도 가드되지만 일관성 차원에서 적용).
+//
+// env 게이트 (strategist C2): env.discover.passResetEnabled=false 면 403 +
+// code:'pass_reset_disabled'. FE 는 quota 의 pass_reset_enabled=false 로 이미
+// 버튼을 숨기지만, 변조 클라이언트의 직접 호출을 라우트 레벨에서도 차단.
+router.delete('/passes', requireNotFrozen, async (req: AuthRequest, res: Response) => {
+  if (!env.discover.passResetEnabled) {
+    res.status(403).json({ error: 'Pass reset is disabled', code: 'pass_reset_disabled' });
+    return;
+  }
+
+  // 본인 pass 행만 삭제. like 행·매치 무관 (direction='pass' eq 가 like 행 보호).
+  // { count: 'exact' } 로 삭제 행 수 반환 → FE 가 "N명 다시 보기" 토스트/계측 가능.
+  const { count, error } = await supabase
+    .from('swipes')
+    .delete({ count: 'exact' })
+    .eq('swiper_id', req.userId!)
+    .eq('direction', 'pass');
+
+  // 외부 의존성 error 가시화 룰 (CLAUDE.md silent-success 금지).
+  if (error) {
+    res.status(500).json({ error: error.message });
+    return;
+  }
+
+  res.json({ reset_count: count ?? 0 });
 });
 
 // 스와이프

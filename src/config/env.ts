@@ -87,6 +87,18 @@ export const env = {
     location: process.env.GCP_LOCATION || 'us-central1',
   },
 
+  // 디스커버 "지나친 카드 다시 보기" (pass 스와이프 리셋) 일몰 게이트.
+  // viewer 의 direction='pass' 스와이프 행을 일괄 삭제해 pass 했던 후보를 다시
+  // 디스커버 풀에 등장시키는 베타 풀-고갈 탈출구 (strategist C2). 베타 기본 ON,
+  // 유저 스케일 임계 도달 시 코드 배포 없이 false 로 끈다 — 1000명+ 규모에선
+  // "거절한 상대 재노출" 이 데이팅앱 표준 UX 위반이라 일몰 대상.
+  // 비활성 시 DELETE /api/discover/passes 는 403 + code:'pass_reset_disabled',
+  // GET /quota 의 pass_reset_enabled 플래그도 false → FE 가 버튼을 숨긴다.
+  // admin.dashboardEnabled 게이트 패턴 재사용. 기본값 ON (미설정 시 활성).
+  discover: {
+    passResetEnabled: process.env.DISCOVER_PASS_RESET_ENABLED !== 'false',
+  },
+
   // dev/QA 어드민 대시보드 — 출시 빌드에서는 ADMIN_DASHBOARD_ENABLED 미설정
   // 으로 라우트/임퍼소네이션 경로 자체가 사라진다. ADMIN_SECRET 은 enabled
   // 일 때만 required. 프로덕션에서 실수로 활성화 + 빈 시크릿 = 무제한 침해

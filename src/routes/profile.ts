@@ -268,7 +268,17 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
     ).catch((err) => console.error('[Voice intro audios generation failed]', err));
   }
 
-  res.json(data);
+  // GET /me 와 동일한 shape 로 응답해야 한다 — photos 는 profile_photos 의 ready
+  // converted_url, photo_statuses 도 동봉. 옛 코드는 raw `data` 만 반환해 FE 가
+  // setProfile(updated) 로 store 를 덮어쓸 때 photos 가 레거시 profiles.photos
+  // (mig 028 이후 비어있음) + photo_statuses=undefined 로 바뀌어, 프로필 탭의
+  // 사진이 전부 사라지던 회귀를 유발했다 (앱 재시작 시 GET /me 폴백으로만 복구).
+  const snapshot = await loadPhotoSnapshot(req.userId!);
+  const responsePhotos =
+    snapshot.photo_statuses.length > 0
+      ? snapshot.photos
+      : ((data.photos as string[] | null) ?? []);
+  res.json({ ...data, photos: responsePhotos, photo_statuses: snapshot.photo_statuses });
 });
 
 // 프로필 사진 재배치 (photo-reorder-no-reconvert sprint).

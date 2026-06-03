@@ -285,13 +285,23 @@ async function main() {
       const publicUrl = await uploadFile('photos', path, buf, 'image/jpeg');
       console.log(`  ✓ upload → ${publicUrl}`);
 
-      // profiles.photos 갱신 — 메인 1장만 유지
+      // mig 034: profiles.photos 폐지 → profile_photos 메인(position=0) 행 upsert.
+      //   변환 없이 바로 status='ready' (converted_url = 업로드 URL).
       const { error: updateErr } = await supabase
-        .from('profiles')
-        .update({ photos: [publicUrl], updated_at: new Date().toISOString() })
-        .eq('id', a.user_id);
-      if (updateErr) throw new Error(`profile update 실패: ${updateErr.message}`);
-      console.log('  ✓ profile.photos 갱신');
+        .from('profile_photos')
+        .upsert(
+          {
+            user_id: a.user_id,
+            position: 0,
+            original_path: path,
+            converted_url: publicUrl,
+            status: 'ready',
+            failure_reason: null,
+          },
+          { onConflict: 'user_id,position' },
+        );
+      if (updateErr) throw new Error(`profile_photos upsert 실패: ${updateErr.message}`);
+      console.log('  ✓ profile_photos 갱신');
       ok++;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

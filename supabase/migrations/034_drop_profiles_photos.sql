@@ -1,0 +1,37 @@
+-- ========== profiles.photos 컬럼 폐지 (photo-watercolor-pipeline follow-up) ==========
+-- profiles.photos (TEXT[] — 변환된 프로필 사진 public URL 배열) 컬럼 drop.
+--
+-- 배경:
+--   * mig 028 (photo-watercolor-pipeline) 에서 사진별 status/원본 path/변환 URL/
+--     position 을 row 단위로 정규화한 profile_photos 테이블을 신설하면서, 모든
+--     read/write path 를 profile_photos 로 swap 했다. profiles.photos 는 그 sprint
+--     이후 "mig 028 미적용 / 백필 sweep 미완 환경" 폴백 용도로만 남아 있었다.
+--   * 본 마이그 직전 커밋에서 마지막 폴백 참조까지 모두 제거:
+--       - swipe.ts discover/likes-received: select 에서 photos 제거 + readyPhotosByUser
+--         를 profile_photos(ready, position ASC) 전체로 전환. "사진 3장+ → +10"
+--         스코어링 신호도 profile_photos ready 수로 재배선.
+--       - match.ts partner: photos select + legacy 폴백 제거.
+--       - block.ts 차단 목록: profiles join 에서 photos 제거 + profile_photos 메인
+--         (position=0, status='ready') converted_url 별도 조회 후 병합.
+--       - profile.ts GET/PUT /me + POST /photos count: data.photos 폴백 제거.
+--       - auth.ts deleteAccount anonymize: photos:[] write 제거.
+--       - dev 스크립트 (seed/update-dev-photos/check-user-data): profile_photos 로 전환.
+--   * 응답 wire 필드 `photos` (string[]) 는 그대로 유지 — profile_photos.converted_url
+--     로 조립되는 값이라 FE/admin 호환 영향 없음. 제거 대상은 DB 컬럼뿐.
+--
+-- 데이터 손실 평가:
+--   * 본 컬럼의 모든 URL 은 mig 028 백필에서 이미 profile_photos 로 복제됐고, 이후
+--     실제 노출은 converted_url (변환본) 만 사용한다. 컬럼 자체엔 더 이상 read 의존
+--     없음.
+--   * mig 001 에서 `photos TEXT[]` 로 도입된 이후 인덱스/제약/RLS 컬럼 참조 없음.
+--     RLS 정책은 profiles 행 단위 read 만 제어 → ALTER RLS 불필요. REPLICA IDENTITY
+--     DEFAULT + Realtime publication 은 컬럼 DROP 시 자동으로 set 에서 제외.
+--
+-- BE deploy 순서: BE 코드 deploy (위 참조 제거) → mig 적용. 역순이면 deploy 직전까지
+--   BE 가 photos 컬럼 select/write 시도 → "column does not exist" 로 discover/match/
+--   block/profile 라우트가 500 회귀.
+--
+-- forward-only. mig 001~033 은 수정하지 않는다.
+
+ALTER TABLE public.profiles
+  DROP COLUMN IF EXISTS photos;

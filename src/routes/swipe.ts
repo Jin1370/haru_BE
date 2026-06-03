@@ -195,11 +195,11 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
 
   // mig 011: voice_intro_audio_urls (jsonb) 가 시청자 언어 슬롯의 source. 단일
   // voice_intro_audio_url 은 응답에 미러로 출력하기 위해 슬롯에서 추출.
-  // photo-watercolor-pipeline sprint: profiles.photos 는 호환 유지 동안만 select.
-  // 응답 photos 배열은 profile_photos 의 status='ready' converted_url 만 사용.
+  // mig 034: profiles.photos 컬럼 폐지. 노출/스코어링용 사진은 모두
+  // profile_photos (status='ready' converted_url) 에서 가져온다.
   let query = supabase
     .from('profiles')
-    .select('id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, photos, created_at')
+    .select('id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, created_at')
     .eq('is_active', true);
 
   if (uniqueExcludeIds.length > 0) {
@@ -257,23 +257,27 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     preferred_nationalities: (prefs?.preferred_nationalities as string[] | null) ?? [],
   };
 
-  // photo-watercolor-pipeline sprint: profile_photos 일괄 조회 — status='ready'
-  // 변환본 main 사진 (position=0) 만 노출. position=0 row 가 없거나 status≠'ready'
-  // 인 사용자는 visible 단계에서 제외 (회원가입 직후 변환 대기 + 백필 변환 대기 케이스).
+  // mig 034: profile_photos 일괄 조회 — status='ready' 변환본 전체를 position ASC
+  // 로 모아 user 별 배열로 보관. [0] = main(position=0), length = 스코어링용 ready
+  // 사진 수. ready 사진이 0장인 사용자는 visible 단계에서 제외 (회원가입 직후 변환
+  // 대기 케이스).
   const candidateIds = (data ?? []).map((row: any) => row.id as string);
-  const readyPhotosByUser = new Map<string, string>();
+  const readyPhotosByUser = new Map<string, string[]>();
   if (candidateIds.length > 0) {
     const { data: photoRows, error: photoErr } = await supabase
       .from('profile_photos')
       .select('user_id, position, converted_url, status')
       .in('user_id', candidateIds)
       .eq('status', 'ready')
-      .eq('position', 0);
+      .order('position', { ascending: true });
     if (photoErr) {
       console.error('[discover.profile_photos_select_failed]', photoErr.message);
     } else {
       ((photoRows ?? []) as Array<{ user_id: string; converted_url: string | null }>).forEach((r) => {
-        if (r.converted_url) readyPhotosByUser.set(r.user_id, r.converted_url);
+        if (!r.converted_url) return;
+        const list = readyPhotosByUser.get(r.user_id) ?? [];
+        list.push(r.converted_url);
+        readyPhotosByUser.set(r.user_id, list);
       });
     }
   }
@@ -281,16 +285,11 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   // 사진이 한 장도 없는 미완성 프로필 (또는 변환 미완료 사용자) 는 후보에서 제외.
   // 본인 언어 일치 후보는 SQL 단에서 이미 제거됐지만, 마이그레이션 직후 NULL 인 행이
   // 일치 비교에서 빠지지 않도록 JS 단에서 빈 language 행도 함께 차단한다.
-  //
-  // 호환성 폴백: profile_photos 에서 ready 사진이 없고 옛 profiles.photos 배열에는
-  // 있는 환경 (mig 028 미적용 또는 백필 sweep 미완) — 옛 photos[0] 사용.
   const slot = pickViewerSlot(viewerLanguage);
   const visible = (data ?? []).filter((row: any) => {
     if (!row.language) return false;
     if (viewerLanguage && row.language === viewerLanguage) return false;
-    const hasConverted = readyPhotosByUser.has(row.id);
-    const legacyPhotos = (row.photos as string[] | null) ?? [];
-    if (!hasConverted && legacyPhotos.length === 0) return false;
+    if ((readyPhotosByUser.get(row.id) ?? []).length === 0) return false;
     // 차별점 1 강제: voice clone 없거나 voice intro 미작성이면 시청자 언어 슬롯이
     // 비어있다. voice_intro_audio 는 voice clone 보유 + voice intro 텍스트 작성 시에만
     // 합성되므로, 슬롯 URL 부재 = 둘 중 하나라도 없음. 무음 카드(SwipeCard 재생
@@ -303,13 +302,14 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   });
 
   // 티어 + 동일 티어 내 2차 점수 계산 → (tier ASC, intra DESC) 정렬.
+  // mig 034: 스코어링의 "사진 3장+" 신호는 profile_photos ready 사진 수로 판정.
   const scored = visible.map((row: any) => {
     const candidate: Candidate = {
       id: row.id,
       language: row.language ?? '',
       nationality: row.nationality,
       interests: row.interests ?? [],
-      photos: row.photos ?? [],
+      photos: readyPhotosByUser.get(row.id) ?? [],
       created_at: row.created_at,
     };
     return {
@@ -328,17 +328,13 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   // 보안 경계: discover 는 잠금 해제 대상이 아니므로 서버에서 photos 배열을 메인 1장으로 잘라
   //            본인 프로필 외 추가 사진 URL 노출을 원천 차단한다.
   //            photo_access 는 정책상 항상 false/false 고정.
-  // photo-watercolor-pipeline sprint: photos[0] 은 profile_photos.converted_url
-  //   (변환본). 변환 미완료 사용자는 위 visible 단계에서 이미 제거됨.
+  // mig 034: photos[0] 은 profile_photos.converted_url(메인, position=0). 변환
+  //   미완료 사용자는 위 visible 단계에서 이미 제거됨.
   // mig 011: voice_intro_audio_urls 에서 시청자 언어 슬롯만 추출해 단일 URL 미러.
   // (slot 은 visible 필터 직전에 이미 계산됨.)
-  const results = scored.slice(0, limit).map(({ _tier, _intra, created_at, photos, voice_intro_audio_urls, ...rest }) => {
+  const results = scored.slice(0, limit).map(({ _tier, _intra, created_at, voice_intro_audio_urls, ...rest }) => {
     const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<Record<VoiceIntroSlotLanguage, string | null>>;
-    const convertedUrl = readyPhotosByUser.get(rest.id as string);
-    const legacyPhotos = (photos as string[] | null) ?? [];
-    const photoUrls: string[] = convertedUrl
-      ? [convertedUrl]
-      : legacyPhotos.slice(0, 1);
+    const photoUrls: string[] = (readyPhotosByUser.get(rest.id as string) ?? []).slice(0, 1);
     return {
       ...rest,
       voice_intro_audio_url: (slotUrls[slot] as string | null | undefined) ?? null,
@@ -425,7 +421,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   let query = supabase
     .from('profiles')
     .select(
-      'id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, photos, created_at',
+      'id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, created_at',
     )
     .in('id', eligibleIds)
     .eq('is_active', true);
@@ -454,21 +450,24 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  // photo-watercolor-pipeline sprint: profile_photos 일괄 조회 (디스커버와 동일 패턴).
+  // mig 034: profile_photos 일괄 조회 (디스커버와 동일 패턴 — position ASC 전체 ready).
   const candidateIds = (profiles ?? []).map((row: any) => row.id as string);
-  const readyPhotosByUser = new Map<string, string>();
+  const readyPhotosByUser = new Map<string, string[]>();
   if (candidateIds.length > 0) {
     const { data: photoRows, error: photoErr } = await supabase
       .from('profile_photos')
       .select('user_id, position, converted_url, status')
       .in('user_id', candidateIds)
       .eq('status', 'ready')
-      .eq('position', 0);
+      .order('position', { ascending: true });
     if (photoErr) {
       console.error('[likes-received.profile_photos_select_failed]', photoErr.message);
     } else {
       ((photoRows ?? []) as Array<{ user_id: string; converted_url: string | null }>).forEach((r) => {
-        if (r.converted_url) readyPhotosByUser.set(r.user_id, r.converted_url);
+        if (!r.converted_url) return;
+        const list = readyPhotosByUser.get(r.user_id) ?? [];
+        list.push(r.converted_url);
+        readyPhotosByUser.set(r.user_id, list);
       });
     }
   }
@@ -476,14 +475,11 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   // 4) 가시 후보 필터 — 사진 0장 / 언어 미설정 / viewer 와 같은 언어 후보 제외.
   //    cross-language 정책은 디스커버와 동일하게 적용 (받은 좋아요 풀에 같은 언어가
   //    있다면 그건 viewer 언어 설정 이전에 받은 좋아요. 현재 정책상 노출 차단).
-  //    호환성 폴백: profile_photos 없으면 옛 photos 배열.
   const slot = pickViewerSlot(viewerLanguage);
   const visible = (profiles ?? []).filter((row: any) => {
     if (!row.language) return false;
     if (viewerLanguage && row.language === viewerLanguage) return false;
-    const hasConverted = readyPhotosByUser.has(row.id);
-    const legacyPhotos = (row.photos as string[] | null) ?? [];
-    if (!hasConverted && legacyPhotos.length === 0) return false;
+    if ((readyPhotosByUser.get(row.id) ?? []).length === 0) return false;
     // 차별점 1 강제 (디스커버와 동일): voice clone 없거나 voice intro 미작성이면
     // 시청자 언어 슬롯이 비어있어 SwipeCard 재생 버튼이 disabled 가 된다. 받은
     // 좋아요도 같은 SwipeCard 를 재사용하므로 무음 카드를 노출 단계에서 제외.
@@ -512,7 +508,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
       language: row.language ?? '',
       nationality: row.nationality,
       interests: row.interests ?? [],
-      photos: row.photos ?? [],
+      photos: readyPhotosByUser.get(row.id) ?? [],
       created_at: row.created_at,
     };
     return {
@@ -529,17 +525,13 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
 
   // 6) 응답 가공 — discover 와 동일하게 사진 1장 / photo_access 잠금 / voice intro
   //    시청자 언어 슬롯 미러. FE SwipeCard 재사용을 보장하기 위해 shape 일치.
-  // photo-watercolor-pipeline sprint: photos[0] 은 profile_photos.converted_url
-  //   (변환본). 폴백은 옛 photos[0]. (slot 은 visible 필터 직전에 이미 계산됨.)
-  const results = scored.map(({ _tier, _likeIndex, photos, voice_intro_audio_urls, created_at, ...rest }) => {
+  // mig 034: photos[0] 은 profile_photos.converted_url(메인). (slot 은 visible
+  //   필터 직전에 이미 계산됨.)
+  const results = scored.map(({ _tier, _likeIndex, voice_intro_audio_urls, created_at, ...rest }) => {
     const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<
       Record<VoiceIntroSlotLanguage, string | null>
     >;
-    const convertedUrl = readyPhotosByUser.get(rest.id as string);
-    const legacyPhotos = (photos as string[] | null) ?? [];
-    const photoUrls: string[] = convertedUrl
-      ? [convertedUrl]
-      : legacyPhotos.slice(0, 1);
+    const photoUrls: string[] = (readyPhotosByUser.get(rest.id as string) ?? []).slice(0, 1);
     return {
       ...rest,
       voice_intro_audio_url: (slotUrls[slot] as string | null | undefined) ?? null,

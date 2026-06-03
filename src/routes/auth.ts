@@ -453,7 +453,6 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
     .from('profiles')
     .update({
       display_name: '',
-      photos: [],
       interests: [],
       voice_intro: null,
       voice_intro_audio_urls: {},

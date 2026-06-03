@@ -87,11 +87,11 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
   // mig 009 이후 단일 scalar `language` 컬럼이 source of truth.
   // mig 012 이후 deleted_at 가 tombstone 마커 — FE 가 이 값을 보고
   // "탈퇴한 사용자" 라벨로 렌더링한다 (display_name 은 비어있음).
-  // photo-watercolor-pipeline sprint: photos 는 호환 유지 동안만 select.
-  // 응답 photos 배열은 profile_photos 의 status='ready' converted_url 만 사용.
+  // mig 034: profiles.photos 컬럼 폐지. 응답 photos 배열은 profile_photos 의
+  // status='ready' converted_url 만 사용.
   const { data: profiles } = await supabase
     .from('profiles')
-    .select('id, display_name, photos, nationality, language, deleted_at')
+    .select('id, display_name, nationality, language, deleted_at')
     .in('id', partnerIds);
 
   const profileMap = new Map(
@@ -202,13 +202,10 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
         ? cols.round_trip_count
         : Number(summary?.round_trip_count ?? 0);
 
-    // photo-watercolor-pipeline sprint: photos 는 profile_photos.converted_url
-    //   (status='ready' 사진만, position ASC). main_photo_unlocked / all_photos_unlocked
-    //   는 v4 로 단일 unlock 단계 (10회 도달 시 양쪽 동시 true). 폴백: profile_photos
-    //   ready 사진이 0장이면 옛 photos 배열 사용 (mig 028 미적용 / 백필 sweep 미완).
-    const convertedPhotos = readyPhotosByPartner.get(partnerId) ?? [];
-    const legacyPhotos = (rawPartner?.photos as string[] | null) ?? [];
-    const sourcePhotos = convertedPhotos.length > 0 ? convertedPhotos : legacyPhotos;
+    // mig 034: photos 는 profile_photos.converted_url(status='ready' 사진만,
+    //   position ASC). main_photo_unlocked / all_photos_unlocked 는 v4 로 단일
+    //   unlock 단계 (10회 도달 시 양쪽 동시 true).
+    const sourcePhotos = readyPhotosByPartner.get(partnerId) ?? [];
     const partner = rawPartner
       ? {
           id: rawPartner.id,

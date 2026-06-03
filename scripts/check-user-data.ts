@@ -10,9 +10,16 @@ async function main() {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('id, display_name, language, nationality, gender, photos, voice_intro')
+    .select('id, display_name, language, nationality, gender, voice_intro')
     .eq('id', userId)
     .maybeSingle();
+
+  // mig 034: 사진은 profiles.photos 컬럼이 아니라 profile_photos 테이블에 있음.
+  const { data: photos } = await supabase
+    .from('profile_photos')
+    .select('position, status, converted_url')
+    .eq('user_id', userId)
+    .order('position', { ascending: true });
 
   const { count: swipeCount } = await supabase
     .from('swipes')
@@ -30,6 +37,7 @@ async function main() {
     .eq('sender_id', userId);
 
   console.log('Profile:', profile ?? '(없음)');
+  console.log('Photos:', photos ?? '(없음)');
   console.log('Swipes:', swipeCount ?? 0);
   console.log('Matches:', matchCount ?? 0);
   console.log('Messages sent:', messageCount ?? 0);

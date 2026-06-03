@@ -93,7 +93,7 @@ router.delete('/:blockedId', async (req: AuthRequest, res: Response) => {
 router.get('/', async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabase
     .from('blocks')
-    .select('blocked_id, created_at, profile:profiles!blocked_id(id, display_name, photos)')
+    .select('blocked_id, created_at, profile:profiles!blocked_id(id, display_name)')
     .eq('blocker_id', req.userId!)
     .order('created_at', { ascending: false });
 
@@ -102,7 +102,38 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  res.json(data);
+  // mig 034: profiles.photos 컬럼 폐지. 차단 상대 썸네일은 profile_photos 의 메인
+  // (position=0, status='ready') converted_url 을 별도 조회해 profile.photos 배열로
+  // 미러 (FE 차단 목록 shape 유지).
+  const blockedIds = (data ?? []).map((row: any) => row.blocked_id as string);
+  const mainPhotoByUser = new Map<string, string>();
+  if (blockedIds.length > 0) {
+    const { data: photoRows, error: photoErr } = await supabase
+      .from('profile_photos')
+      .select('user_id, converted_url, status, position')
+      .in('user_id', blockedIds)
+      .eq('status', 'ready')
+      .eq('position', 0);
+    if (photoErr) {
+      console.error('[block.list.profile_photos_select_failed]', photoErr.message);
+    } else {
+      ((photoRows ?? []) as Array<{ user_id: string; converted_url: string | null }>).forEach((r) => {
+        if (r.converted_url) mainPhotoByUser.set(r.user_id, r.converted_url);
+      });
+    }
+  }
+
+  const withPhotos = (data ?? []).map((row: any) => {
+    const main = mainPhotoByUser.get(row.blocked_id);
+    return {
+      ...row,
+      profile: row.profile
+        ? { ...row.profile, photos: main ? [main] : [] }
+        : row.profile,
+    };
+  });
+
+  res.json(withPhotos);
 });
 
 export default router;

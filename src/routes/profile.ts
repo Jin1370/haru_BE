@@ -112,16 +112,9 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
       .map((r) => r.converted_url as string);
   }
 
-  // 호환성: profile_photos 테이블에 행이 하나도 없는 환경(mig 028 미적용 또는 백필
-  // 미실행 dev DB)에서만 옛 profiles.photos 배열로 폴백한다. 행이 있으면(설령 전부
-  // 변환 중이라 ready 가 0개여도) readyPhotos([])를 그대로 쓴다. 옛 조건
-  // (readyPhotos.length>0)은 "1장뿐인 사진이 변환 중"일 때 옛 legacy 배열의 삭제된
-  // URL 로 폴백해, 메인 슬롯이 inflight(스피너/blur) 대신 깨진 ready 이미지로
-  // 렌더되던 버그를 유발했다.
-  const responsePhotos =
-    photoStatuses.length > 0
-      ? readyPhotos
-      : ((data.photos as string[] | null) ?? []);
+  // mig 034: profiles.photos 컬럼 폐지. photos 응답은 profile_photos 의 ready
+  // converted_url 만 사용. 행이 없으면 빈 배열 (회원가입 직후 / 변환 대기).
+  const responsePhotos = readyPhotos;
 
   res.json({ ...data, photos: responsePhotos, photo_statuses: photoStatuses });
 });
@@ -273,12 +266,9 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
   // setProfile(updated) 로 store 를 덮어쓸 때 photos 가 레거시 profiles.photos
   // (mig 028 이후 비어있음) + photo_statuses=undefined 로 바뀌어, 프로필 탭의
   // 사진이 전부 사라지던 회귀를 유발했다 (앱 재시작 시 GET /me 폴백으로만 복구).
+  // mig 034: profiles.photos 컬럼 폐지. photos 는 profile_photos snapshot 만 사용.
   const snapshot = await loadPhotoSnapshot(req.userId!);
-  const responsePhotos =
-    snapshot.photo_statuses.length > 0
-      ? snapshot.photos
-      : ((data.photos as string[] | null) ?? []);
-  res.json({ ...data, photos: responsePhotos, photo_statuses: snapshot.photo_statuses });
+  res.json({ ...data, photos: snapshot.photos, photo_statuses: snapshot.photo_statuses });
 });
 
 // 프로필 사진 재배치 (photo-reorder-no-reconvert sprint).
@@ -357,30 +347,23 @@ router.post('/photos', requireNotFrozen, upload.single('photo'), async (req: Aut
     return;
   }
 
-  // 현재 사진 개수 — profile_photos 테이블 기준 (5장 cap).
-  // mig 028 미적용 환경 폴백: profiles.photos 배열 사용.
+  // 현재 사진 개수 — profile_photos 테이블 기준 (5장 cap). mig 034 로 profiles.photos
+  // 컬럼이 폐지돼 옛 배열 폴백은 제거. 조회 실패 시 500 가시화 (silent-success 금지).
   const photosCountResult = await supabase
     .from('profile_photos')
     .select('id, position', { count: 'exact' })
     .eq('user_id', req.userId!);
 
-  let currentCount = 0;
-  const usedPositions = new Set<number>();
   if (photosCountResult.error) {
     console.error('[profile.photos.count_select_failed]', photosCountResult.error.message);
-    // 폴백: 옛 photos 배열 length.
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('photos')
-      .eq('id', req.userId!)
-      .single();
-    const currentPhotos: string[] = (profile?.photos as string[] | null) ?? [];
-    currentCount = currentPhotos.length;
-  } else {
-    const rows = (photosCountResult.data ?? []) as Array<{ id: string; position: number }>;
-    currentCount = rows.length;
-    rows.forEach((r) => usedPositions.add(r.position));
+    res.status(500).json({ error: photosCountResult.error.message });
+    return;
   }
+
+  const usedPositions = new Set<number>();
+  const rows = (photosCountResult.data ?? []) as Array<{ id: string; position: number }>;
+  const currentCount = rows.length;
+  rows.forEach((r) => usedPositions.add(r.position));
 
   if (currentCount >= MAX_PHOTOS) {
     res.status(400).json({ error: `Maximum ${MAX_PHOTOS} photos allowed` });

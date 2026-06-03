@@ -242,10 +242,10 @@ async function seedOne(
   const userId = userData.user.id;
 
   // 2) 기본 프로필 사진 1장 다운로드 + Storage 업로드 (DiceBear initials, PNG).
-  //    photos 컬럼은 TEXT[] 이므로 단일 URL 만 담아도 됨.
+  //    mig 034: 사진은 profile_photos 테이블에 저장 (profiles INSERT 이후).
   const photoBuf = await fetchDefaultProfilePhoto(persona.display_name);
-  const photoUrl = await uploadFile('photos', `${userId}/photo-0.png`, photoBuf, 'image/png');
-  const photoUrls = [photoUrl];
+  const photoPath = `${userId}/photo-0.png`;
+  const photoUrl = await uploadFile('photos', photoPath, photoBuf, 'image/png');
   console.log('  photo uploaded');
 
   // 3) 스톡 보이스 선택
@@ -268,13 +268,26 @@ async function seedOne(
     language: persona.language,
     voice_intro: authorText,
     interests: persona.interests,
-    photos: photoUrls,
     elevenlabs_voice_id: voice.id,
     voice_clone_status: 'ready',
     is_active: true,
   });
   if (profileErr) {
     throw new Error(`profiles INSERT 실패: ${profileErr.message}`);
+  }
+
+  // mig 034: 사진은 profile_photos 테이블에 저장. 시드 아바타는 워터컬러 변환 없이
+  //   바로 status='ready' (converted_url = 업로드한 DiceBear URL) 로 등록해야
+  //   discover/match 에 노출된다.
+  const { error: photoErr } = await supabase.from('profile_photos').insert({
+    user_id: userId,
+    position: 0,
+    original_path: photoPath,
+    converted_url: photoUrl,
+    status: 'ready',
+  });
+  if (photoErr) {
+    throw new Error(`profile_photos INSERT 실패: ${photoErr.message}`);
   }
 
   // 5) user_preferences INSERT (크로스언어 선호)

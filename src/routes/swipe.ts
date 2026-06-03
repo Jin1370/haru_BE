@@ -284,12 +284,21 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   //
   // 호환성 폴백: profile_photos 에서 ready 사진이 없고 옛 profiles.photos 배열에는
   // 있는 환경 (mig 028 미적용 또는 백필 sweep 미완) — 옛 photos[0] 사용.
+  const slot = pickViewerSlot(viewerLanguage);
   const visible = (data ?? []).filter((row: any) => {
     if (!row.language) return false;
     if (viewerLanguage && row.language === viewerLanguage) return false;
     const hasConverted = readyPhotosByUser.has(row.id);
     const legacyPhotos = (row.photos as string[] | null) ?? [];
     if (!hasConverted && legacyPhotos.length === 0) return false;
+    // 차별점 1 강제: voice clone 없거나 voice intro 미작성이면 시청자 언어 슬롯이
+    // 비어있다. voice_intro_audio 는 voice clone 보유 + voice intro 텍스트 작성 시에만
+    // 합성되므로, 슬롯 URL 부재 = 둘 중 하나라도 없음. 무음 카드(SwipeCard 재생
+    // 버튼 disabled)를 디스커버 노출 단계에서 원천 제외한다.
+    const slotUrls = (row.voice_intro_audio_urls ?? {}) as Partial<
+      Record<VoiceIntroSlotLanguage, string | null>
+    >;
+    if (!slotUrls[slot]) return false;
     return true;
   });
 
@@ -322,7 +331,7 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   // photo-watercolor-pipeline sprint: photos[0] 은 profile_photos.converted_url
   //   (변환본). 변환 미완료 사용자는 위 visible 단계에서 이미 제거됨.
   // mig 011: voice_intro_audio_urls 에서 시청자 언어 슬롯만 추출해 단일 URL 미러.
-  const slot = pickViewerSlot(viewerLanguage);
+  // (slot 은 visible 필터 직전에 이미 계산됨.)
   const results = scored.slice(0, limit).map(({ _tier, _intra, created_at, photos, voice_intro_audio_urls, ...rest }) => {
     const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<Record<VoiceIntroSlotLanguage, string | null>>;
     const convertedUrl = readyPhotosByUser.get(rest.id as string);
@@ -468,12 +477,20 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   //    cross-language 정책은 디스커버와 동일하게 적용 (받은 좋아요 풀에 같은 언어가
   //    있다면 그건 viewer 언어 설정 이전에 받은 좋아요. 현재 정책상 노출 차단).
   //    호환성 폴백: profile_photos 없으면 옛 photos 배열.
+  const slot = pickViewerSlot(viewerLanguage);
   const visible = (profiles ?? []).filter((row: any) => {
     if (!row.language) return false;
     if (viewerLanguage && row.language === viewerLanguage) return false;
     const hasConverted = readyPhotosByUser.has(row.id);
     const legacyPhotos = (row.photos as string[] | null) ?? [];
     if (!hasConverted && legacyPhotos.length === 0) return false;
+    // 차별점 1 강제 (디스커버와 동일): voice clone 없거나 voice intro 미작성이면
+    // 시청자 언어 슬롯이 비어있어 SwipeCard 재생 버튼이 disabled 가 된다. 받은
+    // 좋아요도 같은 SwipeCard 를 재사용하므로 무음 카드를 노출 단계에서 제외.
+    const slotUrls = (row.voice_intro_audio_urls ?? {}) as Partial<
+      Record<VoiceIntroSlotLanguage, string | null>
+    >;
+    if (!slotUrls[slot]) return false;
     return true;
   });
 
@@ -513,8 +530,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   // 6) 응답 가공 — discover 와 동일하게 사진 1장 / photo_access 잠금 / voice intro
   //    시청자 언어 슬롯 미러. FE SwipeCard 재사용을 보장하기 위해 shape 일치.
   // photo-watercolor-pipeline sprint: photos[0] 은 profile_photos.converted_url
-  //   (변환본). 폴백은 옛 photos[0].
-  const slot = pickViewerSlot(viewerLanguage);
+  //   (변환본). 폴백은 옛 photos[0]. (slot 은 visible 필터 직전에 이미 계산됨.)
   const results = scored.map(({ _tier, _likeIndex, photos, voice_intro_audio_urls, created_at, ...rest }) => {
     const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<
       Record<VoiceIntroSlotLanguage, string | null>

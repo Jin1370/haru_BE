@@ -326,6 +326,23 @@ export const swaggerDocument = {
         },
       },
     },
+    '/api/auth/apple': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Apple Sign In 로그인',
+        security: [],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['id_token'], properties: { id_token: { type: 'string' } } } } },
+        },
+        responses: {
+          200: { description: '로그인 성공', content: { 'application/json': { schema: { type: 'object', properties: { access_token: { type: 'string' }, refresh_token: { type: 'string' }, user: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, email: { type: 'string', format: 'email' } } } } } } } },
+          400: { description: 'id_token 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 정지 (frozen) — code: account_frozen', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
+        },
+      },
+    },
     '/api/auth/refresh': {
       post: {
         tags: ['Auth'],

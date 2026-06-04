@@ -299,6 +299,44 @@ router.post('/google', async (req: Request, res: Response) => {
   });
 });
 
+// Apple Sign In 토큰으로 Supabase 세션 생성 (App Store Guideline 4.8 — Google 로그인
+// 제공 시 Sign in with Apple 동등 제공 필수). /google 핸들러를 그대로 미러 — Supabase
+// signInWithIdToken 이 provider 만 'apple' 로 바뀌면 토큰 서명 검증·유저 생성/조회·세션
+// 발급을 동일하게 처리한다. nonce 는 native (expo-apple-authentication) 흐름에서 생략 가능
+// (Supabase Apple provider 가 Authorized Client IDs 로 aud=bundleId 를 검증).
+router.post('/apple', async (req: Request, res: Response) => {
+  const { id_token } = req.body;
+
+  if (!id_token) {
+    res.status(400).json({ error: 'id_token is required' });
+    return;
+  }
+
+  const { data, error } = await supabaseAuth.auth.signInWithIdToken({
+    provider: 'apple',
+    token: id_token,
+  });
+
+  if (error) {
+    res.status(401).json({ error: error.message });
+    return;
+  }
+
+  if (data.user && (await isAccountFrozen(data.user.id))) {
+    res.status(403).json({ error: 'Account frozen', code: 'account_frozen' });
+    return;
+  }
+
+  res.json({
+    access_token: data.session?.access_token,
+    refresh_token: data.session?.refresh_token,
+    user: {
+      id: data.user?.id,
+      email: data.user?.email,
+    },
+  });
+});
+
 // 비밀번호 변경 — 현재 비밀번호 검증 후 갱신.
 //   WRONG_CURRENT_PASSWORD  현재 비밀번호 미스매치 (또는 OAuth 가입자라 비밀번호 자체가 없음)
 //   PASSWORD_FORMAT         새 비밀번호가 서버 정책 위반

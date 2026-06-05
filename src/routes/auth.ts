@@ -68,44 +68,34 @@ function mapSignupError(message: string | undefined): AuthErrorCode | null {
 // already-registered users to prevent enumeration, but never actually
 // sends a new mail when the existing row is confirmed).
 //
-// GoTrue's admin /users endpoint does NOT honour an `?email=` filter (it
-// silently ignores unknown query params and returns the first page of all
-// users), so we fetch pages via the SDK and scan client-side. Service-role
+// Resolved via the `lookup_email_identity` RPC (mig 035) — an O(1) indexed
+// lookup on auth.users(email) instead of paginating admin.listUsers
+// client-side. The old scan added hundreds of ms ~ seconds to *every* signup
+// (the new user can sit on a later page; robo/test accounts make it worse),
+// which was the dominant in-code contributor to signup latency. Service-role
 // authenticated, no email side effect.
 //
-// Fails closed: any error returns null and the caller falls back to whatever
-// code Supabase returned originally.
-//
-// TODO: replace with a Postgres RPC ('SELECT id, email_confirmed_at FROM
-// auth.users WHERE email = $1') once the user base outgrows the scan window
-// — current cap (50 pages × 1000 = 50k users) is comfortable for early-stage
-// but not production-scale.
+// Fails closed: any error (incl. the RPC not yet applied → PGRST202) returns
+// null and the caller falls back to whatever code Supabase returned originally.
 type EmailIdentity = { exists: boolean; confirmed: boolean };
 
 async function findEmailIdentity(email: string): Promise<EmailIdentity | null> {
   const target = email.trim().toLowerCase();
   if (target.length === 0) return { exists: false, confirmed: false };
-  try {
-    const PER_PAGE = 1000;
-    const MAX_PAGES = 50;
-    for (let page = 1; page <= MAX_PAGES; page++) {
-      const { data, error } = await supabase.auth.admin.listUsers({
-        page,
-        perPage: PER_PAGE,
-      });
-      if (error || !data) return null;
-      const found = data.users.find(
-        (u) => typeof u.email === 'string' && u.email.toLowerCase() === target,
-      );
-      if (found) {
-        return { exists: true, confirmed: Boolean(found.email_confirmed_at) };
-      }
-      if (data.users.length < PER_PAGE) return { exists: false, confirmed: false };
-    }
-    return null;
-  } catch {
+  const { data, error } = await supabase.rpc('lookup_email_identity', {
+    p_email: target,
+  });
+  if (error) {
+    // Visible per the error-visibility rule — silent skip would hide a missing
+    // migration / permission regression. Fail closed (null) so the caller uses
+    // Supabase's original code rather than mislabelling an existing account.
+    console.error('[auth.lookup_email_identity_failed]', { error: error.message });
     return null;
   }
+  // SQL TABLE-returning RPC → array of rows; the aggregate always yields one.
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) return { exists: false, confirmed: false };
+  return { exists: Boolean(row.user_exists), confirmed: Boolean(row.is_confirmed) };
 }
 
 async function emailExists(email: string): Promise<boolean | null> {

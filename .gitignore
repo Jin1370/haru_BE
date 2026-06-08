@@ -36,3 +36,6 @@ coverage/
 
 # Supabase CLI scratch (auto-managed)
 supabase/.temp/
+
+# dev 환경 마이그 일괄 적용용 로컬 헬퍼 (migrations/ 에서 재생성 가능, 커밋 불필요)
+dev_migrations_bundle.sql

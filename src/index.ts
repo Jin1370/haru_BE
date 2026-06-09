@@ -7,6 +7,7 @@ import { env } from './config/env';
 import { swaggerDocument } from './swagger';
 import { errorMiddleware } from './middleware/error';
 import configRoutes from './routes/config';
+import waitlistRoutes from './routes/waitlist';
 import authRoutes from './routes/auth';
 import profileRoutes from './routes/profile';
 import voiceRoutes from './routes/voice';
@@ -90,6 +91,8 @@ app.get('/health', (_req, res) => {
 // 강제 업데이트 게이트 — 인증 불필요. authMiddleware 없는 router 라 부팅 시
 // 로그인 전에도 호출 가능 (옛 앱이 BE 와 통신하기 전에 차단되도록).
 app.use('/api/config', configRoutes);
+// 랜딩페이지 출시 대기자 모집 폼 — 인증 불필요한 공개 라우트 (가입 전 방문자).
+app.use('/api/waitlist', waitlistRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/voice', voiceRoutes);

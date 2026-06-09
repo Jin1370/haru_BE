@@ -303,6 +303,37 @@ export const swaggerDocument = {
       },
     },
 
+    '/api/waitlist': {
+      post: {
+        tags: ['System'],
+        summary: '출시 대기자 모집 폼 제출 — 인증 불필요',
+        description:
+          '랜딩페이지(web) 상단의 "무료 체험" 폼이 호출. 메일 주소 + 기종을 waitlist 에 upsert. 같은 메일 재제출은 onConflict 로 흡수.',
+        security: [],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['email', 'device_model'],
+                properties: {
+                  email: { type: 'string', format: 'email' },
+                  device_model: { type: 'string', example: 'iPhone 15 Pro' },
+                  locale: { type: 'string', enum: ['ko', 'en', 'ja'] },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          201: { description: '접수 성공', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean', example: true } } } } } },
+          400: { description: '입력 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: '저장 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
     // ── Auth ──
     '/api/auth/signup': {
       post: {

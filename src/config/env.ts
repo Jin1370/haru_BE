@@ -138,6 +138,21 @@ export const env = {
       .parse(process.env.VOICE_RECLONE_WINDOW_DAYS),
   },
 
+  // 강제 업데이트 게이트 (최소판). 인증 불필요한 GET /api/config 로 노출.
+  // FE 가 부팅 시 자기 앱 버전과 minVersion 을 비교해 미만이면 차단 화면을 띄운다.
+  // 스키마를 깨는 BE/DB 변경 시 MIN_APP_VERSION 을 올리면 그 미만 앱(옛 응답 형태를
+  // 기대하는 클라이언트)을 끊어낸다. 평소엔 1.0.0 그대로 둬서 아무도 안 막힘.
+  // 마이그 없음 — 값은 env 라 재배포(또는 env 변경 + 재시작)만으로 조정.
+  // 스토어 URL 도 서버가 제공 — 잘못된 링크를 앱에 박제하지 않고 나중에 교체 가능.
+  // iOS 는 App Store 등록 전이라 기본 빈 문자열 (FE 가 빈 값이면 버튼 숨김).
+  appConfig: {
+    minVersion: process.env.MIN_APP_VERSION || '1.0.0',
+    iosStoreUrl: process.env.IOS_STORE_URL || '',
+    androidStoreUrl:
+      process.env.ANDROID_STORE_URL ||
+      'https://play.google.com/store/apps/details?id=com.haruvoice.app',
+  },
+
   // Email confirmation flow (Supabase enable_confirmations=true 정합).
   // signUp 시 emailRedirectTo 로 전달되며 Supabase Auth 가 보낸 확인 메일의
   // 링크 destination 이 된다. Supabase Dashboard 의 Redirect URLs allow-list

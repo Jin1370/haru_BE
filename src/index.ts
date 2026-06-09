@@ -6,6 +6,7 @@ import swaggerUi from 'swagger-ui-express';
 import { env } from './config/env';
 import { swaggerDocument } from './swagger';
 import { errorMiddleware } from './middleware/error';
+import configRoutes from './routes/config';
 import authRoutes from './routes/auth';
 import profileRoutes from './routes/profile';
 import voiceRoutes from './routes/voice';
@@ -86,6 +87,9 @@ app.get('/health', (_req, res) => {
 });
 
 // Routes
+// 강제 업데이트 게이트 — 인증 불필요. authMiddleware 없는 router 라 부팅 시
+// 로그인 전에도 호출 가능 (옛 앱이 BE 와 통신하기 전에 차단되도록).
+app.use('/api/config', configRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/voice', voiceRoutes);

@@ -276,6 +276,33 @@ export const swaggerDocument = {
       },
     },
 
+    '/api/config': {
+      get: {
+        tags: ['System'],
+        summary: '앱 설정 조회 (강제 업데이트 게이트) — 인증 불필요',
+        description:
+          'FE 가 부팅 시 호출. 자기 앱 버전이 min_version 미만이면 차단 화면을 띄운다. 값은 BE env (MIN_APP_VERSION / ANDROID_STORE_URL / IOS_STORE_URL).',
+        security: [],
+        responses: {
+          200: {
+            description: 'OK',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    min_version: { type: 'string', example: '1.0.0' },
+                    ios_store_url: { type: 'string', example: '' },
+                    android_store_url: { type: 'string', example: 'https://play.google.com/store/apps/details?id=com.haruvoice.app' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+
     // ── Auth ──
     '/api/auth/signup': {
       post: {

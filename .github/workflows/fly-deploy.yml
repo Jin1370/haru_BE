@@ -1,10 +1,18 @@
 # See https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
 
 name: Fly Deploy
+# prod 배포 게이트: main 푸시로는 배포되지 않는다. `v*` 태그를 푸시할 때만
+# Fly(haru-be → prod Supabase)로 배포된다. 일상적인 push 는 백업/공유용으로
+# 안전하며, 릴리스는 의도적으로 태그를 끊어야만 나간다.
+#   평소:  git push                       → 배포 안 함
+#   릴리스: git tag v1.0.1 && git push --tags → prod 배포
+# workflow_dispatch 는 코드 변경 없이(예: Fly secret 변경 후) 수동 재배포용
+# 비상구 — Actions 탭에서 'Run workflow' 버튼. 자동 배포 차단 보장은 유지.
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
 jobs:
   deploy:
     name: Deploy app

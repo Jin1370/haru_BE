@@ -367,6 +367,38 @@ export const swaggerDocument = {
         },
       },
     },
+    '/api/auth/verify-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: '이메일 인증 코드(OTP) 검증 — 성공 시 세션 발급',
+        security: [],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['email', 'token'], properties: { email: { type: 'string', format: 'email' }, token: { type: 'string', description: '메일로 받은 6자리 코드' } } } } },
+        },
+        responses: {
+          200: { description: '인증 성공 (세션 발급)', content: { 'application/json': { schema: { type: 'object', properties: { access_token: { type: 'string' }, refresh_token: { type: 'string' }, user: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, email: { type: 'string', format: 'email' } } } } } } } },
+          400: { description: '코드 누락 또는 만료/불일치 — code: OTP_INVALID', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '계정 정지 (frozen) — code: account_frozen', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
+        },
+      },
+    },
+    '/api/auth/resend-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: '이메일 인증 코드 재발송 (60초 쿨다운)',
+        security: [],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['email'], properties: { email: { type: 'string', format: 'email' } } } } },
+        },
+        responses: {
+          200: { description: '재발송 성공', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' } } } } } },
+          400: { description: 'email 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          429: { description: '쿨다운/레이트리밋 — code: OTP_RATE_LIMIT | OTP_RESEND_FAILED', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
     '/api/auth/google': {
       post: {
         tags: ['Auth'],

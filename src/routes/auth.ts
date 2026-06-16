@@ -214,6 +214,72 @@ router.post('/signup', async (req: Request, res: Response) => {
   });
 });
 
+// 이메일 인증 코드(OTP) 검증 — "Confirm email" ON 환경에서 회원가입 직후 메일로
+// 받은 6자리 코드를 입력해 인증을 완료한다. 성공 시 세션이 발급되어 login/signup
+// 과 동일한 토큰 응답을 돌려준다(웹 콜백 페이지/수동 재로그인 불필요).
+//
+// type:'signup' — auth.signUp() 의 confirm-signup 토큰 타입. resend() 가 같은
+// 'signup' 만 허용하는 것과 정합 (auth-js EmailOtpType). 만료/불일치/시도초과는
+// 카테고리를 노출하지 않고 단일 code='OTP_INVALID' 로 통일 (brute-force 힌트 최소화).
+router.post('/verify-otp', async (req: Request, res: Response) => {
+  const { email, token } = req.body;
+
+  if (!email || !token) {
+    res.status(400).json({ error: 'email and token are required' });
+    return;
+  }
+
+  const { data, error } = await supabaseAuth.auth.verifyOtp({
+    email,
+    token,
+    type: 'signup',
+  });
+
+  if (error) {
+    res.status(400).json({ error: error.message, code: 'OTP_INVALID' });
+    return;
+  }
+
+  // verifyOtp 성공 = 이메일 인증 + 세션 발급. login 과 동일하게 frozen 게이팅.
+  if (data.user && (await isAccountFrozen(data.user.id))) {
+    res.status(403).json({ error: 'Account frozen', code: 'account_frozen' });
+    return;
+  }
+
+  res.json({
+    access_token: data.session?.access_token,
+    refresh_token: data.session?.refresh_token,
+    user: {
+      id: data.user?.id,
+      email: data.user?.email,
+    },
+  });
+});
+
+// 인증 코드 재발송 — Supabase 가 60초 쿨다운 + 발송량 제한을 자체 enforce 하므로
+// 한도 초과 시 429 로 매핑해 친절히 안내. 신규 코드 발급으로 옛 코드는 무효화된다.
+router.post('/resend-otp', async (req: Request, res: Response) => {
+  const { email } = req.body;
+
+  if (!email) {
+    res.status(400).json({ error: 'email is required' });
+    return;
+  }
+
+  const { error } = await supabaseAuth.auth.resend({ type: 'signup', email });
+
+  if (error) {
+    // Supabase 쿨다운/레이트리밋 메시지 휴리스틱 분기. 단일 code 로 통일.
+    const code = /rate|second|security/i.test(error.message)
+      ? 'OTP_RATE_LIMIT'
+      : 'OTP_RESEND_FAILED';
+    res.status(429).json({ error: error.message, code });
+    return;
+  }
+
+  res.json({ ok: true });
+});
+
 // 이메일+비밀번호 로그인
 router.post('/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;

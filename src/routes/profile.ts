@@ -1,14 +1,15 @@
 import { Router, Response } from 'express';
 import multer from 'multer';
 import { supabase } from '../config/supabase';
-import { uploadFile, deleteFile, extractPath } from '../services/storage';
-import { generateVoiceIntroAudios, normalizeAuthorLanguage } from '../services/voiceIntro';
+import { uploadFile, deleteFile, extractPath, createSignedSlotUrls } from '../services/storage';
+import { generateVoiceIntroAudios, normalizeAuthorLanguage, VOICE_INTRO_BUCKET } from '../services/voiceIntro';
 import { convertProfilePhoto } from '../services/photoConversion';
 import { addWatermark } from '../services/photoWatermark';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
-import { profileUpsertSchema, photoOrderSchema } from '../schemas/profile';
+import { profileUpsertSchema, photoOrderSchema, isAdultBirthDate } from '../schemas/profile';
 import { lookupBioPhrase } from '../constants/bioPhrasesCatalog';
+import { CONSENT_POLICY_VERSION } from '../constants/consent';
 import { requireNotFrozen } from '../utils/freezeGuard';
 import { isBlocked } from '../constants/moderationDictionary';
 import { checkOpenAiModeration } from '../services/openaiModeration';
@@ -116,7 +117,19 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
   // converted_url 만 사용. 행이 없으면 빈 배열 (회원가입 직후 / 변환 대기).
   const responsePhotos = readyPhotos;
 
-  res.json({ ...data, photos: responsePhotos, photo_statuses: photoStatuses });
+  // LAUNCH_CHECKLIST #3: voice-intro-audio 가 private 버킷이므로 본인 프로필
+  // 미리듣기용 슬롯 URL 도 응답 직전 서명 URL 로 변환 (디스커버/매치와 동일 정책).
+  const signedVoiceIntroUrls = await createSignedSlotUrls(
+    VOICE_INTRO_BUCKET,
+    data.voice_intro_audio_urls as Record<string, string | null> | null,
+  );
+
+  res.json({
+    ...data,
+    voice_intro_audio_urls: signedVoiceIntroUrls,
+    photos: responsePhotos,
+    photo_statuses: photoStatuses,
+  });
 });
 
 // 내 프로필 수정 (생성 포함 - upsert)
@@ -131,7 +144,21 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
     voice_intro,
     voice_intro_phrase_id,
     interests,
+    terms_consent,
+    voice_consent,
   } = req.body;
+
+  // LAUNCH_CHECKLIST #2 — 서버측 만 18세 미만 차단. 형식·캘린더 유효성은
+  // profileUpsertSchema 가 400 으로 거른 뒤이므로, 여기서는 나이만 본다.
+  // 모더레이션 차단(message_blocked)과 동일하게 well-formed 이지만 정책상
+  // 거부되는 케이스이므로 422 + code 로 응답 (FE 가 일반 400 과 구분 가능).
+  if (!isAdultBirthDate(birth_date)) {
+    res.status(422).json({
+      error: 'You must be at least 18 years old',
+      code: 'underage',
+    });
+    return;
+  }
 
   // 기존 voice_intro를 조회해 변경 여부 판단. 바뀌지 않았으면 TTS 재생성을 건너뛰어
   // 불필요한 ElevenLabs 호출을 막는다.
@@ -247,6 +274,33 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
     return;
   }
 
+  // LAUNCH_CHECKLIST #5 — 가입 동의 기록. 동의 플래그는 signup wizard 의 최초
+  // 프로필 생성 시에만 전송된다(수정 경로 미전송 → 기존 기록 보존). 메인 upsert 와
+  // 분리한 별도 update 로 처리하는 이유: mig 039 미적용 환경에서 컬럼 부재로 인한
+  // 실패가 프로필 생성 자체를 깨뜨리지 않도록(graceful degrade — repo 패턴). 컬럼
+  // 부재 시 console.warn 만, 프로필 생성은 정상. 시각·버전은 BE 서버 시점 stamp.
+  let consentApplied: Record<string, string> = {};
+  if (terms_consent === true || voice_consent === true) {
+    const consentNow = new Date().toISOString();
+    const consentUpdate: Record<string, string> = {};
+    if (terms_consent === true) {
+      consentUpdate.terms_accepted_at = consentNow;
+      consentUpdate.consent_policy_version = CONSENT_POLICY_VERSION;
+    }
+    if (voice_consent === true) {
+      consentUpdate.voice_consent_at = consentNow;
+    }
+    const { error: consentErr } = await supabase
+      .from('profiles')
+      .update(consentUpdate)
+      .eq('id', req.userId!);
+    if (consentErr) {
+      console.warn('[profile.consent_record_failed]', consentErr.message);
+    } else {
+      consentApplied = consentUpdate;
+    }
+  }
+
   // voice_intro 가 실제로 바뀐 경우에만 다국어 오디오 파이프라인 트리거.
   // voice_clone 미보유면 스킵 (FE 폴링이 단일 컬럼/status fallback 으로 처리).
   // preset 매칭 시 presetTranslations 주입 → service 가 Gemini 단계 스킵.
@@ -268,7 +322,46 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
   // 사진이 전부 사라지던 회귀를 유발했다 (앱 재시작 시 GET /me 폴백으로만 복구).
   // mig 034: profiles.photos 컬럼 폐지. photos 는 profile_photos snapshot 만 사용.
   const snapshot = await loadPhotoSnapshot(req.userId!);
-  res.json({ ...data, photos: snapshot.photos, photo_statuses: snapshot.photo_statuses });
+  // LAUNCH_CHECKLIST #3: GET /me 와 동일하게 voice intro 슬롯 URL 서명. FE 가
+  // 이 응답으로 setProfile 을 덮어쓰므로(위 주석) private 버킷 raw URL 이 store 에
+  // 들어가면 본인 미리듣기가 깨진다. voiceIntroChanged 시엔 {} 라 결과도 {}.
+  const signedVoiceIntroUrls = await createSignedSlotUrls(
+    VOICE_INTRO_BUCKET,
+    data.voice_intro_audio_urls as Record<string, string | null> | null,
+  );
+  res.json({
+    ...data,
+    ...consentApplied,
+    voice_intro_audio_urls: signedVoiceIntroUrls,
+    photos: snapshot.photos,
+    photo_statuses: snapshot.photo_statuses,
+  });
+});
+
+// LAUNCH_CHECKLIST #5 — 재동의 기록 엔드포인트.
+// 신규 가입자는 PUT /me 최초 생성 경로에서 동의가 기록되지만, mig 039 이전에 이미
+// 가입한 기존 회원은 동의 컬럼이 NULL 이다. 이들이 앱 진입 시 재동의 모달에서
+// 동의하면 본 라우트가 호출되어 동의 시각·버전을 기록한다 (소급 "간주" 금지 —
+// 본인의 명시적 동의 행위로만 기록). 향후 정책 버전 변경에 따른 재동의에도 재사용.
+router.post('/consent', async (req: AuthRequest, res: Response) => {
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from('profiles')
+    .update({
+      terms_accepted_at: now,
+      consent_policy_version: CONSENT_POLICY_VERSION,
+      voice_consent_at: now,
+    })
+    .eq('id', req.userId!);
+  if (error) {
+    res.status(500).json({ error: error.message });
+    return;
+  }
+  res.json({
+    terms_accepted_at: now,
+    consent_policy_version: CONSENT_POLICY_VERSION,
+    voice_consent_at: now,
+  });
 });
 
 // 프로필 사진 재배치 (photo-reorder-no-reconvert sprint).

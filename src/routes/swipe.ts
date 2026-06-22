@@ -7,6 +7,8 @@ import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
 import { sendPushToUser } from '../services/pushNotifications';
 import { requireNotFrozen } from '../utils/freezeGuard';
 import { env } from '../config/env';
+import { createSignedUrlFromStored } from '../services/storage';
+import { VOICE_INTRO_BUCKET } from '../services/voiceIntro';
 
 // 시청자 언어 → 보이스 인트로 슬롯 매핑 (mig 011).
 // ko/ja/en 활성. th/hi/그 외/null 은 'en' 폴백 (FE 의 영문 강제 정책과 일관).
@@ -332,16 +334,24 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   //   미완료 사용자는 위 visible 단계에서 이미 제거됨.
   // mig 011: voice_intro_audio_urls 에서 시청자 언어 슬롯만 추출해 단일 URL 미러.
   // (slot 은 visible 필터 직전에 이미 계산됨.)
-  const results = scored.slice(0, limit).map(({ _tier, _intra, created_at, voice_intro_audio_urls, ...rest }) => {
-    const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<Record<VoiceIntroSlotLanguage, string | null>>;
-    const photoUrls: string[] = (readyPhotosByUser.get(rest.id as string) ?? []).slice(0, 1);
-    return {
-      ...rest,
-      voice_intro_audio_url: (slotUrls[slot] as string | null | undefined) ?? null,
-      photos: photoUrls,
-      photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
-    };
-  });
+  // LAUNCH_CHECKLIST #3: voice-intro-audio 버킷이 private 로 전환되므로, 저장된
+  // public 형식 URL 을 응답 직전 짧은 TTL 서명 URL 로 변환한다 (영구 URL 익명
+  // 대량 수집 차단). 후보 수는 limit (기본 10) 이라 Promise.all 병렬로 충분.
+  const results = await Promise.all(
+    scored.slice(0, limit).map(async ({ _tier, _intra, created_at, voice_intro_audio_urls, ...rest }) => {
+      const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<Record<VoiceIntroSlotLanguage, string | null>>;
+      const photoUrls: string[] = (readyPhotosByUser.get(rest.id as string) ?? []).slice(0, 1);
+      return {
+        ...rest,
+        voice_intro_audio_url: await createSignedUrlFromStored(
+          VOICE_INTRO_BUCKET,
+          slotUrls[slot] as string | null | undefined,
+        ),
+        photos: photoUrls,
+        photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
+      };
+    }),
+  );
 
   res.json(results);
 });
@@ -527,18 +537,25 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   //    시청자 언어 슬롯 미러. FE SwipeCard 재사용을 보장하기 위해 shape 일치.
   // mig 034: photos[0] 은 profile_photos.converted_url(메인). (slot 은 visible
   //   필터 직전에 이미 계산됨.)
-  const results = scored.map(({ _tier, _likeIndex, voice_intro_audio_urls, created_at, ...rest }) => {
-    const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<
-      Record<VoiceIntroSlotLanguage, string | null>
-    >;
-    const photoUrls: string[] = (readyPhotosByUser.get(rest.id as string) ?? []).slice(0, 1);
-    return {
-      ...rest,
-      voice_intro_audio_url: (slotUrls[slot] as string | null | undefined) ?? null,
-      photos: photoUrls,
-      photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
-    };
-  });
+  // LAUNCH_CHECKLIST #3: discover 와 동일 — private 버킷 전환에 맞춰 응답 직전
+  // voice intro slot URL 을 짧은 TTL 서명 URL 로 변환.
+  const results = await Promise.all(
+    scored.map(async ({ _tier, _likeIndex, voice_intro_audio_urls, created_at, ...rest }) => {
+      const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<
+        Record<VoiceIntroSlotLanguage, string | null>
+      >;
+      const photoUrls: string[] = (readyPhotosByUser.get(rest.id as string) ?? []).slice(0, 1);
+      return {
+        ...rest,
+        voice_intro_audio_url: await createSignedUrlFromStored(
+          VOICE_INTRO_BUCKET,
+          slotUrls[slot] as string | null | undefined,
+        ),
+        photos: photoUrls,
+        photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
+      };
+    }),
+  );
 
   res.json(results);
 });

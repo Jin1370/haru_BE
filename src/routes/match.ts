@@ -6,6 +6,8 @@ import { validateQuery } from '../middleware/validate';
 import { requireNotFrozen } from '../utils/freezeGuard';
 import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
 import { pickViewerSlot } from './swipe';
+import { createSignedUrlFromStored } from '../services/storage';
+import { VOICE_INTRO_BUCKET } from '../services/voiceIntro';
 
 const matchListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional().default(20),
@@ -328,10 +330,16 @@ router.get('/:matchId/partner', async (req: AuthRequest, res: Response) => {
     Record<VoiceIntroSlotLanguage, string | null>
   >;
 
+  // LAUNCH_CHECKLIST #3: private 버킷 전환에 맞춰 저장된 public URL → 짧은 TTL 서명 URL.
+  const voiceIntroAudioUrl = await createSignedUrlFromStored(
+    VOICE_INTRO_BUCKET,
+    slotUrls[slot] as string | null | undefined,
+  );
+
   res.json({
     birth_date: (partnerResult.data.birth_date as string | null) ?? '',
     interests: (partnerResult.data.interests as string[] | null) ?? [],
-    voice_intro_audio_url: (slotUrls[slot] as string | null | undefined) ?? null,
+    voice_intro_audio_url: voiceIntroAudioUrl,
   });
 });
 

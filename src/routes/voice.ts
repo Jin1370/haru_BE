@@ -67,6 +67,28 @@ router.post('/clone', requireNotFrozen, upload.single('audio'), async (req: Auth
   }
 
   try {
+    // LAUNCH_CHECKLIST #5: 음성(생체정보) 처리는 별도 동의(voice_consent_at)가
+    // 기록된 경우에만 허용 (PIPA §23). 동의는 가입 동의 모달에서 받아 PUT /me 가
+    // 기록한다. server-authoritative — 모달을 우회한 직접 API 호출도 동의 없이는
+    // 클론 생성 불가. mig 039 미적용 환경은 컬럼 부재 → graceful degrade(통과)로
+    // 회귀 방지 (출시 시 mig 적용 필수, 적용 후 게이트 발효).
+    {
+      const { data: consentRow, error: consentErr } = await supabase
+        .from('profiles')
+        .select('voice_consent_at')
+        .eq('id', req.userId!)
+        .single();
+      if (consentErr) {
+        console.warn('[voice.clone.voice_consent_column_missing]', consentErr.message);
+      } else if (!consentRow?.voice_consent_at) {
+        res.status(403).json({
+          error: 'Voice (biometric) processing consent is required',
+          code: 'voice_consent_required',
+        });
+        return;
+      }
+    }
+
     // 정책: voice-clone 보유자는 부분 삭제가 불가능하고 "재생성"만 가능. 즉
     // 본 라우트는 신규 등록 + 재등록(덮어쓰기) 두 경로를 모두 책임진다.
     // 기존 voice_id 가 있으면 새 clone 생성 성공 후 옛 voice 는 fire-and-forget

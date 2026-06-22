@@ -32,7 +32,7 @@ import {
 //   * 부분 실패 정책 권고 D 무시 — 재시도/알림 없음.
 //   * voice_clone(elevenlabs_voice_id) 없으면 호출 자체 안 함 (caller 가드).
 
-const VOICE_INTRO_BUCKET = 'voice-intro-audio';
+export const VOICE_INTRO_BUCKET = 'voice-intro-audio';
 
 // FE 의 `DISPLAYABLE_BIO_LANGUAGES = ['ko','en','ja']` + 영문 강제 정책 답습.
 // th/hi 작성자는 영어로만 voice_intro 입력 가능 → 'en' 슬롯으로 정규화.

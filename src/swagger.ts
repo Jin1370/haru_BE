@@ -488,17 +488,19 @@ export const swaggerDocument = {
           200: { description: '성공', content: { 'application/json': { schema: { $ref: '#/components/schemas/Profile' } } } },
           400: { description: '유효성 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
-          // voice-intro-moderation-unification sprint: voice_intro 변경 시 사전 차단 +
-          // OpenAI Moderation 2차 검수. 응답 shape 는 메시지와 동일 (FE 핸들러 재사용).
+          // 422 케이스 2종 (well-formed 이나 정책상 거부):
+          //  - code=underage: 만 18세 미만 (LAUNCH_CHECKLIST #2)
+          //  - code=message_blocked: voice_intro 모더레이션 차단
+          //    (voice-intro-moderation-unification sprint, 응답 shape 는 메시지와 동일)
           422: {
-            description: 'voice_intro 모더레이션 차단 — code: message_blocked',
+            description: '정책 거부 — code: underage (만 18세 미만) 또는 message_blocked (voice_intro 모더레이션)',
             content: {
               'application/json': {
                 schema: {
                   type: 'object',
                   properties: {
-                    error: { type: 'string', example: 'Voice intro contains restricted expressions' },
-                    code: { type: 'string', example: 'message_blocked' },
+                    error: { type: 'string', example: 'You must be at least 18 years old' },
+                    code: { type: 'string', enum: ['underage', 'message_blocked'] },
                   },
                 },
               },

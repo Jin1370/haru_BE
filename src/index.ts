@@ -2,8 +2,10 @@ import './instrument'; // Sentry init — 반드시 다른 import보다 먼저
 import * as Sentry from '@sentry/node';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import swaggerUi from 'swagger-ui-express';
 import { env } from './config/env';
+import { authLimiter, waitlistLimiter } from './middleware/rateLimit';
 import { swaggerDocument } from './swagger';
 import { errorMiddleware } from './middleware/error';
 import configRoutes from './routes/config';
@@ -24,6 +26,21 @@ import { startAuditCleanupScheduler } from './jobs/cleanupAuditTables';
 import { startPhotoConversionRetryScheduler } from './jobs/retryFailedPhotoConversions';
 
 export const app = express();
+
+// Fly.io 등 리버스 프록시 뒤에서 실제 클라이언트 IP 를 req.ip 로 인식하게 한다
+// (단일 프록시 홉 신뢰). 이게 없으면 rate limit 이 모든 사용자를 프록시 IP 하나로
+// 묶어 무력화된다. 값을 number(1)로 두는 이유: `true`(전체 신뢰)는 X-Forwarded-For
+// 위조로 한도 우회가 가능해 express-rate-limit 이 경고하기 때문. 로컬(프록시 없음)
+// 에선 XFF 헤더가 없어 socket IP 가 그대로 쓰여 무해.
+app.set('trust proxy', 1);
+
+// 보안 HTTP 헤더 — clickjacking(투명 iframe 덮어쓰기) / MIME sniffing(타입 추측
+// 실행) / referrer 누수 등을 브라우저 차원에서 차단. cors 앞에 등록.
+// CSP 는 비활성 — 이 BE 는 JSON API 이고 유일한 HTML 표면인 Swagger UI(/docs)의
+// 인라인 스타일/스크립트를 깨지 않기 위함. CSP 도입 + prod /docs 게이트는 별도
+// 과제(체크리스트 17)로 분리. CORP 도 비활성 — admin/web 크로스오리진 소비는
+// 아래 CORS 로 이미 제어하므로 same-origin CORP 가 그 경로를 막지 않게 한다.
+app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false }));
 
 // CORS — production 에서는 화이트리스트 strict, 개발 환경은 와이드 오픈 유지.
 // CORS_ALLOWED_ORIGINS env 가 set 되어 있으면 콤마 분리 origin 만 허용.
@@ -92,8 +109,10 @@ app.get('/health', (_req, res) => {
 // 로그인 전에도 호출 가능 (옛 앱이 BE 와 통신하기 전에 차단되도록).
 app.use('/api/config', configRoutes);
 // 랜딩페이지 출시 대기자 모집 폼 — 인증 불필요한 공개 라우트 (가입 전 방문자).
-app.use('/api/waitlist', waitlistRoutes);
-app.use('/api/auth', authRoutes);
+// waitlistLimiter: 무작위 이메일 대량 제출로 인한 무한 row 증식 차단.
+app.use('/api/waitlist', waitlistLimiter, waitlistRoutes);
+// authLimiter: credential stuffing(유출 비번 대량 시도) 차단.
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/voice', voiceRoutes);
 app.use('/api/discover', swipeRoutes);

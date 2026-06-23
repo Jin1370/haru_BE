@@ -153,6 +153,23 @@ export const env = {
       'https://play.google.com/store/apps/details?id=com.haruvoice.app',
   },
 
+  // 레이트리밋 (helmet + express-rate-limit 도입). credential stuffing(유출 비번
+  // 대량 시도) + waitlist 무작위 이메일 폭주를 IP 기준 빈도 제한으로 차단.
+  // ⚠️ 모바일 CGNAT — 통신사가 다수 사용자를 같은 공인 IP 로 묶으므로 한도를
+  // 너무 빡세게 잡으면 정상 사용자가 false-lock 된다. 기본값은 봇 플러드
+  // (초당 수백~수천 시도) 만 막고 정상 사용은 절대 안 걸리는 넉넉한 수준.
+  // 필요 시 env 로 조정. NODE_ENV=test 에선 미들웨어가 skip (테스트 flakiness 방지).
+  rateLimit: {
+    authWindowMin: z.coerce.number().int().min(1).max(1440).default(15)
+      .parse(process.env.AUTH_RATE_LIMIT_WINDOW_MIN),
+    authMax: z.coerce.number().int().min(1).max(100000).default(50)
+      .parse(process.env.AUTH_RATE_LIMIT_MAX),
+    waitlistWindowMin: z.coerce.number().int().min(1).max(1440).default(60)
+      .parse(process.env.WAITLIST_RATE_LIMIT_WINDOW_MIN),
+    waitlistMax: z.coerce.number().int().min(1).max(100000).default(20)
+      .parse(process.env.WAITLIST_RATE_LIMIT_MAX),
+  },
+
   // Email confirmation flow (Supabase enable_confirmations=true 정합).
   // signUp 시 emailRedirectTo 로 전달되며 Supabase Auth 가 보낸 확인 메일의
   // 링크 destination 이 된다. Supabase Dashboard 의 Redirect URLs allow-list

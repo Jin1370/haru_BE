@@ -37,8 +37,9 @@ app.set('trust proxy', 1);
 // 보안 HTTP 헤더 — clickjacking(투명 iframe 덮어쓰기) / MIME sniffing(타입 추측
 // 실행) / referrer 누수 등을 브라우저 차원에서 차단. cors 앞에 등록.
 // CSP 는 비활성 — 이 BE 는 JSON API 이고 유일한 HTML 표면인 Swagger UI(/docs)의
-// 인라인 스타일/스크립트를 깨지 않기 위함. CSP 도입 + prod /docs 게이트는 별도
-// 과제(체크리스트 17)로 분리. CORP 도 비활성 — admin/web 크로스오리진 소비는
+// 인라인 스타일/스크립트를 깨지 않기 위함. CSP 도입은 별도 과제로 분리(JSON API 라
+// 우선순위 낮음). prod /docs 게이트는 아래 Swagger mount 분기에서 처리(체크리스트 17).
+// CORP 도 비활성 — admin/web 크로스오리진 소비는
 // 아래 CORS 로 이미 제어하므로 same-origin CORP 가 그 경로를 막지 않게 한다.
 app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false }));
 
@@ -63,6 +64,17 @@ const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS ?? '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+
+// prod fail-closed (체크리스트 17) — CORS_ALLOWED_ORIGINS 미설정 시 "전체 허용"
+// fallback 으로 조용히 넘어가지 않고 부팅을 막는다. 설정 누락을 즉시 노출해
+// 아무 사이트나 API 를 호출하는 상태를 차단. dev/test(NODE_ENV !== production)는
+// 아래 wide-open fallback 을 그대로 유지하므로 로컬 개발은 영향 없음.
+if (allowedOrigins.length === 0 && env.nodeEnv === 'production') {
+  throw new Error(
+    'CORS_ALLOWED_ORIGINS must be set in production (fail-closed). ' +
+      '콤마로 구분된 허용 origin 목록을 prod 환경변수에 설정하세요.',
+  );
+}
 
 if (allowedOrigins.length > 0) {
   app.use(
@@ -96,8 +108,14 @@ if (allowedOrigins.length > 0) {
 
 app.use(express.json());
 
-// Swagger
-app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+// Swagger (/docs) — API 설명서(HTML). prod 에선 서버 구조·엔드포인트 노출을 막기
+// 위해 mount 자체를 생략한다 (체크리스트 17). dev/test 는 그대로 열려 개발에 무영향.
+// prod 에서 일시 확인이 필요하면 NODE_ENV 를 바꾸지 말고 별도 시크릿 게이트를 후속 도입.
+if (env.nodeEnv !== 'production') {
+  app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+} else {
+  console.log('[startup] Swagger /docs disabled in production');
+}
 
 // Health check
 app.get('/health', (_req, res) => {

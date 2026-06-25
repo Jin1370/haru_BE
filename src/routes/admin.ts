@@ -253,7 +253,9 @@ router.post('/notify-sink', adminSecretGuard, async (req, res) => {
         dev_user_id: acc.id,
         expo_push_token: tk.expo_push_token,
         platform: tk.platform,
-        label: nameById.get(acc.id) ?? acc.email ?? null,
+        // label 은 알림 제목 "haru · <label>" 에 노출. 테스터 요청으로 닉네임
+        // 대신 이메일 사용 (계정 식별이 더 명확). 이메일 없으면 표시명 폴백.
+        label: acc.email ?? nameById.get(acc.id) ?? null,
       })),
     );
     const { error: upErr } = await supabase

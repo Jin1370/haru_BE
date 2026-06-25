@@ -179,6 +179,10 @@ export async function sendPushToUser(
     const name =
       payload.type === 'message' ? payload.sender_name : payload.matched_name;
     const body = buildPushBody(payload.type as PushMessageType, locale, name);
+    // dev 알림 싱크(label 있는 토큰)는 테스터 폰 1대 전용이라 수신 dev 계정의
+    // 언어(ja 등)와 무관하게 한국어로 고정 — 테스터 가독성. 실유저 토큰(label
+    // null)은 위 수신자 언어 body 그대로.
+    const sinkBody = buildPushBody(payload.type as PushMessageType, 'ko', name);
 
     const data: Record<string, string> = { type: payload.type, match_id: payload.match_id };
     if (payload.type === 'message') {
@@ -194,7 +198,7 @@ export async function sendPushToUser(
       // label 있는 토큰(dev 알림 싱크)은 "haru · <수신계정명>" 으로 어느 계정
       // 알림인지 구분. 실유저 토큰(label null)은 기존대로 'haru'.
       title: t.label ? `haru · ${t.label}` : 'haru',
-      body,
+      body: t.label ? sinkBody : body,
       data,
       channelId: 'default',
       priority: 'high' as const,

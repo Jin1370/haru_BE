@@ -1,4 +1,5 @@
 import { supabase } from '../config/supabase';
+import { env } from '../config/env';
 import { buildPushBody, resolvePushLocale, type PushMessageType } from '../constants/pushMessages';
 
 // 페이로드 — data 영역에는 type + match_id + sender_id 만. 번역 본문/음성 URL
@@ -117,13 +118,50 @@ export async function sendPushToUser(
       }
     }
 
-    // 3) 토큰 조회 — 다기기 허용 (배열)
+    // 3) 토큰 조회 — 다기기 허용 (배열). 실유저 일반 토큰은 label 없음.
     const { data: tokens } = await supabase
       .from('device_tokens')
       .select('expo_push_token')
       .eq('user_id', receiverId);
 
-    if (!tokens || tokens.length === 0) {
+    const tokenList: { expo_push_token: string; label: string | null }[] = (
+      (tokens as DeviceTokenRow[] | null) ?? []
+    ).map((t) => ({ expo_push_token: t.expo_push_token, label: null }));
+
+    // 3.5) dev/QA 알림 싱크 (mig 040) — 한 테스터 폰으로 여러 dev seed 계정의
+    // 푸시를 모아 받기 위한 매핑. 실유저 push 경로(device_tokens)와 분리된 dev
+    // 전용 테이블이며 ADMIN_DASHBOARD_ENABLED 일 때만 조회한다 (출시 빌드에서는
+    // 쿼리 자체가 실행되지 않아 prod 푸시 경로 무영향). label 은 수신 계정 표시명
+    // — 한 폰에 여러 계정 알림이 섞여도 어느 계정 알림인지 제목으로 구분.
+    if (env.admin.dashboardEnabled) {
+      const { data: sinks, error: sinkError } = await supabase
+        .from('dev_notification_sinks')
+        .select('expo_push_token, label')
+        .eq('dev_user_id', receiverId);
+      if (sinkError) {
+        console.error('[sendPushToUser] dev sink select error:', sinkError.message);
+      } else if (sinks) {
+        for (const s of sinks as { expo_push_token: string; label: string | null }[]) {
+          tokenList.push({ expo_push_token: s.expo_push_token, label: s.label });
+        }
+      }
+    }
+
+    // 같은 토큰이 device_tokens 와 sink 양쪽에 잡히면 1회만 발송 — label 있는 쪽을
+    // 우선해 수신 계정명을 보여준다.
+    const byToken = new Map<string, string | null>();
+    for (const t of tokenList) {
+      const existing = byToken.get(t.expo_push_token);
+      if (existing === undefined || (existing === null && t.label !== null)) {
+        byToken.set(t.expo_push_token, t.label);
+      }
+    }
+    const dedupedTokens = [...byToken.entries()].map(([expo_push_token, label]) => ({
+      expo_push_token,
+      label,
+    }));
+
+    if (dedupedTokens.length === 0) {
       return;
     }
 
@@ -150,10 +188,12 @@ export async function sendPushToUser(
     // priority: 'high' — FCM 측에서 즉시 wakeup + Android Notification Channel
     // 의 IMPORTANCE_HIGH 와 결합해 화면 상단 헤드업/플로팅 배너로 노출시킨다.
     // 'default' 면 doze/대기 상태에서 지연 + 헤드업 미노출. APNs 는 무관.
-    const messages = (tokens as DeviceTokenRow[]).map((t) => ({
+    const messages = dedupedTokens.map((t) => ({
       to: t.expo_push_token,
       sound: 'default' as const,
-      title: 'haru',
+      // label 있는 토큰(dev 알림 싱크)은 "haru · <수신계정명>" 으로 어느 계정
+      // 알림인지 구분. 실유저 토큰(label null)은 기존대로 'haru'.
+      title: t.label ? `haru · ${t.label}` : 'haru',
       body,
       data,
       channelId: 'default',
@@ -187,7 +227,7 @@ export async function sendPushToUser(
     // details.error 만 마스킹된 토큰 prefix 와 함께 로그.
     const invalidTokens: string[] = [];
     tickets.forEach((ticket, idx) => {
-      const t = (tokens as DeviceTokenRow[])[idx];
+      const t = dedupedTokens[idx];
       const maskedToken = t ? `${t.expo_push_token.slice(0, 24)}...` : '?';
       if (
         ticket.status === 'error' &&
@@ -206,6 +246,13 @@ export async function sendPushToUser(
         .from('device_tokens')
         .delete()
         .in('expo_push_token', invalidTokens);
+      // dev 알림 싱크에도 같은 죽은 토큰이 복제돼 있으면 함께 정리.
+      if (env.admin.dashboardEnabled) {
+        await supabase
+          .from('dev_notification_sinks')
+          .delete()
+          .in('expo_push_token', invalidTokens);
+      }
     }
   } catch (error) {
     console.error('[sendPushToUser] unhandled error:', error);

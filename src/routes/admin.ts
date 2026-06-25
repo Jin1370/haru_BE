@@ -133,4 +133,165 @@ router.get('/accounts', adminSecretGuard, async (_req, res) => {
   }
 });
 
+// ===== dev 알림 싱크 (mig 040) =====
+//
+// 테스터 폰 1대로 모든 dev seed 계정의 푸시 알림을 받기 위한 매핑 관리.
+// 폰에 로그인된 실계정의 expo_push_token 을 모든 dev seed 계정 앞으로 복제한다.
+// sendPushToUser 가 (어드민 활성 시) dev_notification_sinks 도 조회해 발송.
+
+// is_dev_seed=true 인 auth.users 전체 스캔 (페이지네이션).
+async function listSeedUsers(): Promise<{ id: string; email: string | null }[]> {
+  const seedUsers: { id: string; email: string | null }[] = [];
+  const perPage = 1000;
+  for (let page = 1; ; page++) {
+    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
+    if (error) throw new Error(`listUsers failed: ${error.message}`);
+    for (const user of data.users) {
+      const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
+      if (meta.is_dev_seed === true) {
+        seedUsers.push({ id: user.id, email: user.email ?? null });
+      }
+    }
+    if (data.users.length < perPage) break;
+  }
+  return seedUsers;
+}
+
+// 현재 싱크 상태 조회.
+router.get('/notify-sink', adminSecretGuard, async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('dev_notification_sinks')
+      .select('dev_user_id, expo_push_token, label');
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    const rows = data ?? [];
+    const tokens = new Set(rows.map((r) => r.expo_push_token));
+    const accounts = new Set(rows.map((r) => r.dev_user_id));
+    res.json({
+      linked_accounts: accounts.size,
+      tokens: tokens.size,
+      labels: [...new Set(rows.map((r) => r.label).filter(Boolean))] as string[],
+    });
+  } catch (err) {
+    console.error('[admin/notify-sink GET] error:', err);
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+  }
+});
+
+// 싱크 연결 — body { sink_email }. 해당 계정의 device_tokens 를 모든 dev seed
+// 계정 앞으로 복제. 폰 토큰이 회전(rotate)하면 다시 호출해 재동기화한다.
+router.post('/notify-sink', adminSecretGuard, async (req, res) => {
+  try {
+    const sinkEmail =
+      typeof req.body?.sink_email === 'string' ? req.body.sink_email.trim() : '';
+    if (!sinkEmail) {
+      res.status(400).json({ error: 'sink_email 이 필요합니다' });
+      return;
+    }
+
+    // 1) 이메일로 사용자 찾기 (전체 스캔 — admin SDK 에 getByEmail 없음).
+    let sinkUserId: string | null = null;
+    const perPage = 1000;
+    for (let page = 1; ; page++) {
+      const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
+      if (error) {
+        res.status(500).json({ error: `listUsers failed: ${error.message}` });
+        return;
+      }
+      const hit = data.users.find(
+        (u) => (u.email ?? '').toLowerCase() === sinkEmail.toLowerCase(),
+      );
+      if (hit) {
+        sinkUserId = hit.id;
+        break;
+      }
+      if (data.users.length < perPage) break;
+    }
+    if (!sinkUserId) {
+      res.status(404).json({ error: `'${sinkEmail}' 계정을 찾을 수 없습니다` });
+      return;
+    }
+
+    // 2) 그 계정의 푸시 토큰 (폰에서 로그인 + 알림 권한 허용 시 등록됨).
+    const { data: srcTokens, error: tokErr } = await supabase
+      .from('device_tokens')
+      .select('expo_push_token, platform')
+      .eq('user_id', sinkUserId);
+    if (tokErr) {
+      res.status(500).json({ error: tokErr.message });
+      return;
+    }
+    if (!srcTokens || srcTokens.length === 0) {
+      res.status(400).json({
+        error:
+          '해당 계정에 등록된 푸시 토큰이 없습니다. 그 계정으로 폰에 로그인 + 알림 권한 허용 후 다시 시도하세요.',
+      });
+      return;
+    }
+
+    // 3) dev seed 계정 + 표시명.
+    const seedUsers = await listSeedUsers();
+    if (seedUsers.length === 0) {
+      res.status(400).json({ error: 'dev seed 계정이 없습니다' });
+      return;
+    }
+    const { data: profiles } = await supabase
+      .from('profiles')
+      .select('id, display_name')
+      .in(
+        'id',
+        seedUsers.map((u) => u.id),
+      );
+    const nameById = new Map((profiles ?? []).map((p) => [p.id, p.display_name as string]));
+
+    // 4) 모든 (dev 계정 × 토큰) 조합 upsert.
+    const rows = seedUsers.flatMap((acc) =>
+      srcTokens.map((tk) => ({
+        dev_user_id: acc.id,
+        expo_push_token: tk.expo_push_token,
+        platform: tk.platform,
+        label: nameById.get(acc.id) ?? acc.email ?? null,
+      })),
+    );
+    const { error: upErr } = await supabase
+      .from('dev_notification_sinks')
+      .upsert(rows, { onConflict: 'dev_user_id,expo_push_token' });
+    if (upErr) {
+      res.status(500).json({ error: upErr.message });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      sink_email: sinkEmail,
+      account_count: seedUsers.length,
+      token_count: srcTokens.length,
+    });
+  } catch (err) {
+    console.error('[admin/notify-sink POST] error:', err);
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+  }
+});
+
+// 싱크 전체 해제.
+router.delete('/notify-sink', adminSecretGuard, async (_req, res) => {
+  try {
+    const { error, count } = await supabase
+      .from('dev_notification_sinks')
+      .delete({ count: 'exact' })
+      .not('id', 'is', null);
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    res.json({ cleared: count ?? 0 });
+  } catch (err) {
+    console.error('[admin/notify-sink DELETE] error:', err);
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+  }
+});
+
 export default router;

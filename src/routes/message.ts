@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import * as Sentry from '@sentry/node';
 import { supabase } from '../config/supabase';
 import { uploadFile } from '../services/storage';
 import { synthesizeSpeech, type PersonaGender } from '../services/elevenlabs';
@@ -632,6 +633,12 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
   } catch (error) {
     console.error(`[processAndInsertMessage] pipeline error messageId=${messageId}:`, error);
     console.dir(error, { depth: null });
+    // 곱게 catch 한 외부 의존성(번역/TTS/Storage) 실패는 Sentry 자동수집 대상이
+    // 아니므로 명시 보고 — 전체 장애(예: googleapis egress 차단) 를 첫 건에 감지.
+    Sentry.captureException(error, {
+      tags: { pipeline: 'message', stage: 'translate_tts' },
+      extra: { messageId, matchId, senderLang, recipientLang },
+    });
     // 파이프라인 실패 → 텍스트만 전송 (audio_url=null, audio_status='failed').
     // 송신자는 본인 메시지가 'failed' 인디케이터로 뜨고, 같은 텍스트를 다시
     // 입력해 재송신할 수 있다. mid-session UPDATE 가 없으므로 expo-audio

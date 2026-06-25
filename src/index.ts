@@ -1,3 +1,4 @@
+import './net-ipv4'; // outbound DNS IPv4-first — Fly IPv6→googleapis egress fix (must precede any HTTPS)
 import './instrument'; // Sentry init — 반드시 다른 import보다 먼저
 import * as Sentry from '@sentry/node';
 import express from 'express';

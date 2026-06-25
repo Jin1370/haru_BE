@@ -1,4 +1,5 @@
 import { supabase } from '../config/supabase';
+import * as Sentry from '@sentry/node';
 import { uploadFile, deleteFile, extractPath } from './storage';
 import { synthesizeSpeech, type PersonaGender } from './elevenlabs';
 import { translateVoiceIntro } from './translation';
@@ -160,6 +161,10 @@ async function synthesizeSlot(args: {
     });
   } catch (err) {
     console.error(`[Voice intro synth failed] userId=${userId} lang=${lang}`, err);
+    Sentry.captureException(err, {
+      tags: { pipeline: 'voice_intro', stage: 'synth' },
+      extra: { userId, lang },
+    });
     await setSlotStatus(userId, lang, 'failed').catch((statusErr) =>
       console.error('[Voice intro status update failed]', statusErr),
     );
@@ -248,6 +253,10 @@ export async function generateVoiceIntroAudios(
           .eq('id', userId);
       } catch (err) {
         console.error(`[Voice intro translate failed] userId=${userId}`, err);
+        Sentry.captureException(err, {
+          tags: { pipeline: 'voice_intro', stage: 'translate' },
+          extra: { userId },
+        });
         await markSlotsFailed(userId, targetLangs);
       }
     }

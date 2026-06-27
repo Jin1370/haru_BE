@@ -21,6 +21,6 @@
 
 ## 4. 책임·연락
 - 총괄: 개인정보 보호책임자 (임세진)
-- 접수·문의: sejinim02@gmail.com
+- 접수·문의: haru.official.app@gmail.com
 
 > 본 절차는 운영 변화·법령 개정에 따라 갱신한다. 공개 통지 조항은 `haru_FE/web/content/legal/privacy.{ko,en,ja}.md` §6 참조.

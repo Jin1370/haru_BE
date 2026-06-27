@@ -40,8 +40,15 @@
 
 ### 다운로드
 
-- **App Store** → [하루 — 목소리 데이팅](https://apps.apple.com/kr/app/%ED%95%98%EB%A3%A8-%EB%AA%A9%EC%86%8C%EB%A6%AC-%EB%8D%B0%EC%9D%B4%ED%8C%85-%EC%99%B8%EA%B5%AD%EC%9D%B8-%EC%86%8C%EA%B0%9C%ED%8C%85/id6779128759)
-- **Google Play** → [하루](https://play.google.com/store/apps/details?id=com.haruvoice.app&hl=ko&gl=KR)
+<p align="center">
+  <a href="https://apps.apple.com/kr/app/%ED%95%98%EB%A3%A8-%EB%AA%A9%EC%86%8C%EB%A6%AC-%EB%8D%B0%EC%9D%B4%ED%8C%85-%EC%99%B8%EA%B5%AD%EC%9D%B8-%EC%86%8C%EA%B0%9C%ED%8C%85/id6779128759">
+    <img alt="App Store에서 다운로드" src="https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg" height="52">
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://play.google.com/store/apps/details?id=com.haruvoice.app&hl=ko&gl=KR">
+    <img alt="Google Play에서 다운로드" src="https://play.google.com/intl/ko/badges/static/images/badges/ko_badge_web_generic.png" height="76">
+  </a>
+</p>
 
 ---
 
@@ -176,7 +183,6 @@ OPENAI_API_KEY=...
 
 # 운영 정책
 AUTO_FREEZE_REPORT_THRESHOLD=3                  # 신고 누적 자동 freeze 임계치
-ADMIN_DASHBOARD_ENABLED=true                    # 출시 시 false 로 반드시 차단
 ```
 
 ---
@@ -195,8 +201,7 @@ src/
 │   ├── block.ts             # 차단 (양방향 가시성 차단)
 │   ├── report.ts            # 신고 → 누적 시 자동 freeze
 │   ├── notifications.ts     # 푸시 토큰 등록 + 선호 토글
-│   ├── preference.ts        # 매칭 선호도 (나이/성별/언어/국가)
-│   └── admin.ts             # dev/QA 전용 (ADMIN_DASHBOARD_ENABLED 게이트)
+│   └── preference.ts        # 매칭 선호도 (나이/성별/언어/국가)
 │
 ├── services/                # 외부 의존성 통합
 │   ├── elevenlabs.ts        # voice clone 생성 + eleven_v3 TTS

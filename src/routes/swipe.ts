@@ -587,19 +587,34 @@ router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, r
   const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
   const { fromIso, toIso, localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
 
-  const { count, error } = await supabase
-    .from('swipes')
-    .select('id', { count: 'exact', head: true })
-    .eq('swiper_id', req.userId!)
-    .gte('created_at', fromIso)
-    .lt('created_at', toIso);
+  // 오늘 사용한 스와이프 수(한도용) + viewer 의 pass 행 존재 여부(버튼 게이트용)를
+  // 병렬 조회. has_passes 는 "넘긴 사람이 실제로 있을 때만" 버튼을 노출하기 위한 신호 —
+  // pass 는 서버에 누적되므로(어제 넘긴 것 포함) FE 세션만으론 알 수 없어 서버가 전달.
+  const [usedResult, passResult] = await Promise.all([
+    supabase
+      .from('swipes')
+      .select('id', { count: 'exact', head: true })
+      .eq('swiper_id', req.userId!)
+      .gte('created_at', fromIso)
+      .lt('created_at', toIso),
+    supabase
+      .from('swipes')
+      .select('id', { count: 'exact', head: true })
+      .eq('swiper_id', req.userId!)
+      .eq('direction', 'pass'),
+  ]);
 
-  if (error) {
-    res.status(500).json({ error: error.message });
+  if (usedResult.error) {
+    res.status(500).json({ error: usedResult.error.message });
     return;
   }
+  // pass count 실패는 quota 본질(오늘 카운트)과 무관한 보조 신호 — 실패 시 가시화
+  // (console.error) + has_passes=false 로 안전 degrade (버튼만 숨김, quota 는 정상).
+  if (passResult.error) {
+    console.error('[quota] pass count failed:', passResult.error.message);
+  }
 
-  const used = count ?? 0;
+  const used = usedResult.count ?? 0;
   res.json({
     count: used,
     limit: DISCOVER_MAX_PER_DAY,
@@ -609,6 +624,9 @@ router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, r
     // "넘긴 사람 다시 보기" 버튼 노출을 결정한다 — 새 config 엔드포인트 신설 대신
     // 이미 마운트 시 호출하는 quota 응답에 boolean 1개를 얹어 가장 가볍게 전달.
     pass_reset_enabled: env.discover.passResetEnabled,
+    // 넘긴 사람 존재 여부. FE 는 pass_reset_enabled && has_passes 일 때만 버튼 노출 —
+    // 애초에 넘긴 적 없는(원래 빈 풀) 사용자에게 버튼이 뜨는 어색함을 제거.
+    has_passes: (passResult.count ?? 0) > 0,
   });
 });
 

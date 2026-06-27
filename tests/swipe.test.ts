@@ -38,6 +38,13 @@ vi.mock('../src/config/env', () => ({
     moderation: { autoFreezeReportThreshold: 3 },
     voice: { recloneMonthlyCap: 2, recloneWindowDays: 30 },
     auth: { emailConfirmRedirectUrl: 'http://localhost/cb' },
+    // rateLimit 미들웨어가 src/index.ts import 시점에 읽는다 — 누락 시 suite 로드 실패.
+    rateLimit: {
+      authWindowMin: 15,
+      authMax: 50,
+      waitlistWindowMin: 60,
+      waitlistMax: 30,
+    },
   },
 }));
 

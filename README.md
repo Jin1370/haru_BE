@@ -8,7 +8,7 @@
 [![Express](https://img.shields.io/badge/Express-5-000)](https://expressjs.com/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-이 레포는 백엔드(Express + Supabase) 만 다룹니다. **모바일 클라이언트는 별도 레포** → [`perso-devrel/haru_FE`](https://github.com/perso-devrel/haru_FE)
+이 레포는 백엔드(Express + Supabase) 만 다룹니다. **모바일 클라이언트는 별도 레포** → [`Jin1370/haru_FE`](https://github.com/Jin1370/haru_FE)
 
 ---
 
@@ -126,7 +126,7 @@ POST /api/matches/:id/messages   ───┐
 
 ```bash
 # 1) BE — 이 레포
-git clone https://github.com/perso-devrel/haru_BE
+git clone https://github.com/Jin1370/haru_BE
 cd haru_BE
 npm install
 cp .env.example .env       # 값 채우기 (아래 환경 변수 섹션)
@@ -138,7 +138,7 @@ cp .env.example .env       # 값 채우기 (아래 환경 변수 섹션)
 npm run dev                # http://localhost:3000  (Swagger: /docs)
 
 # 4) FE 클론 + 띄우기 (별도 레포)
-git clone https://github.com/perso-devrel/haru_FE
+git clone https://github.com/Jin1370/haru_FE
 cd ../haru_FE
 npm install --legacy-peer-deps
 cp .env.example .env       # 값 채우기 (FE 레포 README 참고)
@@ -278,7 +278,7 @@ npx vitest run tests/message.test.ts          # 단일 파일
 
 ## 함께 보는 레포
 
-- **FE (Expo + React Native)** → [`perso-devrel/haru_FE`](https://github.com/perso-devrel/haru_FE)
+- **FE (Expo + React Native)** → [`Jin1370/haru_FE`](https://github.com/Jin1370/haru_FE)
 
 추가로:
 - [`CLAUDE.md`](CLAUDE.md) — 전체 컨벤션 + 메시지 파이프라인 상세 + sprint 회고

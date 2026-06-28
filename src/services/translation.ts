@@ -37,7 +37,10 @@ Rules:
 - Detect the source language from the text itself.
 - If the text is already in the target language, return it unchanged in
   "translation" and report the actual language in "detected_source_language".
-- Preserve meaning fully. Do NOT abbreviate or shorten.
+- Sound like a real person texting someone they're interested in — warm, natural, and conversational. NEVER translate word-for-word. Render what a native speaker would actually type in this situation, not a literal gloss.
+- Translate interjections and emotional expressions to their natural target-language equivalent, NOT their dictionary form. Examples (en→ko): "Aww" → "아유~"/"아~" (affection, NOT "아이고~" which sounds like dismay); "Haha" → "ㅋㅋ"; "Oh no" → "헐"/"이런". Pick the equivalent that carries the same warmth.
+- The source may be broken, abbreviated, or grammatically off (typos, dropped words like "that me smile" meaning "that made me smile"). Infer the intended meaning and translate that naturally — do NOT reproduce the brokenness.
+- Preserve meaning and emotional intent fully. Do NOT abbreviate or shorten.
 - CRITICAL: Inline ElevenLabs audio tags written as [laughs], [sad], or similar [single_word] forms in square brackets, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
 - Match the source register: default to polite tone, but preserve casual register if the source is clearly casual:
   - Korean: 해요체 (편한 존댓말) by default. Avoid stiff 습니다체 unless the source is clearly formal. Allow 반말 only if the source is clearly 반말.
@@ -59,7 +62,7 @@ const model = vertexAi.getGenerativeModel({
     },
     generationConfig: {
         responseMimeType: "application/json",
-        temperature: 0.3,
+        temperature: 0.4,
     },
     safetySettings: SAFETY_SETTINGS,
 });

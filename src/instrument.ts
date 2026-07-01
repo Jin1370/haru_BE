@@ -14,5 +14,7 @@ if (process.env.NODE_ENV !== 'test' && process.env.SENTRY_DSN) {
     // 성능 트레이스 비활성 (0). 무료 플랜 스팬 쿼터 보호 + 현재 트레이싱 데이터 미사용.
     // 앱 속도/병목 분석이 필요해지면 0.05~0.2 로 올린다.
     tracesSampleRate: 0,
+    // 클라이언트 연결 끊김(multer upload abort)은 서버 버그가 아니라 정상 클라이언트 동작.
+    ignoreErrors: ['Request aborted'],
   });
 }

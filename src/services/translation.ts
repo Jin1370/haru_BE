@@ -34,9 +34,8 @@ const SAFETY_SETTINGS = [
 const SYSTEM_PROMPT = `You translate chat messages between strangers on a dating app.
 
 Rules:
-- Detect the source language from the text itself.
-- If the text is already in the target language, return it unchanged in
-  "translation" and report the actual language in "detected_source_language".
+- Always render the text as a native speaker of the target language would naturally write it — regardless of what language the source appears to be in. Do not skip this step or return the input unchanged just because it looks short, simple, or superficially similar to the target language.
+- The "target language" refers only to what language the OUTPUT must be written in. It has nothing to do with what the message is about. A message that mentions a country, nationality, or language by name (e.g. asking "Are you Korean?" or "Do you speak Japanese?") must still be fully translated into the target language — do not treat topical references to the target language/country as if the text were already written in it.
 - Sound like a real person texting someone they're interested in — warm, natural, and conversational. NEVER translate word-for-word. Render what a native speaker would actually type in this situation, not a literal gloss.
 - Translate interjections and emotional expressions to their natural target-language equivalent, NOT their dictionary form. Examples (en→ko): "Aww" → "아유~"/"아~" (affection, NOT "아이고~" which sounds like dismay); "Haha" → "ㅋㅋ"; "Oh no" → "헐"/"이런". Pick the equivalent that carries the same warmth.
 - The source may be broken, abbreviated, or grammatically off (typos, dropped words like "that me smile" meaning "that made me smile"). Infer the intended meaning and translate that naturally — do NOT reproduce the brokenness.
@@ -52,7 +51,7 @@ Rules:
 - Return valid JSON only.
 
 Output schema:
-{ "translation": string, "detected_source_language": string }`;
+{ "translation": string }`;
 
 const model = vertexAi.getGenerativeModel({
     model: "gemini-2.5-flash",
@@ -70,7 +69,7 @@ const model = vertexAi.getGenerativeModel({
 export async function translateMessage(params: {
     text: string;
     targetLanguage: string;
-}): Promise<{ translation: string; detectedSourceLanguage: string }> {
+}): Promise<{ translation: string }> {
     const userPrompt = `Target language: ${params.targetLanguage}
 Text to translate: ${JSON.stringify(params.text)}`;
 
@@ -82,15 +81,9 @@ Text to translate: ${JSON.stringify(params.text)}`;
     if (!raw) {
         throw new Error("Vertex AI returned no text (possibly safety-blocked)");
     }
-    const parsed = JSON.parse(raw) as {
-        translation: string;
-        detected_source_language: string;
-    };
+    const parsed = JSON.parse(raw) as { translation: string };
 
-    return {
-        translation: parsed.translation,
-        detectedSourceLanguage: parsed.detected_source_language,
-    };
+    return { translation: parsed.translation };
 }
 
 // ─── Voice intro domain (mig 011) ─────────────────────────────────────────

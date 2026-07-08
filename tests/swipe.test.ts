@@ -1,14 +1,16 @@
-// discover-pass-reset sprint — DELETE /api/discover/passes 회귀.
+// discover-pass-reset + discover-like-limit sprint 회귀.
 //
-// 기능: viewer 의 direction='pass' 스와이프 행 일괄 삭제 → pass 했던 후보 재등장.
-//   * like 행·매치 무변경 (direction='pass' eq 로 본인 pass 행만 타겟)
-//   * IDOR 차단 (.eq('swiper_id', viewer))
-//   * env 게이트 (DISCOVER_PASS_RESET_ENABLED=false → 403 pass_reset_disabled)
-//   * { count: 'exact' } 삭제 행 수 반환
+// (1) DELETE /api/discover/passes — pass 스와이프 리셋 (기존 6케이스).
+// (2) POST /api/discover/swipe — 하루 like 예산 캡 + 매치완성 like/pass 면제 (신규).
+// (3) GET  /api/discover/quota — 오늘 소모한 like 예산 카운트 (신규).
 //
 // 라이브 DB(live integration) 대신 모듈 경계 mock 패턴 — voiceIntroModeration.test.ts
-// 와 동일. supabase / env 를 hoisted mock 으로 잡아 (a) delete 쿼리 체인에 정확히
-// swiper_id + direction='pass' eq 가 걸리는지 (b) env 토글 시 403 분기를 검증.
+// 와 동일. supabase / env / pushNotifications 를 hoisted mock 으로 잡아
+//   * pass 삭제 쿼리 체인(swiper_id + direction='pass' eq)
+//   * like 예산 소모 여부(counts_toward_limit) 가 swipe 시점에 확정 저장되는지
+//   * 매치 완성 like / pass 가 캡을 우회(면제)하는지
+//   * quota count 가 캡과 동일 정의(direction='like' AND counts_toward_limit=true)로 세는지
+// 를 검증한다.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
@@ -33,6 +35,7 @@ vi.mock('../src/config/env', () => ({
       get passResetEnabled() {
         return envState.passResetEnabled;
       },
+      dailyLikeLimit: 15,
     },
     admin: { dashboardEnabled: false, secret: '' },
     moderation: { autoFreezeReportThreshold: 3 },
@@ -48,49 +51,107 @@ vi.mock('../src/config/env', () => ({
   },
 }));
 
-// ── supabase mock — profiles(select for requireNotFrozen) + swipes(delete) ──
+// 매치 성사 시 fire-and-forget 로 호출되는 push — 실 네트워크 회피용 no-op mock.
+vi.mock('../src/services/pushNotifications', () => ({
+  sendPushToUser: vi.fn(async () => {}),
+}));
+
+// ── supabase mock — 라우트별 쿼리 체인을 table + op + eq/opts 로 분기해 결과 반환 ──
 const captured = vi.hoisted(() => ({
+  // 공통 (freeze 가드)
+  frozen: { is_active: true as boolean, frozen_at: null as null | string },
+
+  // POST /swipe
+  reciprocal: { data: null as null | { id: string }, error: null as null | { code?: string; message: string } },
+  budgetCount: { count: 0, error: null as null | { message: string } }, // counts_toward_limit=true count (cap + quota-like)
+  passCount: { count: 0, error: null as null | { message: string } },   // direction='pass' count (quota only)
+  insertError: null as null | { code?: string; message: string },       // swipes insert
+  matchInsert: { data: null as null | Record<string, unknown>, error: null as null | { code?: string; message: string } },
+  matchExisting: { data: null as null | Record<string, unknown>, error: null as null | { message: string } },
+
+  // DELETE /passes
+  deleteResult: { count: 0, error: null as null | { message: string } },
+
+  // captured artifacts
+  swipeInsertPayload: null as null | Record<string, unknown>,
+  budgetCountEqs: [] as Array<{ col: string; val: unknown }>,
   deleteEqCalls: [] as Array<{ col: string; val: unknown }>,
   deleteOptions: null as unknown,
-  deleteResult: { count: 0, error: null as null | { message: string } },
 }));
 
 vi.mock('../src/config/supabase', () => {
+  function resolveTerminal(b: any): any {
+    const t = b._table;
+    if (t === 'profiles') {
+      // .in() 체인 = 매치 push 의 display_name 조회. 그 외 = freeze 가드 maybeSingle.
+      if (b._hasIn) return { data: [], error: null };
+      return { data: captured.frozen, error: null };
+    }
+    if (t === 'swipes') {
+      if (b._op === 'insert') return { error: captured.insertError };
+      if (b._op === 'delete') return captured.deleteResult;
+      // select
+      const hasCount = b._selectOpts && b._selectOpts.count;
+      if (hasCount) {
+        if (b._eqs.some((e: any) => e.col === 'direction' && e.val === 'pass')) {
+          return captured.passCount;
+        }
+        // counts_toward_limit=true 예산 count (POST 캡 + GET quota-like 공유)
+        captured.budgetCountEqs = b._eqs;
+        return captured.budgetCount;
+      }
+      // count 없는 select+single = reciprocal 조회
+      return captured.reciprocal;
+    }
+    if (t === 'matches') {
+      if (b._op === 'insert') return captured.matchInsert;
+      return captured.matchExisting;
+    }
+    return { data: null, error: null };
+  }
+
   function makeBuilder(table: string): any {
-    const builder: any = {
+    const b: any = {
       _table: table,
-      _op: 'select' as 'select' | 'delete',
-      select(_cols?: string) {
-        builder._op = 'select';
-        return builder;
+      _op: 'select' as 'select' | 'insert' | 'delete',
+      _selectOpts: undefined as unknown,
+      _eqs: [] as Array<{ col: string; val: unknown }>,
+      _hasIn: false,
+      select(_cols?: string, opts?: unknown) {
+        if (b._op !== 'insert' && b._op !== 'delete') b._op = 'select';
+        if (opts !== undefined) b._selectOpts = opts;
+        return b;
+      },
+      insert(payload: Record<string, unknown>) {
+        b._op = 'insert';
+        if (table === 'swipes') captured.swipeInsertPayload = payload;
+        return b;
       },
       delete(opts?: unknown) {
-        builder._op = 'delete';
+        b._op = 'delete';
         captured.deleteOptions = opts ?? null;
         captured.deleteEqCalls = [];
-        return builder;
+        return b;
       },
       eq(col: string, val: unknown) {
-        if (builder._op === 'delete' && table === 'swipes') {
+        b._eqs.push({ col, val });
+        if (b._op === 'delete' && table === 'swipes') {
           captured.deleteEqCalls.push({ col, val });
         }
-        return builder;
+        return b;
       },
-      // requireNotFrozen: profiles.select(...).eq(...).maybeSingle()
-      async maybeSingle() {
-        // not frozen
-        return { data: { is_active: true, frozen_at: null }, error: null };
-      },
-      // route: swipes.delete().eq().eq() awaited directly (thenable)
-      then(resolve: any) {
-        if (table === 'swipes' && builder._op === 'delete') {
-          return Promise.resolve(captured.deleteResult).then(resolve);
-        }
-        return Promise.resolve({ data: null, error: null }).then(resolve);
-      },
+      gte() { return b; },
+      lt() { return b; },
+      in() { b._hasIn = true; return b; },
+      or() { return b; },
+      order() { return b; },
+      async single() { return resolveTerminal(b); },
+      async maybeSingle() { return resolveTerminal(b); },
+      then(resolve: any) { return Promise.resolve(resolveTerminal(b)).then(resolve); },
     };
-    return builder;
+    return b;
   }
+
   return {
     supabase: {
       from: (table: string) => makeBuilder(table),
@@ -120,15 +181,25 @@ import { app } from '../src/index';
 // supabase.auth.getUser mock 이 토큰 문자열을 그대로 userId 로 반환하므로
 // Bearer 값 = userId.
 const VIEWER = '11111111-1111-1111-1111-111111111111';
+const SWIPED = '22222222-2222-4222-8222-222222222222';
 function authToken(userId = VIEWER): string {
   return userId;
 }
 
 beforeEach(() => {
   envState.passResetEnabled = true;
+  captured.frozen = { is_active: true, frozen_at: null };
+  captured.reciprocal = { data: null, error: null };
+  captured.budgetCount = { count: 0, error: null };
+  captured.passCount = { count: 0, error: null };
+  captured.insertError = null;
+  captured.matchInsert = { data: null, error: null };
+  captured.matchExisting = { data: null, error: null };
+  captured.deleteResult = { count: 0, error: null };
+  captured.swipeInsertPayload = null;
+  captured.budgetCountEqs = [];
   captured.deleteEqCalls = [];
   captured.deleteOptions = null;
-  captured.deleteResult = { count: 0, error: null };
 });
 
 describe('DELETE /api/discover/passes — pass 스와이프 리셋', () => {
@@ -193,5 +264,119 @@ describe('DELETE /api/discover/passes — pass 스와이프 리셋', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('db down');
+  });
+});
+
+describe('POST /api/discover/swipe — 하루 like 예산 캡 + 면제', () => {
+  it('(1) non-reciprocal like → counts_toward_limit=true 저장 + 예산<15 통과', async () => {
+    captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
+    captured.budgetCount = { count: 5, error: null };
+
+    const res = await request(app)
+      .post('/api/discover/swipe?tz_offset_minutes=0')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
+      .send({ swiped_id: SWIPED, direction: 'like' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ direction: 'like', match: null });
+    // 예산 소모 like 는 swipe 시점에 counts_toward_limit=true 확정 저장.
+    expect(captured.swipeInsertPayload).not.toBeNull();
+    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(true);
+    // 캡 count 쿼리가 실제로 실행됐는지 (예산 소모 경로)
+    expect(captured.budgetCountEqs.length).toBeGreaterThan(0);
+  });
+
+  it('(2) reciprocal like → 캡 스킵 + counts_toward_limit=false + 매치 생성 (면제)', async () => {
+    captured.reciprocal = { data: { id: 'recip-1' }, error: null };
+    captured.budgetCount = { count: 99, error: null }; // 초과값 — 스킵돼야 함
+    captured.matchInsert = {
+      data: { id: 'match-1', user1_id: VIEWER, user2_id: SWIPED },
+      error: null,
+    };
+
+    const res = await request(app)
+      .post('/api/discover/swipe?tz_offset_minutes=0')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
+      .send({ swiped_id: SWIPED, direction: 'like' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.match).toBeTruthy();
+    expect(res.body.match.id).toBe('match-1');
+    // 매치 완성 like 는 예산 면제 → counts_toward_limit=false.
+    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(false);
+    // 캡 count 쿼리 자체가 실행되지 않음 (consumesBudget=false → 스킵).
+    expect(captured.budgetCountEqs).toHaveLength(0);
+  });
+
+  it('(3) 예산 소진(15) + non-reciprocal like → 429 daily_limit_reached', async () => {
+    captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
+    captured.budgetCount = { count: 15, error: null };
+
+    const res = await request(app)
+      .post('/api/discover/swipe?tz_offset_minutes=0')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
+      .send({ swiped_id: SWIPED, direction: 'like' });
+
+    expect(res.status).toBe(429);
+    expect(res.body.code).toBe('daily_limit_reached');
+    // 캡 초과 시 INSERT 는 실행되지 않아야 함.
+    expect(captured.swipeInsertPayload).toBeNull();
+  });
+
+  it('(4) 예산 소진(15) + reciprocal like → 429 아님, 통과 + 매치 (면제가 캡 우회)', async () => {
+    captured.reciprocal = { data: { id: 'recip-1' }, error: null };
+    captured.budgetCount = { count: 15, error: null }; // 소진이지만 면제라 무관
+    captured.matchInsert = {
+      data: { id: 'match-2', user1_id: VIEWER, user2_id: SWIPED },
+      error: null,
+    };
+
+    const res = await request(app)
+      .post('/api/discover/swipe?tz_offset_minutes=0')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
+      .send({ swiped_id: SWIPED, direction: 'like' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.match).toBeTruthy();
+    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(false);
+    expect(captured.budgetCountEqs).toHaveLength(0);
+  });
+
+  it('(5) pass → 캡 스킵 + counts_toward_limit=false (예산 15여도 통과)', async () => {
+    captured.budgetCount = { count: 15, error: null };
+
+    const res = await request(app)
+      .post('/api/discover/swipe?tz_offset_minutes=0')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
+      .send({ swiped_id: SWIPED, direction: 'pass' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ direction: 'pass', match: null });
+    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(false);
+    // pass 는 reciprocal 조회도 캡 count 도 실행 안 함.
+    expect(captured.budgetCountEqs).toHaveLength(0);
+  });
+});
+
+describe('GET /api/discover/quota — 오늘 소모한 like 예산', () => {
+  it('(6) count 쿼리에 direction=like + counts_toward_limit=true eq 체인 + limit=env(15)', async () => {
+    captured.budgetCount = { count: 3, error: null };
+    captured.passCount = { count: 2, error: null };
+
+    const res = await request(app)
+      .get('/api/discover/quota?tz_offset_minutes=0')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.limit).toBe(15);
+    expect(res.body.count).toBe(3);
+    expect(res.body.remaining).toBe(12);
+
+    // 예산 count 가 캡과 동일 정의(direction='like' AND counts_toward_limit=true)로
+    // 세는지 — 정의 불일치("3/15인데 막힘") 구조적 차단 검증.
+    const eqs = captured.budgetCountEqs;
+    expect(eqs.find((e) => e.col === 'swiper_id')?.val).toBe(VIEWER);
+    expect(eqs.find((e) => e.col === 'direction')?.val).toBe('like');
+    expect(eqs.find((e) => e.col === 'counts_toward_limit')?.val).toBe(true);
   });
 });

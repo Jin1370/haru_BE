@@ -21,10 +21,6 @@ export function pickViewerSlot(viewerLanguage: string | null | undefined): Voice
 
 const router = Router();
 
-// 디스커버 일일 카드 한도. FE 의 utils/discoverDaily.MAX_PER_DAY 와 동일 값.
-// 기기 간 동기화를 위해 BE 의 swipes 테이블을 source of truth 로 한다.
-export const DISCOVER_MAX_PER_DAY = 50;
-
 // 받은 좋아요(GET /likes-received) 가 한 번에 처리할 최신 좋아요 상한.
 // (E) 옛 코드는 likers/프로필/사진을 무제한 로드 → 인기 사용자가 수천 개 좋아요를
 // 받으면 거대한 IN 쿼리 + 수천 행 materialization. 최신 N 개로 바운드해 핫패스를
@@ -349,6 +345,11 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
         ),
         photos: photoUrls,
         photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
+        // 이 후보가 이미 viewer 를 like 했는가(=내가 like 하면 즉시 매치 = 매치 완성
+        // like = 예산 면제). FE 는 좋아요 소진 시 이 값으로 사전 게이트를 분기한다:
+        // false 면 카드 안 넘기고 즉시 한도 모달, true 면 통과시켜 즉시 매치.
+        // 카드에 시각 표시는 하지 않음(피드 통합 정책 유지) — 게이팅 로직 전용.
+        liked_you: reciprocalLikerIds.has(rest.id as string),
       };
     }),
   );
@@ -553,6 +554,9 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
         ),
         photos: photoUrls,
         photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
+        // 받은 좋아요 풀의 후보는 정의상 모두 이미 viewer 를 like 함 → 항상 매치
+        // 완성 like(면제). FE 가 디스커버와 동일한 게이팅 분기를 쓰도록 shape 통일.
+        liked_you: true,
       };
     }),
   );
@@ -587,14 +591,20 @@ router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, r
   const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
   const { fromIso, toIso, localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
 
-  // 오늘 사용한 스와이프 수(한도용) + viewer 의 pass 행 존재 여부(버튼 게이트용)를
+  // 오늘 소모한 like 예산(한도용) + viewer 의 pass 행 존재 여부(버튼 게이트용)를
   // 병렬 조회. has_passes 는 "넘긴 사람이 실제로 있을 때만" 버튼을 노출하기 위한 신호 —
   // pass 는 서버에 누적되므로(어제 넘긴 것 포함) FE 세션만으론 알 수 없어 서버가 전달.
+  // 예산 count 는 POST /swipe 하드 캡과 *동일 정의* (direction='like' AND
+  // counts_toward_limit=true, 동일 로컬-데이 범위) — mig 041 컬럼을 공유해 정의
+  // 불일치("3/15인데 막힘")를 구조적으로 차단. counts_toward_limit 는 like 에서만
+  // true 로 세팅되므로 direction='like' 는 redundant 하나 인덱스 정합·가독성 위해 명시.
   const [usedResult, passResult] = await Promise.all([
     supabase
       .from('swipes')
       .select('id', { count: 'exact', head: true })
       .eq('swiper_id', req.userId!)
+      .eq('direction', 'like')
+      .eq('counts_toward_limit', true)
       .gte('created_at', fromIso)
       .lt('created_at', toIso),
     supabase
@@ -615,10 +625,13 @@ router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, r
   }
 
   const used = usedResult.count ?? 0;
+  const dailyLimit = env.discover.dailyLikeLimit;
   res.json({
+    // count/limit/remaining 의미 = 오늘 소모한 like 예산 / 한도 / 잔여.
+    // (총 스와이프 수가 아니라 non-reciprocal like 만 — 매치 완성 like·pass 는 면제.)
     count: used,
-    limit: DISCOVER_MAX_PER_DAY,
-    remaining: Math.max(0, DISCOVER_MAX_PER_DAY - used),
+    limit: dailyLimit,
+    remaining: Math.max(0, dailyLimit - used),
     date: localDate,
     // pass 리셋 일몰 게이트 (strategist C2). FE 가 이 플래그로 빈 화면/한도 화면의
     // "넘긴 사람 다시 보기" 버튼 노출을 결정한다 — 새 config 엔드포인트 신설 대신
@@ -687,34 +700,64 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
   const { swiped_id, direction } = req.body;
   const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
 
-  // 서버측 하드 캡 — FE 소프트 캡(quota 동기화 + 로컬 카운트)의 최종 방어선.
-  // 사용자 로컬 하루 [from, to) 범위에서 오늘 스와이프 수를 세고 한도 도달 시 429.
-  // 변조 클라이언트/멀티기기 동시 사용으로 50 초과를 막는다. quota 엔드포인트와
-  // 동일한 computeLocalDayRangeUtc 를 써서 소프트 캡과 경계가 정확히 일치.
-  // count→insert 가 원자적이지 않아 동시 요청 시 ±1 오버슈트 가능하나 남용 차단
-  // 목적상 허용 (정확한 결제/한도가 아닌 인게이지먼트 캡).
-  const { fromIso, toIso } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-  const { count: usedToday, error: countError } = await supabase
-    .from('swipes')
-    .select('id', { count: 'exact', head: true })
-    .eq('swiper_id', req.userId!)
-    .gte('created_at', fromIso)
-    .lt('created_at', toIso);
-
-  if (countError) {
-    res.status(500).json({ error: countError.message });
-    return;
+  // 1) reciprocal(=상대가 나를 이미 like) 판정을 먼저 — 예산 분류·매치 생성의 공유 레버.
+  //    like 일 때만 조회. silent-success 룰 (CLAUDE.md): PGRST116(no rows)=상대가
+  //    아직 like 안 함=정상, 그 외 error 는 가시화. silent 통과 시 reciprocal 매치
+  //    trigger 가 안 일어나는 회귀 가능.
+  let reciprocal: { id: string } | null = null;
+  if (direction === 'like') {
+    const { data, error: reciprocalErr } = await supabase
+      .from('swipes')
+      .select('id')
+      .eq('swiper_id', swiped_id)
+      .eq('swiped_id', req.userId!)
+      .eq('direction', 'like')
+      .single();
+    if (reciprocalErr && reciprocalErr.code !== 'PGRST116') {
+      res.status(500).json({ error: reciprocalErr.message });
+      return;
+    }
+    reciprocal = data ?? null;
   }
 
-  if ((usedToday ?? 0) >= DISCOVER_MAX_PER_DAY) {
-    res.status(429).json({ error: 'Daily swipe limit reached', code: 'daily_limit_reached' });
-    return;
+  // 2) 예산 소모 여부 = like AND non-reciprocal(매치 미완성). 이 값이 캡 검사·INSERT
+  //    플래그·quota count 를 하나로 묶는다 (mig 041 counts_toward_limit). 매치를
+  //    완성하는 like(받은 좋아요 수락 / 디스커버 즉시매치)와 pass 는 예산 면제.
+  const consumesBudget = direction === 'like' && !reciprocal;
+
+  // 3) 서버측 하드 캡 — consumesBudget 일 때만. FE 소프트 캡(quota 동기화 + 로컬
+  //    카운트)의 최종 방어선. quota 엔드포인트와 *동일 정의*(direction='like' AND
+  //    counts_toward_limit=true, 동일 로컬-데이 범위)로 세어 소프트 캡과 경계가
+  //    정확히 일치. count→insert 가 원자적이지 않아 동시 요청 시 ±1 오버슈트 가능하나
+  //    남용 차단 목적상 허용 (정확한 결제/한도가 아닌 인게이지먼트 캡).
+  if (consumesBudget) {
+    const { fromIso, toIso } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
+    const { count: usedToday, error: countError } = await supabase
+      .from('swipes')
+      .select('id', { count: 'exact', head: true })
+      .eq('swiper_id', req.userId!)
+      .eq('direction', 'like')
+      .eq('counts_toward_limit', true)
+      .gte('created_at', fromIso)
+      .lt('created_at', toIso);
+
+    if (countError) {
+      res.status(500).json({ error: countError.message });
+      return;
+    }
+
+    if ((usedToday ?? 0) >= env.discover.dailyLikeLimit) {
+      res.status(429).json({ error: 'Daily like limit reached', code: 'daily_limit_reached' });
+      return;
+    }
   }
 
+  // 4) INSERT — 예산 플래그를 swipe 시점에 확정 저장 (서버 계산, client body 미수용).
   const { error: swipeError } = await supabase.from('swipes').insert({
     swiper_id: req.userId!,
     swiped_id,
     direction,
+    counts_toward_limit: consumesBudget,
   });
 
   if (swipeError) {
@@ -726,25 +769,11 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
     return;
   }
 
+  // 5) 매치 생성 — reciprocal 은 위 1)에서 이미 조회됨(재조회 제거). reciprocal 은
+  //    like AND 상대 like 존재일 때만 non-null 이므로 별도 direction 체크 불필요.
   let match: { id: string; user1_id: string; user2_id: string } | null = null;
-  if (direction === 'like') {
-    // silent-success 룰 (CLAUDE.md): PGRST116 (no rows) 는 정상 케이스 (상대가
-    // 아직 like 안 함) 이지만 그 외 error 는 가시화. silent 통과 시 reciprocal
-    // 매치 trigger 가 안 일어나는 회귀 가능.
-    const { data: reciprocal, error: reciprocalErr } = await supabase
-      .from('swipes')
-      .select('id')
-      .eq('swiper_id', swiped_id)
-      .eq('swiped_id', req.userId!)
-      .eq('direction', 'like')
-      .single();
-    if (reciprocalErr && reciprocalErr.code !== 'PGRST116') {
-      res.status(500).json({ error: reciprocalErr.message });
-      return;
-    }
-
-    if (reciprocal) {
-      const [user1, user2] = [req.userId!, swiped_id].sort();
+  if (reciprocal) {
+    const [user1, user2] = [req.userId!, swiped_id].sort();
       const { data: newMatch, error: matchError } = await supabase
         .from('matches')
         .insert({ user1_id: user1, user2_id: user2 })
@@ -808,7 +837,6 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
           });
       }
     }
-  }
 
   res.json({ direction, match });
 });

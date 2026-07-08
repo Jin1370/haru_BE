@@ -97,6 +97,13 @@ export const env = {
   // admin.dashboardEnabled 게이트 패턴 재사용. 기본값 ON (미설정 시 활성).
   discover: {
     passResetEnabled: process.env.DISCOVER_PASS_RESET_ENABLED !== 'false',
+    // 하루 non-reciprocal(매치 미완성) like 예산. GET /quota 의 count/limit/remaining
+    // 과 POST /swipe 의 하드 캡이 이 값을 공유한다. 매치를 완성하는 like(받은 좋아요
+    // 수락 / 디스커버 즉시매치)와 pass 는 예산에서 면제 — swipes.counts_toward_limit
+    // 컬럼(mig 041)이 swipe 시점에 소모 여부를 확정 저장한다. 튜닝 가능 (텔레메트리
+    // 수집 후 조정 — strategist 후속 P1). min=1 max=1000 zod 검증.
+    dailyLikeLimit: z.coerce.number().int().min(1).max(1000).default(15)
+      .parse(process.env.DAILY_LIKE_LIMIT),
   },
 
   // dev/QA 어드민 대시보드 — 출시 빌드에서는 ADMIN_DASHBOARD_ENABLED 미설정

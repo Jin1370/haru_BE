@@ -124,6 +124,10 @@ export const swaggerDocument = {
             allOf: [{ $ref: '#/components/schemas/PhotoAccess' }],
             description: 'discover 정책상 항상 { false, false }.',
           },
+          liked_you: {
+            type: 'boolean',
+            description: '이 후보가 이미 viewer 를 like 했는가(=like 시 즉시 매치 = 매치 완성 like = 하루 좋아요 예산 면제). FE 가 좋아요 소진 시 사전 게이트 분기에 사용(카드 시각 표시 없음). /likes-received 는 항상 true.',
+          },
         },
       },
       Match: {
@@ -647,12 +651,13 @@ export const swaggerDocument = {
       post: {
         tags: ['Discover'],
         summary: '스와이프 (like/pass). 상호 like 시 매치 자동 생성',
+        description: '하루 like 예산 하드 캡 적용 (DAILY_LIKE_LIMIT, 기본 15). 예산은 non-reciprocal(매치 미완성) like 만 소모 — 매치를 완성하는 like(받은 좋아요 수락 / 상대가 이미 나를 like 한 즉시매치)와 pass 는 면제(캡·카운트 both 우회). 예산 소모 여부는 swipes.counts_toward_limit 컬럼(mig 041)에 swipe 시점 확정 저장되어 GET /quota 의 count 와 동일 정의를 공유한다.',
         parameters: [
           {
             name: 'tz_offset_minutes',
             in: 'query',
             schema: { type: 'integer', minimum: -840, maximum: 840, default: 0 },
-            description: '서버측 일일 한도 하드 캡의 로컬 자정 경계 계산용 (Date#getTimezoneOffset() 의미: UTC-local 분). 미전달 시 0(UTC) 폴백.',
+            description: '서버측 like 예산 하드 캡의 로컬 자정 경계 계산용 (Date#getTimezoneOffset() 의미: UTC-local 분). 미전달 시 0(UTC) 폴백.',
           },
         ],
         requestBody: {
@@ -668,15 +673,15 @@ export const swaggerDocument = {
           400: { description: '파라미터 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
           409: { description: '이미 스와이프함', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          429: { description: '일일 스와이프 한도(50) 도달 — 서버측 하드 캡', content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string', example: 'Daily swipe limit reached' }, code: { type: 'string', example: 'daily_limit_reached' } }, required: ['error', 'code'] } } } },
+          429: { description: '일일 like 예산(DAILY_LIKE_LIMIT, 기본 15) 도달 — 서버측 하드 캡. 매치 완성 like·pass 는 미적용(면제).', content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string', example: 'Daily like limit reached' }, code: { type: 'string', example: 'daily_limit_reached' } }, required: ['error', 'code'] } } } },
         },
       },
     },
     '/api/discover/quota': {
       get: {
         tags: ['Discover'],
-        summary: '디스커버 일일 카드 카운트 (오늘 사용한 스와이프 수)',
-        description: 'swipes 테이블이 source of truth. 기기 간 동기화용. pass_reset_enabled 는 "넘긴 사람 다시 보기" 버튼 노출 여부 게이트(DISCOVER_PASS_RESET_ENABLED env).',
+        summary: '디스커버 일일 like 예산 (오늘 소모한 non-reciprocal like 수)',
+        description: 'swipes 테이블이 source of truth. 기기 간 동기화용. count/limit/remaining = 오늘 소모한 like 예산 / 한도(DAILY_LIKE_LIMIT, 기본 15) / 잔여. 총 스와이프 수가 아니라 counts_toward_limit=true(non-reciprocal) like 만 카운트 — 매치 완성 like·pass 는 면제. POST /swipe 하드 캡과 동일 정의(mig 041 컬럼 공유). pass_reset_enabled 는 "넘긴 사람 다시 보기" 버튼 노출 여부 게이트(DISCOVER_PASS_RESET_ENABLED env).',
         parameters: [
           { name: 'tz_offset_minutes', in: 'query', schema: { type: 'integer', minimum: -840, maximum: 840, default: 0 }, description: '로컬 자정 경계 계산용 (Date#getTimezoneOffset() 의미). 미전달 시 0(UTC).' },
         ],
@@ -684,9 +689,9 @@ export const swaggerDocument = {
           200: {
             description: '일일 카운트',
             content: { 'application/json': { schema: { type: 'object', properties: {
-              count: { type: 'integer', example: 12 },
-              limit: { type: 'integer', example: 50 },
-              remaining: { type: 'integer', example: 38 },
+              count: { type: 'integer', example: 3, description: '오늘 로컬 자정 이후 소모한 like 예산(non-reciprocal like 수)' },
+              limit: { type: 'integer', example: 15, description: 'DAILY_LIKE_LIMIT env 값' },
+              remaining: { type: 'integer', example: 12, description: 'max(0, limit - count)' },
               date: { type: 'string', example: '2026-06-03' },
               pass_reset_enabled: { type: 'boolean', description: 'pass 리셋 라우트 활성 여부. false 면 FE 가 "넘긴 사람 다시 보기" 버튼 숨김.' },
             }, required: ['count', 'limit', 'remaining', 'date', 'pass_reset_enabled'] } } },

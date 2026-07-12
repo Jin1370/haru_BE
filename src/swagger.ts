@@ -807,12 +807,54 @@ export const swaggerDocument = {
           'POST 는 stub 메시지(id=확정된 UUID, audio_status=pending)를 즉시 반환하며 DB INSERT 는 하지 않는다. ' +
           '비동기 파이프라인(번역 + ElevenLabs TTS + Storage 업로드)이 완료되면 마지막에 한 번만 INSERT — ' +
           'realtime INSERT 가 1회만 발생해 expo-audio 의 mid-session player resource 회수 트리거를 회피한다. ' +
-          '파이프라인 실패 시에도 audio_url=null, audio_status=failed 로 INSERT 되어 텍스트는 전달된다.',
+          '파이프라인 실패 시에도 audio_url=null, audio_status=failed 로 INSERT 되어 텍스트는 전달된다. ' +
+          'idempotent-send: `client_message_id`(옵셔널 uuid)를 제공하면 그 값을 messages.id 로 사용해 ' +
+          'ON CONFLICT (id) DO NOTHING 멱등 전송을 보장한다. 응답 유실 후 같은 키로 재전송 시 이미 저장된 ' +
+          '메시지면 200(동일 row 재반환), 다른 사용자 소유의 id 이거나 위조 id 이면 409(code: duplicate_message, ' +
+          '내용 미노출). 미제공 시 서버가 UUID 를 폴백 생성한다(옛 FE 하위호환).',
         parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
-        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['text'], properties: { text: { type: 'string', minLength: 1, maxLength: 1000 } } } } } },
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['text'],
+                properties: {
+                  text: { type: 'string', minLength: 1, maxLength: 1000 },
+                  emotion: { type: 'string', enum: ['neutral', 'happy', 'sad', 'angry', 'surprised', 'excited', 'whispering', 'laughing'] },
+                  client_message_id: {
+                    type: 'string',
+                    format: 'uuid',
+                    description: 'idempotent-send: 클라이언트 생성 멱등 키. 재전송 시 같은 값을 재사용하면 row/TTS/전달이 단일로 유지된다.',
+                  },
+                },
+              },
+            },
+          },
+        },
         responses: {
+          200: {
+            description: 'idempotent-send: 같은 client_message_id 로 재전송 — 이미 저장된 동일 Message row 재반환',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } },
+          },
+          201: { description: '동기 저장 성공 (voice-clone 미보유 발신자)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
           202: { description: '큐잉 성공 — INSERT 는 realtime 으로 도착', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
-          400: { description: 'text 누락/초과', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          400: { description: 'text 누락/초과 / client_message_id 비-uuid', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: {
+            description: 'idempotent-send: client_message_id 가 다른 사용자 소유이거나 위조된 id — code: duplicate_message (내용 미노출)',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', example: 'Message id already used' },
+                    code: { type: 'string', example: 'duplicate_message' },
+                  },
+                },
+              },
+            },
+          },
           403: {
             description: '매치 비참여자 / 차단됨 / 계정 freeze (message-moderation-v1 PR2)',
             content: {

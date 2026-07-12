@@ -25,6 +25,76 @@ const router = Router();
 
 router.use(authMiddleware);
 
+// idempotent-send: 같은 messageId 파이프라인 동시/중복 실행 방지 (per-instance).
+// 목적은 correctness 가 아니라 COST (이중 TTS/번역 방지) — correctness 는 최종
+// INSERT 의 ON CONFLICT (id) DO NOTHING 이 보장한다. Fly 다중 머신에서 재시도가
+// 다른 머신에 착지하면 이 Set 은 못 잡지만, 그 경우도 두 파이프라인이 같은 id 로
+// INSERT → 두 번째는 DO NOTHING → row/푸시/전달 단일. 낭비되는 건 ElevenLabs 합성
+// 1회 + Storage 덮어쓰기(같은 path `${messageId}.mp3`, orphan 없음)뿐이다.
+// 크로스-인스턴스 이중 합성까지 막으려면 DB idempotency marker 필요 — v1 미포함(P1).
+const inFlightMessages = new Set<string>();
+
+export function beginProcessing(id: string): boolean {
+  if (inFlightMessages.has(id)) return false;
+  inFlightMessages.add(id);
+  return true;
+}
+
+export function endProcessing(id: string): void {
+  inFlightMessages.delete(id);
+}
+
+type MessageRow = Record<string, unknown>;
+
+// idempotent-send: INSERT ... ON CONFLICT (id) DO NOTHING 후 scoped 재반환.
+//
+//   * inserted=true  — 이번 호출이 실제로 row 를 삽입했다 (신규).
+//   * inserted=false, row!=null — id 충돌(DO NOTHING). 기존 row 가 (id AND match_id
+//     AND sender_id) 로 내 소유임을 확인하고 그대로 재반환 (멱등 재전송).
+//   * conflict=true (row=null) — id 는 전역에 존재하나 내 (match+sender) 소유가
+//     아님 = 위조/타인 id → 내용 미노출, 호출처가 409.
+//   * row=null, conflict=false — supabase 에러 → 호출처가 500.
+//
+// R1 (IDOR) 방어의 핵심: 재반환 SELECT 는 반드시 id AND match_id AND sender_id 로
+// scope 한다. 미scoped SELECT 는 남의 매치 메시지 UUID probe → 원문 유출.
+async function idempotentInsertMessage(
+  payload: Record<string, unknown>,
+  matchId: string,
+  senderId: string,
+): Promise<{ row: MessageRow | null; inserted: boolean; conflict: boolean }> {
+  const { data: insertedRows, error } = await supabase
+    .from('messages')
+    .upsert(payload, { onConflict: 'id', ignoreDuplicates: true })
+    .select();
+
+  if (error) {
+    console.error(`[idempotentInsertMessage] upsert failed id=${payload.id}:`, error.message);
+    return { row: null, inserted: false, conflict: false };
+  }
+  if (insertedRows && insertedRows.length > 0) {
+    return { row: insertedRows[0] as MessageRow, inserted: true, conflict: false };
+  }
+
+  // 0 rows = id 충돌 (DO NOTHING). scoped 로만 재반환.
+  const { data: existing, error: selectError } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('id', payload.id as string)
+    .eq('match_id', matchId)
+    .eq('sender_id', senderId)
+    .maybeSingle();
+
+  if (selectError) {
+    console.error(`[idempotentInsertMessage] scoped re-select failed id=${payload.id}:`, selectError.message);
+    return { row: null, inserted: false, conflict: false };
+  }
+  if (existing) {
+    return { row: existing as MessageRow, inserted: false, conflict: false };
+  }
+  // 충돌했으나 내 (match+sender) 소유가 아님 → 위조/타인 id → 내용 미노출.
+  return { row: null, inserted: false, conflict: true };
+}
+
 // 메시지 목록 (페이지네이션)
 router.get('/:matchId/messages', validateQuery(messageQuerySchema), async (req: AuthRequest, res: Response) => {
   const { matchId } = req.params;
@@ -96,7 +166,8 @@ router.get('/:matchId/messages', validateQuery(messageQuerySchema), async (req: 
 //      간섭이 없어 가장 안전.
 router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSchema), async (req: AuthRequest, res: Response) => {
   const matchId = req.params.matchId as string;
-  const { text, emotion } = req.body as { text: string; emotion?: Emotion };
+  const { text, emotion, client_message_id } = req.body as
+    { text: string; emotion?: Emotion; client_message_id?: string };
   // neutral = "태그 없음" — DB에는 null로 저장 (CHECK constraint도 neutral 제외)
   const storedEmotion: Exclude<Emotion, 'neutral'> | null =
     emotion && emotion !== 'neutral' ? emotion : null;
@@ -223,7 +294,13 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   // 이 시점에 고정하는 이유는 비동기 TTS 가 메시지마다 다른 시간을 잡아
   // 늦게 보낸 메시지가 먼저 INSERT 되는 순서 역전을 막기 위함. INSERT 시
   // `created_at` 컬럼에 이 값을 명시 → ORDER BY created_at 이 send 순서.
-  const messageId = randomUUID();
+  // idempotent-send: 클라이언트가 멱등 키를 제공하면 그 값을 messages.id 로 사용,
+  // 미제공 시 서버 randomUUID() 폴백 (옛 FE 하위호환). client_message_id 는 이미
+  // sendMessageSchema 의 .uuid() 검증을 통과했다. 이 messageId 로 ON CONFLICT (id)
+  // DO NOTHING 을 걸어 응답 유실 후 재전송 시에도 row/TTS/전달이 단일이 되게 한다.
+  // 멱등 키는 match/unmatch/block/profile/모더레이션 검증 뒤에서 사용되므로 매치
+  // 없는 사용자의 정책 probe 방어는 그대로 유지된다 (검증 순서 불변).
+  const messageId = client_message_id ?? randomUUID();
   const queuedAt = new Date().toISOString();
   const voiceId = sender.elevenlabs_voice_id ?? null;
 
@@ -231,9 +308,11 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   // (audio_status 전이가 일어나지 않음). 동기 INSERT 후 응답 — UX 가 가장
   // 단순하고 회귀 위험 최소.
   if (!voiceId) {
-    const { data: row, error: insertError } = await supabase
-      .from('messages')
-      .insert({
+    // idempotent-send: 동기 경로도 ON CONFLICT (id) DO NOTHING + scoped 재반환.
+    // 응답 유실 후 같은 client_message_id 로 재전송 시 신규는 201, 재전송은 200
+    // (동일 row), 위조/타인 id 는 409 (내용 미노출). row=null 은 500.
+    const { row, inserted, conflict } = await idempotentInsertMessage(
+      {
         id: messageId,
         match_id: matchId,
         sender_id: req.userId!,
@@ -245,20 +324,62 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
         audio_status: 'pending',
         emotion: storedEmotion,
         created_at: queuedAt,
-      })
-      .select()
-      .single();
-    if (insertError) {
-      res.status(500).json({ error: insertError.message });
+      },
+      matchId,
+      req.userId!,
+    );
+    if (conflict) {
+      res.status(409).json({ error: 'Message id already used', code: 'duplicate_message' });
       return;
     }
-    res.status(201).json(row);
+    if (!row) {
+      res.status(500).json({ error: 'Message insert failed' });
+      return;
+    }
+    res.status(inserted ? 201 : 200).json(row);
 
     // push-notifications sprint: 동기 INSERT 경로 (voice-clone 미보유 발신자) 의
     // 푸시 발송. INSERT 가 'pending' 상태로 저장되지만 voice-first-message-gate
     // 정책상 수신자 GET 에서 필터링되어 안 보이는 메시지 — 푸시도 보내지 않는다.
     // (failed 메시지와 같은 정합성: "수신자에게 안 보이는 메시지 = 푸시 미발송")
     // 사실상 voice clone 미보유 발신자의 메시지는 푸시 미발송 분기.
+    return;
+  }
+
+  // idempotent-send: async 경로 pre-check (voiceId 보유자만 통과 + 회피 비용(TTS
+  // 합성)이 커서 정당 — 동기 경로엔 이 pre-check 없음).
+  //
+  // 1) retry-after-commit 감지 — 이미 INSERT 된 (내 소유) row 면 재합성 없이 그대로
+  //    반환. scoped(id+match+sender) 라 위조 id 는 여기서 안 걸리고 아래로 흘러 409.
+  const { data: committed, error: committedError } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('id', messageId)
+    .eq('match_id', matchId)
+    .eq('sender_id', req.userId!)
+    .maybeSingle();
+  if (committedError) {
+    // pre-check 실패는 correctness 를 깨지 않는다 (최종 upsert 의 ON CONFLICT 가
+    // 보장) — 가시화만 하고 정상 전송 흐름으로 통과시켜 핫패스 회복력 유지.
+    console.error(`[POST messages] committed pre-check failed id=${messageId}:`, committedError.message);
+  }
+  if (committed) {
+    res.status(200).json(committed);
+    return;
+  }
+
+  // 2) 위조 id 조기 차단 — 내 소유 아닌 기존 id 로 in-flight 시작/재합성 방지.
+  //    (전역 id 존재하나 scoped 로 안 잡히면 → 409, 파이프라인 미발화)
+  const { data: foreign, error: foreignError } = await supabase
+    .from('messages')
+    .select('id')
+    .eq('id', messageId)
+    .maybeSingle();
+  if (foreignError) {
+    console.error(`[POST messages] foreign pre-check failed id=${messageId}:`, foreignError.message);
+  }
+  if (foreign) {
+    res.status(409).json({ error: 'Message id already used', code: 'duplicate_message' });
     return;
   }
 
@@ -280,20 +401,26 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
     created_at: queuedAt,
   });
 
-  processAndInsertMessage({
-    messageId,
-    matchId,
-    senderId: req.userId!,
-    senderName,
-    senderGender,
-    recipientId,
-    text,
-    senderLang,
-    recipientLang,
-    emotion: storedEmotion,
-    voiceId,
-    queuedAt,
-  }).catch((err) => console.error('[processAndInsertMessage unhandled]', err));
+  // idempotent-send: in-flight 가드 후 파이프라인 fire. 같은 인스턴스에서 같은
+  // messageId 로 동시/중복 요청이 오면 두 번째부터 beginProcessing 이 false 를
+  // 반환해 파이프라인(TTS/번역) 재실행을 건너뛴다. finally 의 endProcessing 이
+  // 완료 후 Set 에서 제거. (크로스-인스턴스 재시도는 최종 ON CONFLICT 가 커버.)
+  if (beginProcessing(messageId)) {
+    processAndInsertMessage({
+      messageId,
+      matchId,
+      senderId: req.userId!,
+      senderName,
+      senderGender,
+      recipientId,
+      text,
+      senderLang,
+      recipientLang,
+      emotion: storedEmotion,
+      voiceId,
+      queuedAt,
+    }).catch((err) => console.error('[processAndInsertMessage unhandled]', err));
+  }
 });
 
 // read-at-removal-list-mask sprint: PATCH /:matchId/messages/read 라우트 제거.
@@ -602,34 +729,46 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
       audioUrl = await uploadFile('voice-messages', path, audio, 'audio/mpeg');
     }
 
-    const { error: insertError } = await supabase.from('messages').insert({
-      id: messageId,
-      match_id: matchId,
-      sender_id: senderId,
-      original_text: text,
-      original_language: senderLang,
-      translated_text: translatedText,
-      translated_language: recipientLang,
-      audio_url: audioUrl,
-      audio_status: 'ready',
-      emotion,
-      created_at: queuedAt,
-    });
+    // idempotent-send: 최종 INSERT 를 ON CONFLICT (id) DO NOTHING 으로.
+    // 크로스-인스턴스 동시 재시도가 같은 id 로 도착해도 두 번째 파이프라인은
+    // 0 rows (inserted=false) → row/푸시 단일. inserted=false 인데 row!=null 은
+    // 다른 파이프라인이 이미 INSERT 한 케이스라 push 를 보내지 않는다.
+    const { row, inserted, conflict } = await idempotentInsertMessage(
+      {
+        id: messageId,
+        match_id: matchId,
+        sender_id: senderId,
+        original_text: text,
+        original_language: senderLang,
+        translated_text: translatedText,
+        translated_language: recipientLang,
+        audio_url: audioUrl,
+        audio_status: 'ready',
+        emotion,
+        created_at: queuedAt,
+      },
+      matchId,
+      senderId,
+    );
 
-    if (insertError) {
-      console.error(`[processAndInsertMessage] insert failed messageId=${messageId}:`, insertError);
+    if (!row && !conflict) {
+      // upsert/재select supabase 에러 — 헬퍼가 이미 console.error 로 가시화.
       return;
     }
 
     // push-notifications sprint: 'ready' INSERT 성공 직후 푸시 발송.
     // voice-first-message-gate 정책상 'ready' 메시지만 수신자에게 노출되므로
     // 'failed' 분기에서는 푸시 미발송 (거짓 신호 차단).
-    sendPushToUser(recipientId, {
-      type: 'message',
-      match_id: matchId,
-      sender_id: senderId,
-      sender_name: senderName,
-    }).catch((err) => console.error('[sendPushToUser message]', err));
+    // idempotent-send: 이번 호출이 실제로 INSERT 한 경우(inserted===true)에만
+    // 발송 — 동시 재시도의 이중 푸시 방지.
+    if (inserted) {
+      sendPushToUser(recipientId, {
+        type: 'message',
+        match_id: matchId,
+        sender_id: senderId,
+        sender_name: senderName,
+      }).catch((err) => console.error('[sendPushToUser message]', err));
+    }
   } catch (error) {
     console.error(`[processAndInsertMessage] pipeline error messageId=${messageId}:`, error);
     console.dir(error, { depth: null });
@@ -643,22 +782,35 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
     // 송신자는 본인 메시지가 'failed' 인디케이터로 뜨고, 같은 텍스트를 다시
     // 입력해 재송신할 수 있다. mid-session UPDATE 가 없으므로 expo-audio
     // resource 회수 트리거도 발생 안 함.
-    const { error: insertError } = await supabase.from('messages').insert({
-      id: messageId,
-      match_id: matchId,
-      sender_id: senderId,
-      original_text: text,
-      original_language: senderLang,
-      translated_text: null,
-      translated_language: recipientLang,
-      audio_url: null,
-      audio_status: 'failed',
-      emotion,
-      created_at: queuedAt,
-    });
+    //
+    // idempotent-send: 실패 INSERT 도 ON CONFLICT (id) DO NOTHING. 크로스-인스턴스
+    // 경쟁으로 이미 'ready' 로 들어간 row 를 'failed' 로 덮어쓰지 않도록 —
+    // DO NOTHING 이 정확히 이 보호를 한다 (23505 발생 없이 무시).
+    const { error: insertError } = await supabase
+      .from('messages')
+      .upsert(
+        {
+          id: messageId,
+          match_id: matchId,
+          sender_id: senderId,
+          original_text: text,
+          original_language: senderLang,
+          translated_text: null,
+          translated_language: recipientLang,
+          audio_url: null,
+          audio_status: 'failed',
+          emotion,
+          created_at: queuedAt,
+        },
+        { onConflict: 'id', ignoreDuplicates: true },
+      )
+      .select();
     if (insertError) {
-      console.error(`[processAndInsertMessage] failed-state insert error messageId=${messageId}:`, insertError);
+      console.error(`[processAndInsertMessage] failed-state insert error messageId=${messageId}:`, insertError.message);
     }
+  } finally {
+    // idempotent-send: try/catch 어느 경로로 끝나든 in-flight 가드 해제.
+    endProcessing(messageId);
   }
 }
 

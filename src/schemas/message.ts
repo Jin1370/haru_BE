@@ -14,6 +14,11 @@ export const emotionSchema = z.enum([
 export const sendMessageSchema = z.object({
   text: z.string().trim().min(1).max(1000),
   emotion: emotionSchema.optional(),
+  // idempotent-send: 클라이언트 생성 멱등 키. 제공 시 messages.id 로 사용,
+  // 미제공 시 서버 randomUUID() 폴백 (옛 FE 하위호환). uuid 형식 검증으로
+  // 임의 문자열 PK 주입/injection 표면 차단. wire-only 필드 — messages.id 컬럼에
+  // 매핑되며 별도 컬럼으로 저장하지 않는다.
+  client_message_id: z.string().uuid().optional(),
 });
 
 export const messageQuerySchema = z.object({

@@ -11,7 +11,11 @@ primary_region = 'nrt'
 [http_service]
   internal_port = 3000
   force_https = true
-  auto_stop_machines = 'stop'
+  # 'suspend' = 유휴 시 완전 정지(stop) 대신 메모리 스냅샷으로 보존 → 재개(wake)가
+  # 풀 부팅(~15초) 대신 ~1~3초. min_machines_running=0 을 유지해 상시 비용은 계속
+  # 0(scale-to-zero). 상시 warm(즉시 응답)이 필요하면 min_machines_running=1 이지만
+  # 그건 머신 24/7 가동이라 유료 — 무료 유지를 위해 suspend 채택.
+  auto_stop_machines = 'suspend'
   auto_start_machines = true
   min_machines_running = 0
   processes = ['app']

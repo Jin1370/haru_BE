@@ -46,14 +46,16 @@ async function streamToBuffer(
 // 'other' / null / undefined 는 태그 없음. mig 011 voice intro 다국어 합성
 // 시 도입됐고, 메시지 TTS 도 동일 페르소나를 공유하도록 본 서비스로 이동.
 //
-// tag 선택 원칙: pitch 변경 tag 회피. delivery·감정 tag 로 톤의 성격만 가산해
-// 원본 음색 유사도 보존.
-// - male: softly + warmly (차분·부드러움 + 따뜻함, 방정맞음 차단).
+// tag 선택 원칙: delivery·감정 tag 로 톤의 성격을 가산.
+// - male: softly + warmly + low pitch (차분·부드러움 + 따뜻함 + 낮은 음역대).
+//   ※ low pitch 는 사용자 명시 요청으로 추가된 pitch 변경 tag — 남성 톤을 더
+//     낮고 안정적으로 잡되, pitch 조작은 원본 클론 음색 유사도(차별점 2)를 다소
+//     떨어뜨릴 수 있는 트레이드오프. 실기기 청취 결과로 유지/제거 판정.
 // - female: sweetly + cutely (다정 + 애교).
 export type PersonaGender = "male" | "female" | "other" | null | undefined;
 
 function buildPersonaTag(gender: PersonaGender): string {
-    if (gender === "male") return "[softly, warmly] ";
+    if (gender === "male") return "[softly, warmly, low pitch] ";
     if (gender === "female") return "[sweetly, cutely] ";
     return "";
 }
@@ -83,12 +85,18 @@ export async function synthesizeSpeech(
     const personaTag = buildPersonaTag(gender);
     const accentTag = buildAccentTag(targetLanguage);
     const emotionTag = emotion ? `[${emotion}] ` : "";
+    // 제네릭 `[laughs]` 는 take 마다 웃음의 결이 크게 튀어(설레는 웃음 ↔ 바보 같은
+    // "흐흐흐") 데이팅 톤에 불안정. ElevenLabs 경계면인 여기서 `[soft laugh]` 로
+    // 좁혀 goofy 편차를 줄인다. 이 변환은 TTS 입력 전용 — prepareTextForTTS /
+    // 번역 보존 / stripAudioTags / replaceTagsForDisplay 는 canonical `[laughs]`
+    // 리터럴 기준으로 그대로 동작(DB·UI 슬랭 복원 무영향).
+    const laughAdjusted = text.replace(/\[laughs\]/g, "[soft laugh]");
     // eleven_v3 는 종결 prosody 를 빠르게 마무리해 마지막 음절이 잘려 들리는
     // 경향이 있음 (특히 stability=1.0 Robust + 종결 punctuation 부재 시).
     // 텍스트 끝에 종결 punctuation 이 없으면 ellipsis 를 부착해 모델이 학습한
-    // "문장 끝" 분포대로 자연 fade-out 을 유도. audio tag (`[laughs]` 등) 로
+    // "문장 끝" 분포대로 자연 fade-out 을 유도. audio tag (`[soft laugh]` 등) 로
     // 끝나는 경우에도 효과음 직후 trailing silence 가 따라붙어 잘림 완화.
-    const trimmedText = text.trimEnd();
+    const trimmedText = laughAdjusted.trimEnd();
     const hasTerminalPunctuation = /[.!?…。！？]$/.test(trimmedText);
     const paddedText = hasTerminalPunctuation ? trimmedText : `${trimmedText}…`;
     const prefixed = `${personaTag}${accentTag}${emotionTag}${paddedText}`;

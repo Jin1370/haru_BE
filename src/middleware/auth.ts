@@ -67,7 +67,9 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
   const { data, error } = await supabase.auth.getUser(token);
 
   if (error || !data.user) {
-    console.error('[Auth] Token verification failed:', error?.message);
+    // 만료/무효 토큰은 클라이언트 정상 상태 (FE 가 401 → refresh → 재시도) —
+    // warn 으로 남겨 Sentry(captureConsole error-only) 이벤트에서 제외.
+    console.warn('[Auth] Token verification failed:', error?.message);
     res.status(401).json({ error: 'Invalid or expired token' });
     return;
   }

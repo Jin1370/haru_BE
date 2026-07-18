@@ -157,10 +157,3 @@ export function startAudioExpiryScheduler(): void {
   // 가 sweep timer 때문에 hang 되지 않도록.
   scheduled.unref?.();
 }
-
-export function stopAudioExpiryScheduler(): void {
-  if (scheduled) {
-    clearInterval(scheduled);
-    scheduled = null;
-  }
-}

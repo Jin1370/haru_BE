@@ -1,3 +1,4 @@
+import { buffer } from "node:stream/consumers";
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import { SILENCE_TAIL } from "../assets/silenceTail";
 import { env } from "../config/env";
@@ -27,19 +28,6 @@ export async function createVoiceClone(
 
 export async function deleteVoiceClone(voiceId: string): Promise<void> {
     await client.voices.delete(voiceId);
-}
-
-async function streamToBuffer(
-    stream: ReadableStream<Uint8Array>,
-): Promise<Buffer> {
-    const reader = stream.getReader();
-    const chunks: Uint8Array[] = [];
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) chunks.push(value);
-    }
-    return Buffer.concat(chunks);
 }
 
 // 데이팅 톤 페르소나 — 발신자 성별 기반 vocal style tag.
@@ -115,7 +103,7 @@ export async function synthesizeSpeech(
         //   있음). 대안: 0.5 Natural (균형), 0.0 Creative (최대 expressiveness).
         voiceSettings: { stability: 1.0 },
     });
-    const speech = await streamToBuffer(audioStream);
+    const speech = await buffer(audioStream);
     // eleven_v3 는 합성 stream 마지막 ~0.2초 trailing silence 없이 잘라내는
     // 경향이 있음 (모델 동작, stability 프리셋 무관). 텍스트 종결 punctuation
     // padding (paddedText) 으로도 완전히 해결되지 않아 출력 buffer 뒤에

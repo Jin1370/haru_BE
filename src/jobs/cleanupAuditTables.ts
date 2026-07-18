@@ -91,7 +91,22 @@ export async function sweepAuditTables(): Promise<{
 }
 
 let scheduler: NodeJS.Timeout | null = null;
-let bootTimer: NodeJS.Timeout | null = null;
+
+// 0 건이면 silent (출시 직후 매 부팅마다 빈 sweep 로그 노이즈 회피).
+function runSweep(label: string): void {
+  sweepAuditTables()
+    .then((r) => {
+      if (
+        r.moderationDeleted > 0 ||
+        r.freezeDeleted > 0 ||
+        r.reportsDeleted > 0 ||
+        r.blocksDeleted > 0
+      ) {
+        console.log(`[audit-cleanup.sweep] ${label}`, r);
+      }
+    })
+    .catch((err) => console.error(`[audit-cleanup.sweep] ${label} error`, err));
+}
 
 export function startAuditCleanupScheduler(): void {
   if (process.env.NODE_ENV === 'test') return;
@@ -99,48 +114,9 @@ export function startAuditCleanupScheduler(): void {
 
   // 부팅 직후 1 회. 다중 인스턴스 배포 시 동시 DELETE 도 멱등 (cutoff 이전 row 가
   // 0 개면 no-op). audio-expiry sweep 보다 30 초 늦게 시작해 동시 부담 분산.
-  // 0 건이면 silent — tick 과 동일 패턴 (출시 직후 매 부팅마다 빈 sweep 로그 노이즈 회피).
-  bootTimer = setTimeout(() => {
-    bootTimer = null;
-    sweepAuditTables()
-      .then((r) => {
-        if (
-          r.moderationDeleted > 0 ||
-          r.freezeDeleted > 0 ||
-          r.reportsDeleted > 0 ||
-          r.blocksDeleted > 0
-        ) {
-          console.log('[audit-cleanup.sweep] boot', r);
-        }
-      })
-      .catch((err) => console.error('[audit-cleanup.sweep] boot error', err));
-  }, BOOT_DELAY_MS);
+  const bootTimer = setTimeout(() => runSweep('boot'), BOOT_DELAY_MS);
   bootTimer.unref();
 
-  scheduler = setInterval(() => {
-    sweepAuditTables()
-      .then((r) => {
-        if (
-          r.moderationDeleted > 0 ||
-          r.freezeDeleted > 0 ||
-          r.reportsDeleted > 0 ||
-          r.blocksDeleted > 0
-        ) {
-          console.log('[audit-cleanup.sweep] tick', r);
-        }
-      })
-      .catch((err) => console.error('[audit-cleanup.sweep] tick error', err));
-  }, SWEEP_INTERVAL_MS);
+  scheduler = setInterval(() => runSweep('tick'), SWEEP_INTERVAL_MS);
   scheduler.unref();
-}
-
-export function stopAuditCleanupScheduler(): void {
-  if (scheduler) {
-    clearInterval(scheduler);
-    scheduler = null;
-  }
-  if (bootTimer) {
-    clearTimeout(bootTimer);
-    bootTimer = null;
-  }
 }

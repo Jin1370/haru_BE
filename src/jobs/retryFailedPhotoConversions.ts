@@ -185,7 +185,6 @@ export async function sweepPendingPhotoConversions(): Promise<PhotoConversionSwe
 }
 
 let scheduler: NodeJS.Timeout | null = null;
-let bootTimer: NodeJS.Timeout | null = null;
 
 export function startPhotoConversionRetryScheduler(): void {
   if (process.env.NODE_ENV === 'test') return;
@@ -194,8 +193,7 @@ export function startPhotoConversionRetryScheduler(): void {
   // audio-expiry (60s) / audit-cleanup (90s) 와 어긋나게 120s 로 분산.
   const BOOT_DELAY_MS = 120 * 1000;
 
-  bootTimer = setTimeout(() => {
-    bootTimer = null;
+  const bootTimer = setTimeout(() => {
     sweepPendingPhotoConversions().catch((e) => {
       console.error('[retryFailedPhotoConversions.boot_error]', e);
     });
@@ -208,15 +206,4 @@ export function startPhotoConversionRetryScheduler(): void {
     });
   }, PHOTO_CONVERSION_RETRY_INTERVAL_MS);
   scheduler.unref();
-}
-
-export function stopPhotoConversionRetryScheduler(): void {
-  if (scheduler) {
-    clearInterval(scheduler);
-    scheduler = null;
-  }
-  if (bootTimer) {
-    clearTimeout(bootTimer);
-    bootTimer = null;
-  }
 }

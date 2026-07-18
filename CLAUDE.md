@@ -43,7 +43,7 @@ Express 5 + Supabase + ElevenLabs 기반 크로스언어 소개팅 API 서버.
 
 - 모든 인증 필요 라우트는 `authMiddleware`를 `router.use()`로 적용
 - 입력 검증: zod 스키마 (`src/schemas/`) + `validateBody`/`validateQuery` 미들웨어 (`src/middleware/validate.ts`). Express 5에서 `req.query`는 getter 전용이므로 `Object.defineProperty`로 덮어씀.
-- 에러 처리: `AppError` 클래스 (`src/errors.ts`) + `errorMiddleware`에서 `instanceof` 판별
+- 에러 처리: 라우트 핸들러가 직접 `res.status(...).json({ error })` 응답. `errorMiddleware`는 미처리 예외를 500 으로 변환하는 최종 안전망 (옛 `AppError` 클래스 컨벤션은 사용처 0 으로 2026-07 리팩토링에서 제거됨)
 - Supabase service role key 사용 (RLS 우회) — 서버 사이드 전용. `env.supabase.anonKey`도 설정 가능.
 - 매치 생성 시 `user1_id < user2_id` 정렬 보장 (DB UNIQUE 제약조건). 동시 like로 인한 중복(23505) 시 기존 매치 조회로 fallback.
 - 매치 삭제는 soft delete (`unmatched_at`, `unmatched_by`)
@@ -73,4 +73,4 @@ Express 5 + Supabase + ElevenLabs 기반 크로스언어 소개팅 API 서버.
 
 vitest + supertest. `tests/setup.ts`에서 env, Supabase, ElevenLabs, Storage를 전역 모킹. `app`은 `src/index.ts`에서 export하며, `NODE_ENV=test`일 때 `listen()` 스킵.
 
-`tests/helpers.ts`: `generateTestToken(userId?)`, `createMockSupabaseQuery(data, error)` — 체이닝 가능한 Supabase 쿼리 mock 생성.
+Supabase 모킹은 각 테스트 파일이 `vi.hoisted` + `vi.mock` 패턴으로 직접 구성한다 (옛 `tests/helpers.ts` 의 `createMockSupabaseQuery` 는 라이브-DB 테스트 정리 커밋 `e52e0eb` 에서 삭제됨 — `tests/swipe.test.ts` 가 현행 패턴의 참조 예시).

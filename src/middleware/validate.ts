@@ -1,18 +1,22 @@
 import { Request, Response, NextFunction } from 'express';
 import { ZodSchema, ZodError } from 'zod';
 
+function handleParseError(err: unknown, res: Response, next: NextFunction): void {
+  if (err instanceof ZodError) {
+    const message = err.issues.map((e) => `${String(e.path.join('.'))}: ${e.message}`).join(', ');
+    res.status(400).json({ error: message });
+    return;
+  }
+  next(err);
+}
+
 export function validateBody(schema: ZodSchema) {
   return (req: Request, _res: Response, next: NextFunction) => {
     try {
       req.body = schema.parse(req.body);
       next();
     } catch (err) {
-      if (err instanceof ZodError) {
-        const message = err.issues.map((e) => `${String(e.path.join('.'))}: ${e.message}`).join(', ');
-        _res.status(400).json({ error: message });
-        return;
-      }
-      next(err);
+      handleParseError(err, _res, next);
     }
   };
 }
@@ -25,12 +29,7 @@ export function validateQuery(schema: ZodSchema) {
       Object.defineProperty(req, 'query', { value: parsed, writable: true, configurable: true });
       next();
     } catch (err) {
-      if (err instanceof ZodError) {
-        const message = err.issues.map((e) => `${String(e.path.join('.'))}: ${e.message}`).join(', ');
-        _res.status(400).json({ error: message });
-        return;
-      }
-      next(err);
+      handleParseError(err, _res, next);
     }
   };
 }

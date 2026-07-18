@@ -516,17 +516,15 @@ router.post('/photos', requireNotFrozen, upload.single('photo'), async (req: Aut
     originalPath: path,
   }).catch((err) => console.error('[profile.photos.convert_async_error]', (err as Error).message));
 
-  // 호환성: 옛 wire shape ({ url, photos }) 도 응답에 동봉. FE 신규 클라이언트는
-  // photo_id / position / status 사용, 옛 클라이언트는 url / photos 폴백.
+  // 호환성: 옛 wire shape 의 url 키도 응답에 동봉. FE 신규 클라이언트는
+  // photo_id / position / status 사용, 옛 클라이언트는 url 폴백.
   // status='processing' 이라 url 은 임시로 originalUrl 노출 — 변환 완료 후 폴링이
   // converted_url 로 갱신.
   res.status(202).json({
     photo_id: insertResult.id,
     position: insertResult.position,
     status: 'processing',
-    // 옛 wire 호환 (변환 완료 전 임시 URL — FE 가 폴링 후 갱신).
     url: originalUrl,
-    photos: undefined,
   });
 });
 

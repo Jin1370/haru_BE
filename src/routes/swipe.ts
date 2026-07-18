@@ -9,6 +9,7 @@ import { requireNotFrozen } from '../utils/freezeGuard';
 import { env } from '../config/env';
 import { createSignedUrlFromStored } from '../services/storage';
 import { VOICE_INTRO_BUCKET } from '../services/voiceIntro';
+import { fetchReadyPhotosByUser } from '../services/profilePhotos';
 
 // 시청자 언어 → 보이스 인트로 슬롯 매핑 (mig 011).
 // ko/ja/en 활성. th/hi/그 외/null 은 'en' 폴백 (FE 의 영문 강제 정책과 일관).
@@ -49,6 +50,29 @@ type ViewerPrefs = {
   preferred_languages: string[];
   preferred_nationalities: string[];
 };
+
+// 사전 SQL 필터: 성별/연령만 (디스커버 / 받은좋아요 공용). 언어·국가 선호는
+// 티어 정렬 신호로 사용되므로 여기서 IN 필터로 후보를 제거하지 않는다
+// (미부합 후보는 하위 티어로 밀려나 노출만 후순위).
+function applyPrefFilters<Q>(query: Q, prefs: any): Q {
+  if (!prefs) return query;
+  let q: any = query;
+  if (prefs.preferred_genders && prefs.preferred_genders.length > 0) {
+    q = q.in('gender', prefs.preferred_genders);
+  }
+  const now = new Date();
+  if (prefs.min_age) {
+    const maxBirthDate = new Date(now.getFullYear() - prefs.min_age, now.getMonth(), now.getDate())
+      .toISOString().split('T')[0];
+    q = q.lte('birth_date', maxBirthDate);
+  }
+  if (prefs.max_age) {
+    const minBirthDate = new Date(now.getFullYear() - prefs.max_age - 1, now.getMonth(), now.getDate())
+      .toISOString().split('T')[0];
+    q = q.gte('birth_date', minBirthDate);
+  }
+  return q as Q;
+}
 
 // 결정적 해시 기반 jitter (같은 viewer-candidate 쌍에 대해 동일 값 반환)
 function hashJitter(candidateId: string, viewerId: string, max: number): number {
@@ -224,24 +248,7 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     .order('id', { ascending: false })
     .limit(fetchLimit);
 
-  // 사전 필터: 성별/연령만. 언어 선호는 티어 정렬 신호로 사용되므로
-  // 여기서 IN 필터로 후보를 제거하지 않는다(미부합 후보는 T2 로 밀려남).
-  if (prefs) {
-    if (prefs.preferred_genders && prefs.preferred_genders.length > 0) {
-      query = query.in('gender', prefs.preferred_genders);
-    }
-    const now = new Date();
-    if (prefs.min_age) {
-      const maxBirthDate = new Date(now.getFullYear() - prefs.min_age, now.getMonth(), now.getDate())
-        .toISOString().split('T')[0];
-      query = query.lte('birth_date', maxBirthDate);
-    }
-    if (prefs.max_age) {
-      const minBirthDate = new Date(now.getFullYear() - prefs.max_age - 1, now.getMonth(), now.getDate())
-        .toISOString().split('T')[0];
-      query = query.gte('birth_date', minBirthDate);
-    }
-  }
+  query = applyPrefFilters(query, prefs);
 
   const { data, error } = await query;
 
@@ -260,25 +267,7 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   // 사진 수. ready 사진이 0장인 사용자는 visible 단계에서 제외 (회원가입 직후 변환
   // 대기 케이스).
   const candidateIds = (data ?? []).map((row: any) => row.id as string);
-  const readyPhotosByUser = new Map<string, string[]>();
-  if (candidateIds.length > 0) {
-    const { data: photoRows, error: photoErr } = await supabase
-      .from('profile_photos')
-      .select('user_id, position, converted_url, status')
-      .in('user_id', candidateIds)
-      .eq('status', 'ready')
-      .order('position', { ascending: true });
-    if (photoErr) {
-      console.error('[discover.profile_photos_select_failed]', photoErr.message);
-    } else {
-      ((photoRows ?? []) as Array<{ user_id: string; converted_url: string | null }>).forEach((r) => {
-        if (!r.converted_url) return;
-        const list = readyPhotosByUser.get(r.user_id) ?? [];
-        list.push(r.converted_url);
-        readyPhotosByUser.set(r.user_id, list);
-      });
-    }
-  }
+  const readyPhotosByUser = await fetchReadyPhotosByUser(candidateIds, 'discover');
 
   // 사진이 한 장도 없는 미완성 프로필 (또는 변환 미완료 사용자) 는 후보에서 제외.
   // 본인 언어 일치 후보는 SQL 단에서 이미 제거됐지만, 마이그레이션 직후 NULL 인 행이
@@ -437,22 +426,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     .in('id', eligibleIds)
     .eq('is_active', true);
 
-  if (prefs) {
-    if (prefs.preferred_genders && prefs.preferred_genders.length > 0) {
-      query = query.in('gender', prefs.preferred_genders);
-    }
-    const now = new Date();
-    if (prefs.min_age) {
-      const maxBirthDate = new Date(now.getFullYear() - prefs.min_age, now.getMonth(), now.getDate())
-        .toISOString().split('T')[0];
-      query = query.lte('birth_date', maxBirthDate);
-    }
-    if (prefs.max_age) {
-      const minBirthDate = new Date(now.getFullYear() - prefs.max_age - 1, now.getMonth(), now.getDate())
-        .toISOString().split('T')[0];
-      query = query.gte('birth_date', minBirthDate);
-    }
-  }
+  query = applyPrefFilters(query, prefs);
 
   const { data: profiles, error: profilesError } = await query;
 
@@ -463,25 +437,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
 
   // mig 034: profile_photos 일괄 조회 (디스커버와 동일 패턴 — position ASC 전체 ready).
   const candidateIds = (profiles ?? []).map((row: any) => row.id as string);
-  const readyPhotosByUser = new Map<string, string[]>();
-  if (candidateIds.length > 0) {
-    const { data: photoRows, error: photoErr } = await supabase
-      .from('profile_photos')
-      .select('user_id, position, converted_url, status')
-      .in('user_id', candidateIds)
-      .eq('status', 'ready')
-      .order('position', { ascending: true });
-    if (photoErr) {
-      console.error('[likes-received.profile_photos_select_failed]', photoErr.message);
-    } else {
-      ((photoRows ?? []) as Array<{ user_id: string; converted_url: string | null }>).forEach((r) => {
-        if (!r.converted_url) return;
-        const list = readyPhotosByUser.get(r.user_id) ?? [];
-        list.push(r.converted_url);
-        readyPhotosByUser.set(r.user_id, list);
-      });
-    }
-  }
+  const readyPhotosByUser = await fetchReadyPhotosByUser(candidateIds, 'likes-received');
 
   // 4) 가시 후보 필터 — 사진 0장 / 언어 미설정 / viewer 와 같은 언어 후보 제외.
   //    cross-language 정책은 디스커버와 동일하게 적용 (받은 좋아요 풀에 같은 언어가

@@ -31,28 +31,9 @@ router.post('/auth/verify', adminSecretGuard, (_req, res) => {
 // auth.users 에서 user_metadata.is_dev_seed=true 인 항목 + 각자 profile 정보 결합.
 router.get('/accounts', adminSecretGuard, async (_req, res) => {
   try {
-    // 1) auth.users 페이지네이션 스캔 (seed 마커 필터)
-    const seedUsers: { id: string; email: string | null; persona_index: number | null }[] = [];
-    const perPage = 1000;
-    for (let page = 1; ; page++) {
-      const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
-      if (error) {
-        res.status(500).json({ error: `listUsers failed: ${error.message}` });
-        return;
-      }
-      for (const user of data.users) {
-        const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
-        if (meta.is_dev_seed === true) {
-          seedUsers.push({
-            id: user.id,
-            email: user.email ?? null,
-            persona_index:
-              typeof meta.persona_index === 'number' ? meta.persona_index : null,
-          });
-        }
-      }
-      if (data.users.length < perPage) break;
-    }
+    // 1) auth.users 페이지네이션 스캔 (seed 마커 필터) — notify-sink 와 공용 헬퍼.
+    // listUsers 실패 throw 는 아래 catch 가 동일 문구의 500 으로 변환.
+    const seedUsers = await listSeedUsers();
 
     if (seedUsers.length === 0) {
       res.json({ accounts: [] });
@@ -139,9 +120,11 @@ router.get('/accounts', adminSecretGuard, async (_req, res) => {
 // 폰에 로그인된 실계정의 expo_push_token 을 모든 dev seed 계정 앞으로 복제한다.
 // sendPushToUser 가 (어드민 활성 시) dev_notification_sinks 도 조회해 발송.
 
-// is_dev_seed=true 인 auth.users 전체 스캔 (페이지네이션).
-async function listSeedUsers(): Promise<{ id: string; email: string | null }[]> {
-  const seedUsers: { id: string; email: string | null }[] = [];
+// is_dev_seed=true 인 auth.users 전체 스캔 (페이지네이션). /accounts + notify-sink 공용.
+async function listSeedUsers(): Promise<
+  { id: string; email: string | null; persona_index: number | null }[]
+> {
+  const seedUsers: { id: string; email: string | null; persona_index: number | null }[] = [];
   const perPage = 1000;
   for (let page = 1; ; page++) {
     const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
@@ -149,7 +132,11 @@ async function listSeedUsers(): Promise<{ id: string; email: string | null }[]> 
     for (const user of data.users) {
       const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
       if (meta.is_dev_seed === true) {
-        seedUsers.push({ id: user.id, email: user.email ?? null });
+        seedUsers.push({
+          id: user.id,
+          email: user.email ?? null,
+          persona_index: typeof meta.persona_index === 'number' ? meta.persona_index : null,
+        });
       }
     }
     if (data.users.length < perPage) break;

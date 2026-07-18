@@ -8,6 +8,7 @@ import { AuthRequest, type VoiceIntroSlotLanguage } from '../types';
 import { pickViewerSlot } from './swipe';
 import { createSignedUrlFromStored } from '../services/storage';
 import { VOICE_INTRO_BUCKET } from '../services/voiceIntro';
+import { fetchReadyPhotosByUser } from '../services/profilePhotos';
 
 const matchListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional().default(20),
@@ -102,25 +103,7 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
 
   // photo-watercolor-pipeline sprint: partner 별 ready 사진 일괄 조회. position ASC.
   // 디스커버와 동일 패턴 + position 0~4 전체 (매치는 unlock 도달 시 전체 노출).
-  const readyPhotosByPartner = new Map<string, string[]>();
-  if (partnerIds.length > 0) {
-    const { data: photoRows, error: photoErr } = await supabase
-      .from('profile_photos')
-      .select('user_id, position, converted_url, status')
-      .in('user_id', partnerIds)
-      .eq('status', 'ready')
-      .order('position', { ascending: true });
-    if (photoErr) {
-      console.error('[match.list.profile_photos_select_failed]', photoErr.message);
-    } else {
-      ((photoRows ?? []) as Array<{ user_id: string; converted_url: string | null }>).forEach((r) => {
-        if (!r.converted_url) return;
-        const list = readyPhotosByPartner.get(r.user_id) ?? [];
-        list.push(r.converted_url);
-        readyPhotosByPartner.set(r.user_id, list);
-      });
-    }
-  }
+  const readyPhotosByPartner = await fetchReadyPhotosByUser(partnerIds, 'match.list');
 
   // 3. 매치별 마지막 메시지 + 읽지 않은 수 + 라운드트립 기반 unlock 플래그 (RPC v3)
   //

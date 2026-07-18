@@ -296,20 +296,7 @@ export async function convertProfilePhoto(input: ConversionInput): Promise<Conve
       failure_reason: failureReason,
       message: errAny.message,
     });
-    // retry_count 증가는 별도 SELECT 후 UPDATE. supabase-js v2 의 raw SQL increment
-    // 미지원이라 atomic 증가는 단순 SELECT-then-UPDATE (race 시 약간의 over-count
-    // 발생 가능하나 max=3 cap 으로 영향 무시).
-    const { data: cur } = await supabase
-      .from('profile_photos')
-      .select('retry_count')
-      .eq('id', photoRowId)
-      .maybeSingle();
-    const newRetryCount = ((cur?.retry_count as number | null) ?? 0) + 1;
-    await updatePhotoStatus(photoRowId, {
-      status: 'failed',
-      failure_reason: failureReason,
-      retry_count: newRetryCount,
-    });
+    await markFailedWithRetryIncrement(photoRowId, failureReason);
     return { status: 'failed', failureReason };
   }
 
@@ -331,17 +318,7 @@ export async function convertProfilePhoto(input: ConversionInput): Promise<Conve
       photo_row_id: photoRowId,
       error: message,
     });
-    const { data: cur } = await supabase
-      .from('profile_photos')
-      .select('retry_count')
-      .eq('id', photoRowId)
-      .maybeSingle();
-    const newRetryCount = ((cur?.retry_count as number | null) ?? 0) + 1;
-    await updatePhotoStatus(photoRowId, {
-      status: 'failed',
-      failure_reason: 'upload_failed',
-      retry_count: newRetryCount,
-    });
+    await markFailedWithRetryIncrement(photoRowId, 'upload_failed');
     return { status: 'failed', failureReason: 'upload_failed' };
   }
 
@@ -407,17 +384,7 @@ export async function retryPendingOrFailedPhoto(
       path: originalPath,
       error: message,
     });
-    const { data: cur } = await supabase
-      .from('profile_photos')
-      .select('retry_count')
-      .eq('id', photoRowId)
-      .maybeSingle();
-    const newRetryCount = ((cur?.retry_count as number | null) ?? 0) + 1;
-    await updatePhotoStatus(photoRowId, {
-      status: 'failed',
-      failure_reason: 'download_failed',
-      retry_count: newRetryCount,
-    });
+    await markFailedWithRetryIncrement(photoRowId, 'download_failed');
     return { status: 'failed', failureReason: 'download_failed' };
   }
 
@@ -434,6 +401,27 @@ function mimeTypeToExt(mime: string): string {
   if (mime.includes('png')) return 'png';
   if (mime.includes('webp')) return 'webp';
   return 'jpg';
+}
+
+// status='failed' 마킹 + retry_count 증가 (openai/upload/download 3 실패 경로 공용).
+// retry_count 증가는 별도 SELECT 후 UPDATE. supabase-js v2 의 raw SQL increment
+// 미지원이라 atomic 증가는 단순 SELECT-then-UPDATE (race 시 약간의 over-count
+// 발생 가능하나 max=3 cap 으로 영향 무시).
+async function markFailedWithRetryIncrement(
+  photoRowId: string,
+  failureReason: string,
+): Promise<void> {
+  const { data: cur } = await supabase
+    .from('profile_photos')
+    .select('retry_count')
+    .eq('id', photoRowId)
+    .maybeSingle();
+  const newRetryCount = ((cur?.retry_count as number | null) ?? 0) + 1;
+  await updatePhotoStatus(photoRowId, {
+    status: 'failed',
+    failure_reason: failureReason,
+    retry_count: newRetryCount,
+  });
 }
 
 function inferFailureReason(message: string): string {

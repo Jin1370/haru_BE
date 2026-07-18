@@ -314,7 +314,6 @@ export interface BlockResult {
     blocked: boolean;
     category?: ModerationCategory;
     language?: ModerationLanguage;
-    matchedToken?: string; // BE 로그 + DB audit 용 — 응답에 절대 노출 X
 }
 
 export function isBlocked(text: string): BlockResult {
@@ -330,7 +329,6 @@ export function isBlocked(text: string): BlockResult {
                     blocked: true,
                     category: entry.category,
                     language: entry.language,
-                    matchedToken: token,
                 };
             }
         }

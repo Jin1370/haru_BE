@@ -32,15 +32,21 @@ router.post('/', validateBody(blockSchema), async (req: AuthRequest, res: Respon
     return;
   }
 
-  // 기존 매치가 있으면 soft delete + actor 의 hidden_by 자동 append.
-  // hidden_by 에 자기 user_id 가 들어가면 GET /api/matches 의
-  // `.not('hidden_by', 'cs', '{viewerId}')` 필터로 본인 시야에서만
-  // 즉시 사라진다 (mig 013). 상대방은 tombstone 으로 그대로 보유.
-  //
-  // 이미 언매치된 매치(상대가 먼저 차단/신고했던 케이스)에 대해서도
-  // hidden_by 만은 추가해야 하므로 unmatched_at 필터 없이 매치 행을
-  // 먼저 select 한 뒤 read-modify-write 한다.
-  const [id1, id2] = [req.userId!, blocked_id].sort();
+  await softDeleteAndHideMatch(req.userId!, blocked_id);
+
+  res.status(201).json({ status: 'blocked' });
+});
+
+// 차단/신고 시 기존 매치 soft delete + actor 의 hidden_by 자동 append (report.ts 공용).
+// hidden_by 에 자기 user_id 가 들어가면 GET /api/matches 의
+// `.not('hidden_by', 'cs', '{viewerId}')` 필터로 본인 시야에서만
+// 즉시 사라진다 (mig 013). 상대방은 tombstone 으로 그대로 보유.
+//
+// 이미 언매치된 매치(상대가 먼저 차단/신고했던 케이스)에 대해서도
+// hidden_by 만은 추가해야 하므로 unmatched_at 필터 없이 매치 행을
+// 먼저 select 한 뒤 read-modify-write 한다.
+export async function softDeleteAndHideMatch(actorId: string, otherId: string): Promise<void> {
+  const [id1, id2] = [actorId, otherId].sort();
   const { data: match } = await supabase
     .from('matches')
     .select('id, hidden_by, unmatched_at')
@@ -48,23 +54,21 @@ router.post('/', validateBody(blockSchema), async (req: AuthRequest, res: Respon
     .eq('user2_id', id2)
     .maybeSingle();
 
-  if (match) {
-    const currentHidden = (match.hidden_by as string[] | null) ?? [];
-    const nextHidden = currentHidden.includes(req.userId!)
-      ? currentHidden
-      : [...currentHidden, req.userId!];
+  if (!match) return;
 
-    const updates: Record<string, unknown> = { hidden_by: nextHidden };
-    if (!match.unmatched_at) {
-      updates.unmatched_at = new Date().toISOString();
-      updates.unmatched_by = req.userId!;
-    }
+  const currentHidden = (match.hidden_by as string[] | null) ?? [];
+  const nextHidden = currentHidden.includes(actorId)
+    ? currentHidden
+    : [...currentHidden, actorId];
 
-    await supabase.from('matches').update(updates).eq('id', match.id);
+  const updates: Record<string, unknown> = { hidden_by: nextHidden };
+  if (!match.unmatched_at) {
+    updates.unmatched_at = new Date().toISOString();
+    updates.unmatched_by = actorId;
   }
 
-  res.status(201).json({ status: 'blocked' });
-});
+  await supabase.from('matches').update(updates).eq('id', match.id);
+}
 
 // 차단 해제
 router.delete('/:blockedId', async (req: AuthRequest, res: Response) => {

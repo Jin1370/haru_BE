@@ -5,10 +5,10 @@ import { uploadFile } from '../services/storage';
 import { synthesizeSpeech, type PersonaGender } from '../services/elevenlabs';
 import { translateMessage } from '../services/translation';
 import {
-  prepareTextForTTS,
   replaceTagsForDisplay,
   ensureSpeakableForTTS,
   hasSpeakableContent,
+  stripNonAudibleTags,
 } from '../utils/textNormalization';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
@@ -534,8 +534,8 @@ router.post('/:matchId/messages/:messageId/listened', async (req: AuthRequest, r
 //   * 송신자의 현재 elevenlabs_voice_id 가 존재 (그 외 410 — 송신자가 클론을
 //     소실한 경우. 탈퇴 anonymize / 미보유 등)
 //
-// 재합성 파이프라인은 processAndInsertMessage 와 동일 구조 (prepareTextForTTS →
-// Gemini → synthesizeSpeech → uploadFile) 이나, INSERT 가 아니라 UPDATE 라는
+// 재합성 파이프라인은 processAndInsertMessage 와 동일 구조 (Gemini 태깅+번역 →
+// synthesizeSpeech → uploadFile) 이나, INSERT 가 아니라 UPDATE 라는
 // 점만 다름. 재생성된 audio 는 versioned path (`{messageId}_v{ts}.mp3`) 로 업로드
 // 해 CDN/클라이언트 캐시 우회 — 동일 path 에 upsert 하면 일부 클라이언트가
 // 옛 404 응답을 캐시했을 때 새 파일을 못 가져오는 회귀 발생.
@@ -610,20 +610,21 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
   // 5) 파이프라인 — 본 라우트는 동기 응답이 필요 (FE 가 받은 URL 로 즉시 재생)
   // 이라 async stub 패턴 적용 안 함. 일반적으로 < 5초.
   try {
-    const taggedSource = prepareTextForTTS(originalText);
     const { translation } = await translateMessage({
-      text: taggedSource,
+      text: originalText,
       targetLanguage: recipientLang,
     });
 
-    if (!hasSpeakableContent(translation)) {
+    // [laughs] 만 audible — [sad] 등은 TTS 에서 제거 (사용자 정책).
+    const ttsText = stripNonAudibleTags(translation);
+    if (!hasSpeakableContent(ttsText)) {
       // 원래도 TTS 가 스킵됐어야 할 케이스 — 재합성 불가. 일반적으로 도달 안 함
       // (sweep 이 audio_url NOT NULL 인 row 만 노렸기 때문). 방어적 분기.
       res.status(409).json({ error: 'Message has no speakable content' });
       return;
     }
 
-    const textToSynthesize = ensureSpeakableForTTS(translation);
+    const textToSynthesize = ensureSpeakableForTTS(ttsText);
     const audio = await synthesizeSpeech(
       textToSynthesize,
       voiceId,
@@ -700,30 +701,38 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
 
   // 파이프라인 (voice clone 보유 발신자 전용 — voiceId 없는 경로는 route 안에서
   // 동기 INSERT 됨):
-  //   1. prepareTextForTTS — 감정 마커(ㅋㅋ/ㅠㅠ/에휴 등) 를 eleven_v3 audio tag 로 치환.
-  //   2. Gemini 번역 — 시스템 프롬프트의 audio tag 보존 룰이 태그를 그대로 통과시킴.
-  //   3. TTS — 태그 보존된 텍스트로 eleven_v3 합성.
-  //   4. DB INSERT 시 translated_text 는 stripAudioTags 로 태그 제거 (UI 노출 방지).
+  //   1. Gemini 1회 호출 = STEP 1(실제 나타난 감정 마커 → [laughs]/[sad]) +
+  //      STEP 2(번역). 출력은 sanitizeAudioTags 화이트리스트 검증됨.
+  //   2. TTS — 태그 보존된 translation 으로 eleven_v3 합성.
+  //   3. DB INSERT 시 translated_text 는 replaceTagsForDisplay 로 태그→슬랭 복원
+  //      (UI 에 raw 태그 미노출). identity 면 null.
   //
   // 본 함수가 **마지막에 한 번만** INSERT 한다 — mid-session UPDATE 패턴 제거.
   try {
-    const taggedSource = prepareTextForTTS(text);
-
+    // Gemini 가 STEP 1(감정 마커 → audio tag) + STEP 2(번역) 를 한 호출에서 처리.
+    // translation 은 sanitizeAudioTags 로 화이트리스트 검증된 [laughs]/[sad] 포함.
     const { translation } = await translateMessage({
-      text: taggedSource,
+      text,
       targetLanguage: recipientLang,
     });
+    // identity: 같은 언어이고 display(태그→슬랭 복원) 텍스트가 원문과 동일 →
+    // 번역 인디케이터 숨김(translated_text=null). 코드스위칭(프로필=ko인데 영어로
+    // 타이핑)이면 display 가 원문과 달라 not-identity → 번역 노출.
+    const displayText = replaceTagsForDisplay(translation, recipientLang);
     const isIdentity =
-      senderLang === recipientLang && translation === taggedSource;
-    const translatedText = isIdentity
-      ? null
-      : replaceTagsForDisplay(translation, recipientLang);
+      senderLang === recipientLang && displayText === text.trim();
+    const translatedText = isIdentity ? null : displayText;
+
+    // TTS 입력: [laughs] 만 남기고 [sad] 등 display-only 태그 제거 (사용자 정책).
+    // 순수 sad 메시지(ㅠㅠ)는 strip 후 빈 텍스트 → TTS 스킵(audio_url=null),
+    // display 슬랭은 translatedText 에 그대로 유지.
+    const ttsText = stripNonAudibleTags(translation);
 
     let audioUrl: string | null = null;
-    if (!hasSpeakableContent(translation)) {
+    if (!hasSpeakableContent(ttsText)) {
       // TTS 스킵 — audio_url=null 이지만 의도된 경로이므로 'ready' 로 마킹.
     } else {
-      const textToSynthesize = ensureSpeakableForTTS(translation);
+      const textToSynthesize = ensureSpeakableForTTS(ttsText);
       const audio = await synthesizeSpeech(textToSynthesize, voiceId, emotion, senderGender, recipientLang);
       const path = `${messageId}.mp3`;
       audioUrl = await uploadFile('voice-messages', path, audio, 'audio/mpeg');

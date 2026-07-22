@@ -93,12 +93,14 @@ POST /api/matches/:id/messages   ───┐
                                     │
         ┌───────────────────────────┘
         ▼
-  1) prepareTextForTTS()       ㅋㅋㅋ → [laughs] (5개 언어 슬랭 + 이모티콘)
-  2) 모더레이션 사전 + OpenAI    노골 표현 즉시 차단
-  3) translateMessage()        Gemini 2.5 Flash, audio tag 보존
-  4) synthesizeSpeech()        ElevenLabs eleven_v3, 송신자 voice_id
-  5) Storage 업로드             voice-messages 버킷
-  6) DB UPDATE + Realtime 푸시  audio_status: processing → ready
+  0) 모더레이션 사전 + OpenAI    POST 시점, 노골 표현 즉시 차단 (raw text)
+  1) translateMessage()        Gemini 2.5 Flash 1회 = STEP1 감정마커→[laughs]/[sad]
+                               + STEP2 번역, 출력 sanitizeAudioTags 화이트리스트 검증
+  1b) stripNonAudibleTags()    TTS 입력에서 [laughs]만 audible, [sad]등 제거(display-only)
+                               순수 sad → 빈 텍스트 → TTS 스킵(audio null), display 슬랭 유지
+  2) synthesizeSpeech()        ElevenLabs eleven_v3, 송신자 voice_id
+  3) Storage 업로드             voice-messages 버킷
+  4) DB INSERT + Realtime 푸시  audio_status: pending → ready
         ▼
 [수신자 채팅창: 번역문 + 송신자 목소리 재생 버튼]
 ```

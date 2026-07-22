@@ -75,9 +75,9 @@ export async function synthesizeSpeech(
     const emotionTag = emotion ? `[${emotion}] ` : "";
     // 제네릭 `[laughs]` 는 take 마다 웃음의 결이 크게 튀어(설레는 웃음 ↔ 바보 같은
     // "흐흐흐") 데이팅 톤에 불안정. ElevenLabs 경계면인 여기서 `[soft laugh]` 로
-    // 좁혀 goofy 편차를 줄인다. 이 변환은 TTS 입력 전용 — prepareTextForTTS /
-    // 번역 보존 / stripAudioTags / replaceTagsForDisplay 는 canonical `[laughs]`
-    // 리터럴 기준으로 그대로 동작(DB·UI 슬랭 복원 무영향).
+    // 좁혀 goofy 편차를 줄인다. 이 변환은 TTS 입력 전용 — Gemini 태깅 /
+    // sanitizeAudioTags / stripAudioTags / replaceTagsForDisplay 는 canonical
+    // `[laughs]` 리터럴 기준으로 그대로 동작(DB·UI 슬랭 복원 무영향).
     const laughAdjusted = text.replace(/\[laughs\]/g, "[soft laugh]");
     // eleven_v3 는 종결 prosody 를 빠르게 마무리해 마지막 음절이 잘려 들리는
     // 경향이 있음 (특히 stability=1.0 Robust + 종결 punctuation 부재 시).

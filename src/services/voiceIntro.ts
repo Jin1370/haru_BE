@@ -4,9 +4,10 @@ import { uploadFile, deleteFile, extractPath } from './storage';
 import { synthesizeSpeech, type PersonaGender } from './elevenlabs';
 import { translateVoiceIntro } from './translation';
 import {
-  prepareTextForTTS,
   replaceTagsForDisplay,
   ensureSpeakableForTTS,
+  hasSpeakableContent,
+  stripNonAudibleTags,
 } from '../utils/textNormalization';
 import {
   VOICE_INTRO_SLOT_LANGUAGES,
@@ -145,11 +146,19 @@ async function synthesizeSlot(args: {
   const { userId, voiceId, lang, text, gender } = args;
   try {
     await setSlotStatus(userId, lang, 'processing');
+    // TTS 입력: [laughs] 만 audible, [sad] 등 display-only 태그는 제거 (사용자 정책).
+    const ttsText = stripNonAudibleTags(text);
+    // strip 후 audible 콘텐츠가 없으면 (순수 sad 슬롯 등) 소리 없이 'ready'.
+    // display 텍스트(voice_intro_translations 슬롯)는 이미 commit 되어 유지된다.
+    if (!hasSpeakableContent(ttsText)) {
+      await setSlotStatus(userId, lang, 'ready');
+      return;
+    }
     // ElevenLabs eleven_v3 는 audio tag + 이모지 strip 후 빈 텍스트면 input_text_empty
-    // 에러로 reject — 사용자가 `ㅋㅋㅋㅋㅋ`/`ㅠㅠㅠ`/`에휴` 등 감정 마커만 보낸 경우
-    // prepareTextForTTS 결과가 `[laughs]` 같은 태그 단독이 되어 이 케이스에 해당.
+    // 에러로 reject — 사용자가 `ㅋㅋㅋㅋㅋ` 등 웃음 마커만 보내 Gemini 출력이
+    // `[laughs]` 단독이 된 경우 이 케이스에 해당.
     // ensureSpeakableForTTS 가 마침표를 덧붙여 validation 통과 + 효과음은 정상 합성.
-    const audio = await synthesizeSpeech(ensureSpeakableForTTS(text), voiceId, null, gender, lang);
+    const audio = await synthesizeSpeech(ensureSpeakableForTTS(ttsText), voiceId, null, gender, lang);
     const path = `${userId}/voice-intro-${lang}-${Date.now()}.mp3`;
     const audioUrl = await uploadFile(VOICE_INTRO_BUCKET, path, audio, 'audio/mpeg');
 
@@ -184,29 +193,19 @@ export async function generateVoiceIntroAudios(
   // (1) 시작 시점 옛 URL snapshot (cleanup 용)
   const oldUrls = await snapshotOldUrls(userId);
 
-  // voice-intro-moderation-unification sprint: audio tag pipeline.
+  // voice-intro audio tag pipeline (Gemini 단독 태깅 — regex prepareTextForTTS 폐지):
   //   * preset 경로 (voice-intro-preset-bypass): 카탈로그가 손번역 + audio tag
-  //     없는 텍스트 (운영 검증된 화이트리스트). prepareTextForTTS /
-  //     replaceTagsForDisplay 모두 우회 — 카탈로그 텍스트 그대로 display + TTS.
-  //   * non-preset 경로: 작성자 입력 원문에 emotion marker (ㅋㅋ / ㅠㅠ / lol 등) 가
-  //     섞여 있을 수 있다. prepareTextForTTS 가 eleven_v3 audio tag (`[laughs]` /
-  //     `[sad]`) 로 치환한 텍스트가 (a) Gemini 번역 입력 (시스템 프롬프트의
-  //     audio tag preservation 룰로 그대로 통과) (b) ElevenLabs TTS 입력에 사용된다.
-  //     DB 의 voice_intro_translations 슬롯엔 replaceTagsForDisplay 거친 display
-  //     텍스트 저장 (raw `[laughs]` 가 UI 에 노출되지 않도록).
-  const ttsAuthorText = presetTranslations
-    ? voiceIntroText
-    : prepareTextForTTS(voiceIntroText);
-  const displayAuthorText = presetTranslations
-    ? voiceIntroText
-    : replaceTagsForDisplay(ttsAuthorText, authorLang);
+  //     없는 텍스트 (운영 검증된 화이트리스트). Gemini / replaceTagsForDisplay
+  //     모두 우회 — 카탈로그 텍스트 그대로 display + TTS.
+  //   * non-preset 경로: raw 작성자 원문을 Gemini 에 넘겨 STEP 1(실제 나타난
+  //     감정 마커 → [laughs]/[sad]) + STEP 2(각 언어 렌더) 를 1회 호출로 처리.
+  //     작성자 슬롯도 targetLanguages 에 포함시켜 Gemini 경유 (identity slot =
+  //     태그만 적용된 원문). translateVoiceIntro 출력은 sanitizeAudioTags 로
+  //     화이트리스트 검증됨. slotTexts 는 TTS 입력(태그 포함), voice_intro_translations
+  //     슬롯엔 replaceTagsForDisplay 거친 display 텍스트 저장(raw `[laughs]` 미노출).
 
-  // (2) 상태 초기화 + 슬롯 텍스트 commit (단일 update).
-  // preset 경로 (voice-intro-preset-bypass sprint) 는 BE 카탈로그가 ko/ja/en 3개를
-  // 모두 보유하므로 이 단계에서 3슬롯을 한 번에 commit. 기존 path 는 작성자 슬롯만 commit.
-  // non-preset 경로의 작성자 슬롯은 display 텍스트(audio tag → 슬랭 복원) 로 저장.
-  const initialTranslations: VoiceIntroTranslations =
-    presetTranslations ?? { [authorLang]: displayAuthorText };
+  // (2) 상태 초기화. non-preset 은 번역 후 슬롯 텍스트를 채우므로 초기 translations 는 빈다.
+  const initialTranslations: VoiceIntroTranslations = presetTranslations ?? {};
   await supabase
     .from('profiles')
     .update({
@@ -216,50 +215,46 @@ export async function generateVoiceIntroAudios(
     })
     .eq('id', userId);
 
-  // (3) 누락 언어 번역 (1회 호출). 실패 시 누락 슬롯 status='failed', 작성자 슬롯만 진행.
-  // preset 경로는 카탈로그가 3슬롯 모두 보유 → 이 단계 전체 스킵, slotTexts 직접 채움.
-  //
-  // slotTexts 는 TTS 입력 (audio tag 포함). displayTexts 는 DB 저장용 (slot 언어
-  // 슬랭으로 복원). 두 텍스트가 한 번의 update 안에서 함께 commit 되어야 UI 노출
-  // 시점에 raw tag 누출이 절대 없다.
+  // (3) Gemini 태깅+번역 (1회 호출, 작성자 슬롯 포함). preset 은 스킵.
   let slotTexts: VoiceIntroTranslations;
   if (presetTranslations) {
     slotTexts = presetTranslations;
   } else {
-    slotTexts = { [authorLang]: ttsAuthorText };
-    const displayTexts: VoiceIntroTranslations = { [authorLang]: displayAuthorText };
-    const targetLangs = VOICE_INTRO_SLOT_LANGUAGES.filter((l) => l !== authorLang);
-    if (targetLangs.length > 0) {
-      try {
-        // audio tag 가 포함된 ttsAuthorText 를 Gemini 에 전달 — 시스템 프롬프트의
-        // audio tag preservation 룰 (translation.ts) 이 [laughs] 등을 그대로 통과
-        // 시켜 번역문에도 보존된다.
-        const { translations } = await translateVoiceIntro({
-          text: ttsAuthorText,
-          sourceLanguage: authorLang,
-          targetLanguages: targetLangs,
-        });
-        for (const lang of targetLangs) {
-          const value = translations[lang];
-          if (typeof value === 'string' && value.length > 0) {
-            slotTexts[lang] = value; // TTS 입력: audio tag 포함
-            displayTexts[lang] = replaceTagsForDisplay(value, lang); // DB 저장: slot 언어 슬랭
-          }
+    slotTexts = {};
+    const displayTexts: VoiceIntroTranslations = {};
+    try {
+      const { translations } = await translateVoiceIntro({
+        text: voiceIntroText,
+        sourceLanguage: authorLang,
+        targetLanguages: VOICE_INTRO_SLOT_LANGUAGES,
+      });
+      for (const lang of VOICE_INTRO_SLOT_LANGUAGES) {
+        const value = translations[lang];
+        if (typeof value === 'string' && value.length > 0) {
+          slotTexts[lang] = value; // TTS 입력: audio tag 포함
+          displayTexts[lang] = replaceTagsForDisplay(value, lang); // DB 저장: slot 언어 슬랭
         }
-        // 번역문 commit (작성자 언어 + 성공 번역 슬롯) — 모두 display 텍스트.
-        await supabase
-          .from('profiles')
-          .update({ voice_intro_translations: displayTexts })
-          .eq('id', userId);
-      } catch (err) {
-        console.error(`[Voice intro translate failed] userId=${userId}`, err);
-        Sentry.captureException(err, {
-          tags: { pipeline: 'voice_intro', stage: 'translate' },
-          extra: { userId },
-        });
-        await markSlotsFailed(userId, targetLangs);
       }
+    } catch (err) {
+      // fail-open: Gemini 실패 시 작성자 슬롯은 raw 원문(태그 없음, speakable)으로
+      // 폴백해 최소한 본인 언어 voice intro 는 생성. 나머지 슬롯은 failed.
+      console.error(`[Voice intro translate failed] userId=${userId}`, err);
+      Sentry.captureException(err, {
+        tags: { pipeline: 'voice_intro', stage: 'translate' },
+        extra: { userId },
+      });
+      slotTexts[authorLang] = voiceIntroText;
+      displayTexts[authorLang] = voiceIntroText;
+      await markSlotsFailed(
+        userId,
+        VOICE_INTRO_SLOT_LANGUAGES.filter((l) => l !== authorLang),
+      );
     }
+    // display 텍스트 commit (성공/폴백 공통).
+    await supabase
+      .from('profiles')
+      .update({ voice_intro_translations: displayTexts })
+      .eq('id', userId);
   }
 
   // (4) 슬롯별 TTS — Promise.allSettled (병렬, 슬롯 독립 commit).

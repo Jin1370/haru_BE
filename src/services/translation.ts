@@ -4,7 +4,27 @@ import {
     HarmBlockThreshold,
 } from "@google-cloud/vertexai";
 import { env } from "../config/env";
+import { sanitizeAudioTags } from "../utils/textNormalization";
 import type { VoiceIntroSlotLanguage } from "../types";
+
+// Shared STEP 1 instruction block (emotion marker → audio tag). Both the message
+// and voice-intro prompts embed this before their translation rules so tagging and
+// translation happen in a single Gemini call (regex prepareTextForTTS 폐지).
+const AUDIO_TAG_STEP = `STEP 1 — Emotion audio tags (do this FIRST, before translating):
+Some chat text contains typed "emotion markers": laughter or crying rendered as repeated jamo / letters / kaomoji rather than as words. Replace ONLY these literally-present markers with an inline audio tag, and delete the marker characters from the text.
+  - laughter marker  → [laughs]
+  - crying / sadness marker → [sad]
+Markers to detect, across every language:
+  - Korean: ㅋ or ㅎ (single or repeated), INCLUDING a trailing ㅋ/ㅎ fused into a syllable's final consonant — e.g. 욬 = 요 + ㅋ, 큨 = 큐 + ㅋ, 릌 = 리 + ㅋ. Restore the base syllable and move the laughter into [laughs] (e.g. 웃기네욬ㅋㅋ → 웃기네요[laughs]). Same for ㅠ or ㅜ (single or repeated, incl. fused) → [sad].
+  - Japanese: ｗ / ww / www, 笑 or （笑）, 草 (but NOT 笑顔 or 微笑 which mean "smile" — leave those untouched).
+  - English: hahaha / hehe / lol / lmao / rofl; kaomoji xD / :D / =D → [laughs]; :( / :'( / T_T / ;_; / Q_Q → [sad].
+  - Thai: 555, ฮ่าๆ → [laughs].
+  - Hindi: हाहा, हीही → [laughs].
+CRITICAL — literal only: insert a tag ONLY when such a marker literally appears. NEVER infer emotion from meaning. "아 오늘 너무 슬프다" (sad in meaning, NO marker) stays "아 오늘 너무 슬프다" with no tag. "아 오늘 너무 슬프다ㅠㅠ" becomes "아 오늘 너무 슬프다[sad]".
+CRITICAL — context chooses WHICH tag: the marker must still literally appear (never invent a tag from meaning alone), but whether it becomes [laughs] or [sad] follows the emotion the marker conveys IN CONTEXT, not its usual default. Korean ㅠㅠ / ㅜㅜ (and T_T) very often mean "crying FROM laughter" — when the surrounding text is about something funny, tag them [laughs], NOT [sad]. Example: "아 진짜 웃겨요ㅠㅠ" → "아 진짜 웃겨요[laughs]". Use [sad] only when the context is genuinely sad ("시험 망했어ㅠㅠ" → "시험 망했어[sad]"). With no such contextual signal, fall back to each marker's usual emotion (ㅋ/ㅎ/ww/haha/xD → [laughs]; ㅠ/ㅜ/T_T → [sad]).
+CRITICAL — precise removal: remove the marker characters completely, leaving no residue. "진짜 웃기네욬ㅋㅋㅋ" → "진짜 웃기네요[laughs]" (the fused 욬 is restored to 요; leaving "욬[laughs]" is WRONG).
+Use EXACTLY [laughs] and [sad]. No other tag names, no variants like [laugh].
+If the text has no such marker, insert no tag.`;
 
 const vertexAi = new VertexAI({
     project: env.vertexAi.projectId,
@@ -31,9 +51,11 @@ const SAFETY_SETTINGS = [
 ];
 
 // ─── Message domain (existing) ────────────────────────────────────────────
-const SYSTEM_PROMPT = `You translate chat messages between strangers on a dating app.
+const SYSTEM_PROMPT = `You process chat messages between strangers on a dating app in two steps: first tag emotion markers as audio tags, then translate.
 
-Rules:
+${AUDIO_TAG_STEP}
+
+STEP 2 — Translate the tagged text into the target language:
 - Always render the text as a native speaker of the target language would naturally write it — regardless of what language the source appears to be in. Do not skip this step or return the input unchanged just because it looks short, simple, or superficially similar to the target language.
 - The "target language" refers only to what language the OUTPUT must be written in. It has nothing to do with what the message is about. A message that mentions a country, nationality, or language by name (e.g. asking "Are you Korean?" or "Do you speak Japanese?") must still be fully translated into the target language — do not treat topical references to the target language/country as if the text were already written in it.
 - Sound like a real person texting someone they're interested in — warm, natural, and conversational. NEVER translate word-for-word. Render what a native speaker would actually type in this situation, not a literal gloss.
@@ -83,7 +105,8 @@ Text to translate: ${JSON.stringify(params.text)}`;
     }
     const parsed = JSON.parse(raw) as { translation: string };
 
-    return { translation: parsed.translation };
+    // 화이트리스트 검증 — Gemini 가 규율 이탈 태그를 emit 해도 TTS/UI 오염 차단.
+    return { translation: sanitizeAudioTags(parsed.translation) };
 }
 
 // ─── Voice intro domain (mig 011) ─────────────────────────────────────────
@@ -91,9 +114,12 @@ Text to translate: ${JSON.stringify(params.text)}`;
 //   * register 정책 차이 — 메시지는 register-preserving(소스가 캐주얼이면 캐주얼), voice intro 는 더 적극적으로 캐주얼/playful 톤 유지 + ±20% 길이 보존.
 //   * 1회 호출에 N개 언어 동시 번역 → 응답 shape 가 다름.
 //   * 길이 균등 보존 (TTS 길이 일관성) 강조.
-const VOICE_INTRO_SYSTEM_PROMPT = `You translate dating-app voice intro texts (a short, first-person self-introduction line that the speaker will record with their cloned voice). The translation will be spoken aloud by a TTS engine using the speaker's cloned voice.
+const VOICE_INTRO_SYSTEM_PROMPT = `You process dating-app voice intro texts (a short, first-person self-introduction line the speaker records with their cloned voice) in two steps: first tag emotion markers as audio tags, then render each requested language. Output will be spoken aloud by a TTS engine using the speaker's cloned voice.
 
-Rules:
+${AUDIO_TAG_STEP}
+
+STEP 2 — Produce the tagged text in every requested language:
+- Apply STEP 1 tagging to the source text, then translate the tagged text into each requested language. A requested language equal to the source language must be returned with the STEP 1 tags applied but otherwise unchanged (do NOT re-translate it).
 - CRITICAL: Inline ElevenLabs audio tags written as [laughs], [sad], or similar [single_word] forms in square brackets, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
 - Preserve the speaker's intent, mood, and casual/playful register. Voice intros are typically 80-160 characters and aim to invite a stranger to swipe right.
 - Match natural spoken length within ±20% of the source character count. Do NOT pad or truncate to extremes.
@@ -118,7 +144,7 @@ const voiceIntroModel = vertexAi.getGenerativeModel({
     },
     generationConfig: {
         responseMimeType: "application/json",
-        temperature: 0.5, // higher than translateMessage(0.3) for natural register
+        temperature: 0.5, // higher than translateMessage(0.4) for natural register
     },
     safetySettings: SAFETY_SETTINGS,
 });
@@ -152,18 +178,24 @@ Voice intro text: ${JSON.stringify(params.text)}`;
         detected_source_language: string;
     };
 
-    // Defensive: ensure all requested target languages are present and non-empty.
+    // Sanitize (화이트리스트 검증) each slot, then require all requested target
+    // languages present + non-empty. A slot that is only a bad tag (sanitized to
+    // empty) is treated as missing.
+    const translations: Partial<Record<VoiceIntroSlotLanguage, string>> = {};
     for (const lang of params.targetLanguages) {
         const value = parsed.translations?.[lang];
-        if (typeof value !== "string" || value.length === 0) {
+        const clean =
+            typeof value === "string" ? sanitizeAudioTags(value) : value;
+        if (typeof clean !== "string" || clean.length === 0) {
             throw new Error(
                 `Voice intro translation missing for language: ${lang}`,
             );
         }
+        translations[lang] = clean;
     }
 
     return {
-        translations: parsed.translations,
+        translations,
         detectedSourceLanguage: parsed.detected_source_language,
     };
 }

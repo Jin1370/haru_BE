@@ -1,120 +1,58 @@
 // Text normalization for translation/TTS pipeline.
 //
-// 감정 마커 → eleven_v3 audio tag 치환 + 그에 부속된 display-side 슬랭 복원 유틸.
-// 메시지/voice intro 의 번역/TTS 진입 직전 동일하게 적용된다.
-
-interface NormalizationRule {
-  pattern: RegExp;
-  replacement: string;
-}
-
-// ── 감정 마커 → eleven_v3 audio tag 치환 ─────────────────────────────────────
+// eleven_v3 audio tag 의 sanitize / strip / display-slang 복원 유틸.
 //
-// 배경:
-//   ㅋ/ㅎ 같은 한국어 자음은 모음 없이 단독으로 표준 음운 형태가 없어 eleven_v3
-//   TTS 가 추측 합성 → 영어처럼 들리는 묘한 음("on your lipstick" 등) 생성.
-//   일본어 'www', '草', 태국어 '555' 도 그대로 발화하면 부자연스러움.
-//   ㅠㅠ/ㅜㅜ 도 phonetic 부재로 비슷한 문제.
-//   eleven_v3 인라인 audio tag([laughs]/[sad]) 로 치환해 실제 감정 음성으로 합성.
-//   (한숨은 모든 언어에서 의성어 단어 — 에휴/はぁ/ugh 등 — 로 표현되어 Gemini·TTS 가
-//    자연 처리 가능, audio tag 우회 불필요. 따라서 [sighs] 는 dictionary 에서 제외.)
-//
-// 파이프라인 위치 (메시지 도메인):
-//   processMessageAudio 에서 Gemini 번역 호출 **이전** 에 적용. Gemini 시스템 프롬프트의
-//   audio tag 보존 룰이 번역 과정에서 태그를 그대로 통과시킴 → 출력에 그대로 남아 TTS 가 합성.
-//   DB 저장 시엔 stripAudioTags 로 태그 제거 후 translated_text 로 저장 (UI 에 노출 방지).
-//
-// 사전 정책:
-//   * 5 개 타깃 언어(ko/ja/en/th/hi) 의 대표적·모호하지 않은 슬랭만.
-//   * 모호 케이스(휴 단독, ओह 등) 는 false positive 위험으로 미포함.
-//   * 길이 임계는 false positive 방지에 필요한 최소값 (ha 단독 매칭 X, 2회 이상부터).
+// 감정 마커(ㅋㅋ/ㅠㅠ/www/草/lol/xD 등) → audio tag([laughs]/[sad]) 치환은 더 이상
+// 여기서 regex 로 하지 않는다. Gemini(translation.ts 시스템 프롬프트 STEP 1)가 번역과
+// 같은 호출 안에서 실제로 나타난 채팅체 마커만 태그로 치환하고, 그 출력을 아래
+// sanitizeAudioTags 로 화이트리스트 검증한다. (regex 바닥 제거 — 융합 자모/문맥 판단은
+// Gemini 가 담당.)
 
-const LAUGHTER_RULES: NormalizationRule[] = [
-  // Korean — Hangul Compatibility Jamo(ㅋ/ㅎ) 단독·연속 사용은 일반 한국어 텍스트에 등장하지 않으므로
-  // 단일 문자도 웃음으로 안전하게 매칭. {1,}로 둘 경우 single ㅋ/ㅎ가 raw 로 통과해 TTS 가 "붸-"
-  // 등 묘한 음을 생성하는 사고 방지.
-  // 단, **다른 자음 자모가 바로 앞에 오면 약어의 일부**(예: ㅇㅋ=오케이, ㄴㅎ 등) 로 보고 미매칭 —
-  // 약어 형태는 Gemini 가 cross-language 에서 자연 번역(ㅇㅋ→OK/オッケー). lookbehind `(?<![ㄱ-ㅎ])`
-  // 로 `ㅇ`·`ㄴ`·다른 자음 직후의 ㅋ/ㅎ 를 제외 (음절(`안`/`녕` 등) 직후는 정상 매칭 — 그건 `ㄱ-ㅎ` 범위 밖).
-  { pattern: /(?<![ㄱ-ㅎ])ㅋ+/g, replacement: '[laughs]' },
-  { pattern: /(?<![ㄱ-ㅎ])ㅎ+/g, replacement: '[laughs]' },
-  { pattern: /푸하하+/g, replacement: '[laughs]' },
-  { pattern: /와하하+/g, replacement: '[laughs]' },
-  // Japanese
-  { pattern: /w{3,}/g, replacement: '[laughs]' },
-  { pattern: /草+/g, replacement: '[laughs]' },
-  { pattern: /あはは+/g, replacement: '[laughs]' },
-  { pattern: /ワロタ/g, replacement: '[laughs]' },
-  // English (word-bounded; \b 는 ASCII \w 기반이므로 CJK 와 인접해도 정상 동작)
-  { pattern: /\b(?:ha){2,}h?\b/gi, replacement: '[laughs]' },
-  { pattern: /\b(?:he){2,}h?\b/gi, replacement: '[laughs]' },
-  { pattern: /\blol+\b/gi, replacement: '[laughs]' },
-  { pattern: /\blmao+\b/gi, replacement: '[laughs]' },
-  { pattern: /\brofl\b/gi, replacement: '[laughs]' },
-  // Thai
-  { pattern: /5{3,}/g, replacement: '[laughs]' },
-  { pattern: /ฮ่าๆ+/g, replacement: '[laughs]' },
-  // Hindi
-  { pattern: /हाहा+/g, replacement: '[laughs]' },
-  { pattern: /हीही+/g, replacement: '[laughs]' },
-  // Emoticons (모든 언어 공통, TTS 가 문장부호를 글자별 발화하는 사고 차단)
-  { pattern: /\b[xX][dD]+\b/g, replacement: '[laughs]' },          // xD XD xDD XDDD
-  { pattern: /(?<![a-zA-Z]):-?[dD]+\b/g, replacement: '[laughs]' }, // :D :-D :DD (letter 뒤 URL/식별자 제외)
-  { pattern: /(?<![a-zA-Z])=[dD]+\b/g, replacement: '[laughs]' },   // =D =DDD
-];
-
-const SAD_RULES: NormalizationRule[] = [
-  // Korean — ㅠ/ㅜ 단독도 슬픔 표현 (laughter 와 동일 논리)
-  { pattern: /ㅠ+/g, replacement: '[sad]' },
-  { pattern: /ㅜ+/g, replacement: '[sad]' },
-  { pattern: /흑흑+/g, replacement: '[sad]' },
-  { pattern: /엉엉+/g, replacement: '[sad]' },
-  // Japanese
-  { pattern: /うぅ+/g, replacement: '[sad]' },
-  { pattern: /ぴえん/g, replacement: '[sad]' },
-  // English (asterisk-bordered 만 — bare "sob"/"sobs" 는 일반 단어와 충돌 위험)
-  { pattern: /\*sobs?\*/gi, replacement: '[sad]' },
-  // Emoticons (모든 언어 공통). :'( 가 :( 보다 specific 하므로 먼저 매칭되도록 위에 배치.
-  { pattern: /:'-?\(+/g, replacement: '[sad]' },         // :'( :'-(  눈물 우는 얼굴
-  { pattern: /[:;]-?\(+/g, replacement: '[sad]' },        // :( :-( ;( ;-(  슬픈 얼굴 (괄호 반복 허용)
-  { pattern: /[TtQq][_-][TtQq]/g, replacement: '[sad]' }, // T_T T-T t_t Q_Q
-  { pattern: /;_;/g, replacement: '[sad]' },              // ;_;
-];
-
-// [sighs] 는 dictionary 에서 제외 — 한숨은 모든 언어에서 의성어 단어로 표현되어
-// Gemini 가 자연스럽게 번역하고 TTS 도 "haa" 등 적절한 음으로 합성 가능.
-// 웃음/슬픔처럼 jamo·약어 수준의 untranslatable 형태로 굳어진 케이스가 없어
-// audio tag 우회의 정당성이 약함. stripAudioTags 화이트리스트엔 sighs 가 남아있어
-// 외부 경로가 emit 하더라도 UI 안전 (현재는 emit 경로 없음).
-
-const ALL_EMOTION_RULES: NormalizationRule[] = [
-  ...LAUGHTER_RULES,
-  ...SAD_RULES,
-];
+// ── audio tag 화이트리스트 ────────────────────────────────────────────────────
+// eleven_v3 표준 태그 중 파이프라인이 허용하는 집합. Gemini 는 [laughs]/[sad] 만
+// emit 하도록 지시받지만, 규율 이탈 태그가 나와도 이 화이트리스트로 걸러 UI/TTS
+// 오염을 막는다.
+const ALLOWED_AUDIO_TAGS = [
+  'laughs',
+  'sad',
+  'sighs',
+  'crying',
+  'chuckles',
+  'whispers',
+  'exhales',
+  'gasps',
+  'groans',
+] as const;
+const ALLOWED_AUDIO_TAG_SET = new Set<string>(ALLOWED_AUDIO_TAGS);
 
 /**
- * 텍스트의 감정 마커(웃음/슬픔/한숨)를 eleven_v3 의 인라인 audio tag 로 치환한다.
- * TTS 가 마커 문자를 글자 그대로 발화하지 않고 실제 감정 음성을 생성하도록.
+ * Gemini 출력에서 화이트리스트 외 태그·malformed 태그를 제거한다.
+ * 화이트리스트 태그는 canonical 소문자 형태(`[laughs]`)로 정규화.
  *
- * 파이프라인: 번역 **이전** 에 적용 → Gemini 가 시스템 프롬프트 룰에 따라 태그 보존
- *   → 번역 후 텍스트에 태그가 살아있는 채로 TTS 에 전달.
+ *   - `[laugh]` / `[angry]` 등 화이트리스트 외 well-formed 태그 → 제거
+ *   - `[laughs` 처럼 닫히지 않은 malformed 태그 조각 → 제거
+ *   - `[LAUGHS]` / `[ laughs ]` → `[laughs]` 로 정규화
  *
- * 5 개 타깃 언어 대표 슬랭 커버 (ko/ja/en/th/hi). 모호 케이스(휴 단독 등) 는 미포함.
+ * TTS 입력·번역 파이프라인 진입 직후 적용 (translation.ts). 사용자가 우연히
+ * `[note]` 같은 대괄호 텍스트를 쓰면 함께 제거되지만 채팅에서 극히 드물고
+ * TTS/UI 안전을 우선한다.
  */
-export function prepareTextForTTS(text: string): string {
+export function sanitizeAudioTags(text: string): string {
   if (typeof text !== 'string' || text.length === 0) return text;
-  let result = text;
-  for (const rule of ALL_EMOTION_RULES) {
-    result = result.replace(rule.pattern, rule.replacement);
-  }
-  return result;
+  return text
+    // well-formed [tag]: 화이트리스트면 canonical 유지, 아니면 제거.
+    .replace(/\[\s*([a-zA-Z_]{1,20})\s*\]/g, (_m, w: string) =>
+      ALLOWED_AUDIO_TAG_SET.has(w.toLowerCase()) ? `[${w.toLowerCase()}]` : '',
+    )
+    // malformed / unclosed tag 조각 (예: 닫는 대괄호 없는 "[laughs").
+    .replace(/\[\s*[a-zA-Z_]{1,20}(?![\]a-zA-Z_])/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 // ── audio tag 제거 (DB 저장용) ────────────────────────────────────────────────
 // translated_text 는 UI 의 번역 인디케이터로 노출되므로 audio tag 노출 방지를 위해
 // 저장 직전 제거. TTS 입력(textToSynthesize) 은 태그 보존.
-//
-// prepareTextForTTS 가 삽입하는 3 종 태그 + eleven_v3 표준 태그 일부를 화이트리스트로 매칭.
 const AUDIO_TAG_PATTERN = /\[(?:laughs|sad|sighs|crying|chuckles|whispers|exhales|gasps|groans)\]/g;
 
 /**
@@ -124,6 +62,21 @@ const AUDIO_TAG_PATTERN = /\[(?:laughs|sad|sighs|crying|chuckles|whispers|exhale
 export function stripAudioTags(text: string): string {
   if (typeof text !== 'string' || text.length === 0) return text;
   return text.replace(AUDIO_TAG_PATTERN, '').replace(/\s{2,}/g, ' ').trim();
+}
+
+// ── TTS 입력 전용: [laughs] 만 audible, 그 외 audio tag 는 display-only ─────────
+// 사용자 정책: [laughs] 만 실제 소리(웃음)로 합성하고, [sad] 등 나머지 태그는
+// display(translated_text / voice intro 슬롯)에만 슬랭으로 남기고 TTS 로는 안 낸다
+// (클론 보이스가 흐느낌을 내지 않도록). display 경로(replaceTagsForDisplay)는 무변경.
+//
+// STEP 1 태깅은 sad 마커도 계속 감지해 [sad] 로 정규화 — raw ㅠㅠ 가 TTS 로 새서
+// 자모 괴음이 나는 것을 막기 위함. 정규화된 [sad] 를 여기서 TTS 직전에 제거한다.
+export function stripNonAudibleTags(text: string): string {
+  if (typeof text !== 'string' || text.length === 0) return text;
+  return text
+    .replace(AUDIO_TAG_PATTERN, (m) => (m === '[laughs]' ? m : ''))
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 // ── 디스플레이용: audio tag → 타깃 언어 슬랭 치환 ──────────────────────────────
@@ -175,8 +128,8 @@ export function replaceTagsForDisplay(text: string, targetLang: string): string 
  * audio_url=null 저장. FE 는 `audio_url` 이 null 이면 재생 버튼을 숨김. 발화 불가
  * 메시지에 무음 재생 버튼이 표시되는 UX 사고 방지.
  *
- * 주의: `prepareTextForTTS` 가 emoticon(:(, xD 등) 을 audio tag 로 이미 치환했으므로
- * 그 경로는 tag 매칭으로 true. 매칭 안 된 emoticon(`:)`, `;)`, `:P`, `<3` 등) 만 false.
+ * 주의: Gemini 가 emoticon(:(, xD 등) 을 audio tag 로 치환한 경우 그 경로는 tag
+ * 매칭으로 true. 태그화 안 된 emoticon(`:)`, `;)`, `:P`, `<3` 등) 만 false.
  */
 export function hasSpeakableContent(text: string): boolean {
   if (typeof text !== 'string' || text.length === 0) return false;
@@ -187,8 +140,8 @@ export function hasSpeakableContent(text: string): boolean {
 
 /**
  * ElevenLabs eleven_v3 는 audio tag 와 이모지를 strip 한 뒤 남는 텍스트가 비어 있으면
- * `input_text_empty` 에러로 reject 한다. 사용자가 `ㅋㅋㅋㅋㅋ`/`ㅠㅠㅠ`/`에휴` 등
- * 감정 마커만 보낸 경우 prepareTextForTTS 결과가 태그 단독이 되어 이 케이스에 해당.
+ * `input_text_empty` 에러로 reject 한다. 사용자가 `ㅋㅋㅋㅋㅋ`/`ㅠㅠㅠ` 등 감정
+ * 마커만 보내 Gemini 출력이 태그 단독(`[laughs]`)이 된 경우 이 케이스에 해당.
  *
  * 대응: 태그 외 발화 가능한 문자가 없으면 마침표를 덧붙여 ElevenLabs validation 통과.
  * 마침표는 TTS 에서 발화되지 않고 짧은 pause 로만 해석되므로 결과 오디오에 노이즈 없음.

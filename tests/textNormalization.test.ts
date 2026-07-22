@@ -1,226 +1,67 @@
 import { describe, it, expect } from 'vitest';
 import {
-  prepareTextForTTS,
+  sanitizeAudioTags,
   stripAudioTags,
+  stripNonAudibleTags,
   replaceTagsForDisplay,
   ensureSpeakableForTTS,
   hasSpeakableContent,
 } from '../src/utils/textNormalization';
 
-// ── prepareTextForTTS — 감정 마커 → eleven_v3 audio tag ──────────────────────
-// 파이프라인 위치: Gemini 번역 **앞** (시스템 프롬프트의 보존 룰이 태그를 통과시킴).
-// 5 개 타깃 언어 대표 슬랭 커버 (ko/ja/en/th/hi).
+// ── sanitizeAudioTags — Gemini 출력 화이트리스트 검증 ─────────────────────────
+// 감정 마커 → audio tag 치환은 이제 Gemini(translation.ts STEP 1)가 수행하고,
+// 그 출력을 이 함수가 화이트리스트로 검증한다 (regex prepareTextForTTS 폐지).
 
-describe('prepareTextForTTS — laughter [laughs]', () => {
-  describe('Korean', () => {
-    it('ㅋ run (단일 포함 — jamo 단독은 한국어 일반 텍스트에 등장하지 않음)', () => {
-      expect(prepareTextForTTS('ㅋ')).toBe('[laughs]');
-      expect(prepareTextForTTS('ㅋㅋ')).toBe('[laughs]');
-      expect(prepareTextForTTS('ㅋㅋㅋㅋ')).toBe('[laughs]');
-    });
-    it('ㅎ run (단일 포함)', () => {
-      expect(prepareTextForTTS('ㅎ')).toBe('[laughs]');
-      expect(prepareTextForTTS('ㅎㅎㅎ')).toBe('[laughs]');
-    });
-    it('다른 자모 직후의 ㅋ/ㅎ 는 약어로 간주하고 미매칭 (ㅇㅋ=오케이 등)', () => {
-      expect(prepareTextForTTS('ㅇㅋ')).toBe('ㅇㅋ');
-      expect(prepareTextForTTS('ㅇㅎ')).toBe('ㅇㅎ');
-    });
-    it('음절(안/녕 등) 직후의 ㅋ/ㅎ 는 정상 매칭', () => {
-      expect(prepareTextForTTS('안녕ㅋㅋ')).toBe('안녕[laughs]');
-      expect(prepareTextForTTS('좋아ㅎㅎ')).toBe('좋아[laughs]');
-    });
-    it('푸하하 / 와하하', () => {
-      expect(prepareTextForTTS('푸하하')).toBe('[laughs]');
-      expect(prepareTextForTTS('와하하하하')).toBe('[laughs]');
-    });
+describe('sanitizeAudioTags — 화이트리스트 검증', () => {
+  it('화이트리스트 태그는 보존', () => {
+    expect(sanitizeAudioTags('안녕[laughs]')).toBe('안녕[laughs]');
+    expect(sanitizeAudioTags('슬프다 [sad]')).toBe('슬프다 [sad]');
+    expect(sanitizeAudioTags('[laughs] 오늘 [sad]')).toBe('[laughs] 오늘 [sad]');
+    // 모든 화이트리스트 태그 (eleven_v3 표준)
+    expect(sanitizeAudioTags('[sighs][crying][chuckles][whispers]')).toBe(
+      '[sighs][crying][chuckles][whispers]',
+    );
   });
 
-  describe('Japanese', () => {
-    it('www', () => {
-      expect(prepareTextForTTS('www')).toBe('[laughs]');
-      expect(prepareTextForTTS('wwwwwww')).toBe('[laughs]');
-    });
-    it('w 또는 ww 는 변환 안 됨 (false positive 방지)', () => {
-      expect(prepareTextForTTS('ww')).toBe('ww');
-    });
-    it('草', () => {
-      expect(prepareTextForTTS('草')).toBe('[laughs]');
-      expect(prepareTextForTTS('草草草')).toBe('[laughs]');
-    });
-    it('あはは / ワロタ', () => {
-      expect(prepareTextForTTS('あはは')).toBe('[laughs]');
-      expect(prepareTextForTTS('ワロタ')).toBe('[laughs]');
-    });
+  it('화이트리스트 외 well-formed 태그는 제거', () => {
+    expect(sanitizeAudioTags('안녕[laugh]')).toBe('안녕'); // [laugh] 변형 제거
+    expect(sanitizeAudioTags('화났어[angry]')).toBe('화났어');
+    expect(sanitizeAudioTags('[wtf] hello')).toBe('hello');
+    expect(sanitizeAudioTags('a[foo]b')).toBe('ab');
   });
 
-  describe('English (word-bounded)', () => {
-    it('haha / hahaha', () => {
-      expect(prepareTextForTTS('haha')).toBe('[laughs]');
-      expect(prepareTextForTTS('hahaha')).toBe('[laughs]');
-      expect(prepareTextForTTS('HAHA')).toBe('[laughs]'); // case-insensitive
-    });
-    it('hehe', () => {
-      expect(prepareTextForTTS('hehe')).toBe('[laughs]');
-    });
-    it('단일 ha / he 는 변환 안 됨', () => {
-      expect(prepareTextForTTS('ha')).toBe('ha');
-      expect(prepareTextForTTS('he')).toBe('he');
-    });
-    it('lol / lolll / lmao / rofl', () => {
-      expect(prepareTextForTTS('lol')).toBe('[laughs]');
-      expect(prepareTextForTTS('lolll')).toBe('[laughs]');
-      expect(prepareTextForTTS('lmao')).toBe('[laughs]');
-      expect(prepareTextForTTS('rofl')).toBe('[laughs]');
-    });
-    it('CJK 인접 영어 슬랭도 매칭', () => {
-      expect(prepareTextForTTS('안녕haha반가워')).toBe('안녕[laughs]반가워');
-    });
+  it('대소문자/공백은 canonical 소문자로 정규화', () => {
+    expect(sanitizeAudioTags('[LAUGHS]')).toBe('[laughs]');
+    expect(sanitizeAudioTags('[ Sad ]')).toBe('[sad]');
+    expect(sanitizeAudioTags('[Laughs]')).toBe('[laughs]');
   });
 
-  describe('Thai', () => {
-    it('555 / 555555', () => {
-      expect(prepareTextForTTS('555')).toBe('[laughs]');
-      expect(prepareTextForTTS('5555555')).toBe('[laughs]');
-    });
-    it('5 / 55 는 변환 안 됨 (false positive 방지 — 일반 숫자)', () => {
-      expect(prepareTextForTTS('55')).toBe('55');
-    });
-    it('ฮ่าๆ', () => {
-      expect(prepareTextForTTS('ฮ่าๆ')).toBe('[laughs]');
-    });
+  it('malformed / unclosed 태그 조각 제거', () => {
+    expect(sanitizeAudioTags('안녕 [laughs 오늘')).toBe('안녕 오늘'); // 닫는 대괄호 없음
+    expect(sanitizeAudioTags('끝에 [sad')).toBe('끝에');
+    expect(sanitizeAudioTags('[laughs][sad')).toBe('[laughs]'); // 두번째만 malformed
   });
 
-  describe('Hindi', () => {
-    it('हाहा / हीही', () => {
-      expect(prepareTextForTTS('हाहा')).toBe('[laughs]');
-      expect(prepareTextForTTS('हीही')).toBe('[laughs]');
-    });
+  it('태그 없는 텍스트는 trim 만', () => {
+    expect(sanitizeAudioTags('안녕하세요')).toBe('안녕하세요');
+    expect(sanitizeAudioTags('  hello  ')).toBe('hello');
+    expect(sanitizeAudioTags('こんにちは')).toBe('こんにちは');
   });
 
-  describe('Emoticons (모든 언어 공통)', () => {
-    it('xD / XD / xDDD', () => {
-      expect(prepareTextForTTS('xD')).toBe('[laughs]');
-      expect(prepareTextForTTS('XD')).toBe('[laughs]');
-      expect(prepareTextForTTS('xDDD')).toBe('[laughs]');
-      expect(prepareTextForTTS('XDDDDD')).toBe('[laughs]');
-    });
-    it(':D / :-D / :DD', () => {
-      expect(prepareTextForTTS(':D')).toBe('[laughs]');
-      expect(prepareTextForTTS(':-D')).toBe('[laughs]');
-      expect(prepareTextForTTS(':DD')).toBe('[laughs]');
-    });
-    it('=D / =DDD', () => {
-      expect(prepareTextForTTS('=D')).toBe('[laughs]');
-      expect(prepareTextForTTS('=DDD')).toBe('[laughs]');
-    });
-    it('letter 뒤의 :D 는 매칭 안 됨 (URL/식별자 충돌 회피)', () => {
-      expect(prepareTextForTTS('myAPI:DEBUG')).toBe('myAPI:DEBUG');
-    });
-    it('xdebug 같이 D 뒤에 letter 가 이어지면 매칭 안 됨', () => {
-      expect(prepareTextForTTS('xdebug')).toBe('xdebug');
-    });
-    it('문장 내 emoticon 부분 치환', () => {
-      expect(prepareTextForTTS('오늘 재밌었어 xD')).toBe('오늘 재밌었어 [laughs]');
-      expect(prepareTextForTTS('that was funny :D 진짜로')).toBe(
-        'that was funny [laughs] 진짜로',
-      );
-    });
-  });
-});
-
-describe('prepareTextForTTS — sadness [sad]', () => {
-  it('ㅠ run (단일 포함)', () => {
-    expect(prepareTextForTTS('ㅠ')).toBe('[sad]');
-    expect(prepareTextForTTS('ㅠㅠ')).toBe('[sad]');
-    expect(prepareTextForTTS('ㅠㅠㅠㅠㅠ')).toBe('[sad]');
-  });
-  it('ㅜ run (단일 포함)', () => {
-    expect(prepareTextForTTS('ㅜ')).toBe('[sad]');
-    expect(prepareTextForTTS('ㅜㅜ')).toBe('[sad]');
-  });
-  it('흑흑 / 엉엉', () => {
-    expect(prepareTextForTTS('흑흑')).toBe('[sad]');
-    expect(prepareTextForTTS('엉엉')).toBe('[sad]');
-  });
-  it('일본어 うぅ / ぴえん', () => {
-    expect(prepareTextForTTS('うぅ')).toBe('[sad]');
-    expect(prepareTextForTTS('ぴえん')).toBe('[sad]');
-  });
-  it('영어 *sob* / *sobs*', () => {
-    expect(prepareTextForTTS('*sob*')).toBe('[sad]');
-    expect(prepareTextForTTS('*sobs*')).toBe('[sad]');
-  });
-  it('영어 단독 "sob" 은 변환 안 됨 (일반 단어 충돌 회피)', () => {
-    expect(prepareTextForTTS('sob')).toBe('sob');
-  });
-
-  describe('Emoticons (모든 언어 공통)', () => {
-    it(':( / :-( / ;( / ;-(', () => {
-      expect(prepareTextForTTS(':(')).toBe('[sad]');
-      expect(prepareTextForTTS(':-(')).toBe('[sad]');
-      expect(prepareTextForTTS(';(')).toBe('[sad]');
-      expect(prepareTextForTTS(';-(')).toBe('[sad]');
-    });
-    it(":(( :((( (괄호 반복)", () => {
-      expect(prepareTextForTTS(':((')).toBe('[sad]');
-      expect(prepareTextForTTS(':(((')).toBe('[sad]');
-    });
-    it(":'( :'-( 눈물 우는 얼굴", () => {
-      expect(prepareTextForTTS(":'(")).toBe('[sad]');
-      expect(prepareTextForTTS(":'-(")).toBe('[sad]');
-    });
-    it('T_T / T-T / t_t', () => {
-      expect(prepareTextForTTS('T_T')).toBe('[sad]');
-      expect(prepareTextForTTS('T-T')).toBe('[sad]');
-      expect(prepareTextForTTS('t_t')).toBe('[sad]');
-    });
-    it('Q_Q (게이머 슬랭)', () => {
-      expect(prepareTextForTTS('Q_Q')).toBe('[sad]');
-    });
-    it(';_; ', () => {
-      expect(prepareTextForTTS(';_;')).toBe('[sad]');
-    });
-    it('문장 내 emoticon 부분 치환', () => {
-      expect(prepareTextForTTS('오늘 너무 힘들어 ㅠㅠ T_T')).toBe(
-        '오늘 너무 힘들어 [sad] [sad]',
-      );
-      expect(prepareTextForTTS('Sad day :( really')).toBe('Sad day [sad] really');
-    });
-  });
-});
-
-describe('prepareTextForTTS — 한숨은 의도적으로 dictionary 제외', () => {
-  it('에휴/はぁ/ugh 등 한숨 의성어는 raw 그대로 통과 (Gemini 가 자연 번역, TTS 가 자연 발화)', () => {
-    expect(prepareTextForTTS('에휴')).toBe('에휴');
-    expect(prepareTextForTTS('어휴')).toBe('어휴');
-    expect(prepareTextForTTS('후우')).toBe('후우');
-    expect(prepareTextForTTS('はぁ')).toBe('はぁ');
-    expect(prepareTextForTTS('やれやれ')).toBe('やれやれ');
-    expect(prepareTextForTTS('ugh')).toBe('ugh');
-    expect(prepareTextForTTS('*sigh*')).toBe('*sigh*');
-    expect(prepareTextForTTS('เฮ้อ')).toBe('เฮ้อ');
-  });
-});
-
-describe('prepareTextForTTS — mixed & general', () => {
-  it('문장 내 부분 치환', () => {
-    expect(prepareTextForTTS('안녕 ㅋㅋㅋㅋ 반가워')).toBe('안녕 [laughs] 반가워');
-  });
-
-  it('마커 없는 텍스트는 변경 없음', () => {
-    expect(prepareTextForTTS('안녕하세요')).toBe('안녕하세요');
-    expect(prepareTextForTTS('こんにちは')).toBe('こんにちは');
+  it('연속 공백 정리', () => {
+    expect(sanitizeAudioTags('hello  [foo]  world')).toBe('hello world');
   });
 
   it('빈 문자열 안전', () => {
-    expect(prepareTextForTTS('')).toBe('');
+    expect(sanitizeAudioTags('')).toBe('');
   });
 
-  it('여러 감정 동시 치환 — 한숨(에휴)은 raw, 웃음/슬픔만 태그화', () => {
-    expect(prepareTextForTTS('ㅋㅋㅋ 오늘 만났는데 에휴 힘들었어 ㅠㅠ')).toBe(
-      '[laughs] 오늘 만났는데 에휴 힘들었어 [sad]',
-    );
+  it('태그 단독이 화이트리스트면 보존 (TTS 효과음 전용 메시지)', () => {
+    expect(sanitizeAudioTags('[laughs]')).toBe('[laughs]');
+  });
+
+  it('태그 단독이 화이트리스트 외면 빈 문자열 (호출처가 missing 처리)', () => {
+    expect(sanitizeAudioTags('[giggles]')).toBe('');
   });
 });
 
@@ -264,6 +105,41 @@ describe('stripAudioTags', () => {
   });
 });
 
+// ── stripNonAudibleTags — TTS 입력에서 [laughs] 만 audible, 나머지 display-only ─
+
+describe('stripNonAudibleTags', () => {
+  it('[laughs] 는 보존 (audible)', () => {
+    expect(stripNonAudibleTags('웃기네 [laughs]')).toBe('웃기네 [laughs]');
+    expect(stripNonAudibleTags('[laughs] 안녕')).toBe('[laughs] 안녕');
+  });
+
+  it('[sad] 는 제거 (display-only, TTS 로 흐느낌 안 냄)', () => {
+    expect(stripNonAudibleTags('슬프다[sad]')).toBe('슬프다');
+    expect(stripNonAudibleTags('오늘 힘들어 [sad] 그래도')).toBe('오늘 힘들어 그래도');
+  });
+
+  it('[laughs] 외 모든 화이트리스트 태그 제거', () => {
+    expect(stripNonAudibleTags('[sighs][crying][chuckles]')).toBe('');
+    expect(stripNonAudibleTags('hi [whispers] there')).toBe('hi there');
+  });
+
+  it('laughs + sad 혼합 → laughs 만 남김', () => {
+    expect(stripNonAudibleTags('안녕[laughs] 슬프네[sad]')).toBe('안녕[laughs] 슬프네');
+  });
+
+  it('순수 sad → 빈 문자열 (호출처가 TTS 스킵 판단)', () => {
+    expect(stripNonAudibleTags('[sad]')).toBe('');
+  });
+
+  it('태그 없는 텍스트는 trim 만', () => {
+    expect(stripNonAudibleTags('안녕하세요')).toBe('안녕하세요');
+  });
+
+  it('빈 문자열 안전', () => {
+    expect(stripNonAudibleTags('')).toBe('');
+  });
+});
+
 // ── replaceTagsForDisplay — audio tag → 타깃 언어 슬랭 ────────────────────────
 
 describe('replaceTagsForDisplay', () => {
@@ -288,7 +164,7 @@ describe('replaceTagsForDisplay', () => {
   });
 
   describe('[sighs] 는 dictionary 외 — 치환 안 됨 (raw tag 그대로)', () => {
-    it('[sighs] 는 그대로 통과 (현재 prepareTextForTTS 가 emit 하지 않으므로 실제 데이터에 나오지 않음)', () => {
+    it('[sighs] 는 그대로 통과 (Gemini 는 [laughs]/[sad] 만 emit 하므로 실제 데이터에 나오지 않음)', () => {
       expect(replaceTagsForDisplay('[sighs]', 'ko')).toBe('[sighs]');
       expect(replaceTagsForDisplay('[sighs]', 'ja')).toBe('[sighs]');
     });
@@ -296,8 +172,8 @@ describe('replaceTagsForDisplay', () => {
 
   describe('문장 내 부분 치환 (사용자 시나리오)', () => {
     it('ko → ja: ㅋㅋㅋ 포함 문장 → www', () => {
-      // 번역 어때요?ㅋㅋㅋ → prepareTextForTTS → "번역 어때요?[laughs]"
-      // → Gemini ja → "翻訳はどうですか？[laughs]" → display(ja) → "翻訳はどうですか？www"
+      // 번역 어때요?ㅋㅋㅋ → Gemini(STEP1 태깅+ja 번역) → "翻訳はどうですか？[laughs]"
+      // → display(ja) → "翻訳はどうですか？www"
       expect(replaceTagsForDisplay('翻訳はどうですか？[laughs]', 'ja')).toBe(
         '翻訳はどうですか？www',
       );

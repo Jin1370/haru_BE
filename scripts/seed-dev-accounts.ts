@@ -182,10 +182,10 @@ const PERSONAS: Persona[] = [
 const SEED_PASSWORD = 'aaaa1111';
 
 // 크로스언어 선호 — 차별점 1 (디스커버 viewer-자국어 하드 제외) 가 활성화되려면
-// preferred_languages / preferred_nationalities 가 반대편으로 향해야 매칭이 잘 보인다.
-const PREF_BY_LANG: Record<'ko' | 'ja', { langs: string[]; nats: string[] }> = {
-  ko: { langs: ['ja'], nats: ['JP'] },
-  ja: { langs: ['ko'], nats: ['KR'] },
+// preferred_nationalities 가 반대편으로 향해야 매칭이 잘 보인다.
+const PREF_BY_LANG: Record<'ko' | 'ja', { nats: string[] }> = {
+  ko: { nats: ['JP'] },
+  ja: { nats: ['KR'] },
 };
 
 // ----- helpers -----
@@ -297,7 +297,6 @@ async function seedOne(
     min_age: 20,
     max_age: 40,
     preferred_genders: persona.gender === 'female' ? ['male'] : ['female'],
-    preferred_languages: pref.langs,
     preferred_nationalities: pref.nats,
   });
   if (prefErr) {

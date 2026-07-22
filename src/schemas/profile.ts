@@ -7,9 +7,9 @@ export const NATIONALITY_CODES = [
   'KR', 'JP', 'US', 'GB', 'CA', 'AU', 'PH', 'SG', 'TH', 'IN',
 ] as const;
 
-// Whitelisted spoken languages (BCP-47 short codes). Drives both profile
-// `language` and `user_preferences.preferred_languages`. App UI locales
-// (ko/ja/en) are tracked separately in i18n.
+// Whitelisted spoken languages (BCP-47 short codes). Drives profile
+// `language` (derived from nationality — see FE languageForNationality).
+// App UI locales (ko/ja/en) are tracked separately in i18n.
 // Keep in sync with FE `src/constants/languages.ts`.
 export const LANGUAGE_CODES = ['ko', 'ja', 'en', 'th', 'hi'] as const;
 

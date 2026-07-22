@@ -47,7 +47,6 @@ type Viewer = {
 };
 
 type ViewerPrefs = {
-  preferred_languages: string[];
   preferred_nationalities: string[];
 };
 
@@ -85,31 +84,20 @@ function hashJitter(candidateId: string, viewerId: string, max: number): number 
   return (Math.abs(hash) % (max * 100)) / 100;
 }
 
-// 차원별 선호 부합 판정. 각 차원의 선호가 비어있으면 그 차원은 무조건 부합(=제약 없음).
-export function matchesLanguage(candidate: Candidate, prefs: ViewerPrefs): boolean {
-  return prefs.preferred_languages.length === 0
-    || (candidate.language !== '' && prefs.preferred_languages.includes(candidate.language));
-}
-
+// 선호 부합 판정. 선호가 비어있으면 무조건 부합(=제약 없음).
 export function matchesNationality(candidate: Candidate, prefs: ViewerPrefs): boolean {
   return prefs.preferred_nationalities.length === 0
     || prefs.preferred_nationalities.includes(candidate.nationality);
 }
 
-// 4-단계 티어. 작을수록 상위 노출. 국가 부합을 언어 부합보다 우선.
-//   1: 선호 국가 + 선호 언어 둘 다 부합
-//   2: 선호 국가만 부합
-//   3: 선호 언어만 부합
-//   4: 둘 다 미부합
-// 각 차원 선호가 비어있을 땐 해당 차원이 항상 부합으로 처리되므로
-// 결과적으로 비어있는 차원은 티어 분기에서 무력화된다.
+// 2-단계 티어. 작을수록 상위 노출. 언어가 국적에서 파생되면서 선호 언어 차원은
+// 제거됐다 (선호 국적이 동일 신호를 커버). 국적 부합 여부만으로 가른다.
+//   1: 선호 국가 부합 (선호가 비어있으면 항상 부합)
+//   2: 선호 국가 미부합
+// 참고: viewer 본인 언어와 같은 후보는 여기 도달 전에 SQL 사전 필터에서 이미 제외됨
+// (크로스언어 차별점 — preferred_languages 와 무관한 별도 메커니즘).
 export function computeTier(candidate: Candidate, prefs: ViewerPrefs): number {
-  const langOk = matchesLanguage(candidate, prefs);
-  const natOk = matchesNationality(candidate, prefs);
-  if (langOk && natOk) return 1;
-  if (natOk) return 2;
-  if (langOk) return 3;
-  return 4;
+  return matchesNationality(candidate, prefs) ? 1 : 2;
 }
 
 // 동일 티어 안에서의 2차 정렬 점수.
@@ -258,7 +246,6 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   }
 
   const viewerPrefs: ViewerPrefs = {
-    preferred_languages: (prefs?.preferred_languages as string[] | null) ?? [],
     preferred_nationalities: (prefs?.preferred_nationalities as string[] | null) ?? [],
   };
 
@@ -462,7 +449,6 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   //    정렬됐으므로). reciprocity boost 는 모든 후보 동일 적용이라 무력화 → intra
   //    score 미산정.
   const viewerPrefs: ViewerPrefs = {
-    preferred_languages: (prefs?.preferred_languages as string[] | null) ?? [],
     preferred_nationalities: (prefs?.preferred_nationalities as string[] | null) ?? [],
   };
 

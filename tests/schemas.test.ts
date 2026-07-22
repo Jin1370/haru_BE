@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { profileUpsertSchema, LANGUAGE_CODES, isAdultBirthDate } from '../src/schemas/profile';
-import { preferenceSchema } from '../src/schemas/preference';
 
 // Pure unit tests against the zod schemas — no DB or HTTP. After mig 009 the
 // language model collapsed to scalar `language` on profile and `string[]` on
@@ -123,38 +122,3 @@ describe('birth_date validation (LAUNCH_CHECKLIST #2)', () => {
   });
 });
 
-describe('preferenceSchema (mig 009 — preferred_languages: string[])', () => {
-  it('accepts an empty preferred_languages array', () => {
-    const parsed = preferenceSchema.parse({});
-    expect(parsed.preferred_languages).toEqual([]);
-  });
-
-  it('accepts whitelisted codes', () => {
-    const parsed = preferenceSchema.parse({
-      preferred_languages: ['ko', 'ja'],
-    });
-    expect(parsed.preferred_languages).toEqual(['ko', 'ja']);
-  });
-
-  it('rejects unknown codes', () => {
-    const result = preferenceSchema.safeParse({
-      preferred_languages: ['ko', 'fr'],
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it('rejects legacy `{code, level}` proficiency objects', () => {
-    const result = preferenceSchema.safeParse({
-      preferred_languages: [{ code: 'ko', level: 2 }],
-    } as any);
-    expect(result.success).toBe(false);
-  });
-
-  it('drops the legacy preferred_languages_detail key (unknown after mig 009)', () => {
-    const parsed = preferenceSchema.parse({
-      preferred_languages_detail: [{ code: 'ko', level: 1 }],
-    } as any);
-    expect(parsed).not.toHaveProperty('preferred_languages_detail');
-    expect(parsed.preferred_languages).toEqual([]);
-  });
-});

@@ -23,7 +23,6 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     min_age: 18,
     max_age: 100,
     preferred_genders: ['male', 'female', 'other'],
-    preferred_languages: [],
     preferred_nationalities: [],
   });
 });
@@ -34,7 +33,6 @@ router.put('/', validateBody(preferenceSchema), async (req: AuthRequest, res: Re
     min_age,
     max_age,
     preferred_genders,
-    preferred_languages,
     preferred_nationalities,
   } = req.body;
 
@@ -45,7 +43,6 @@ router.put('/', validateBody(preferenceSchema), async (req: AuthRequest, res: Re
       min_age,
       max_age,
       preferred_genders,
-      preferred_languages,
       preferred_nationalities,
       updated_at: new Date().toISOString(),
     })

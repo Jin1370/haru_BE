@@ -14,6 +14,7 @@ import { requireNotFrozen } from '../utils/freezeGuard';
 import { isBlocked } from '../constants/moderationDictionary';
 import { checkOpenAiModeration } from '../services/openaiModeration';
 import { logModerationBlock } from '../utils/moderationAudit';
+import { sendAdminPush } from '../services/pushNotifications';
 import { AuthRequest, VoiceIntroTranslations } from '../types';
 
 // photo-watercolor-pipeline sprint: 사진 최대 5장 (slot 0~4).
@@ -272,6 +273,13 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
   if (error) {
     res.status(400).json({ error: error.message });
     return;
+  }
+
+  // 운영 신호 — 첫 프로필 생성(prev 행 없음)일 때만 운영자 push. fire-and-forget.
+  if (!prev) {
+    sendAdminPush(
+      `새 가입: ${display_name} (${nationality ?? '?'}/${gender ?? '?'})`,
+    ).catch((e) => console.error('[profile.admin_push_failed]', (e as Error).message));
   }
 
   // LAUNCH_CHECKLIST #5 — 가입 동의 기록. 동의 플래그는 signup wizard 의 최초

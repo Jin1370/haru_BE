@@ -262,3 +262,47 @@ export async function sendPushToUser(
     console.error('[sendPushToUser] unhandled error:', error);
   }
 }
+
+// 운영자 알림 — ADMIN_NOTIFY_USER_ID 계정의 device_tokens 로 임의 body 를 발송.
+// 실유저 push 경로(차단/옵트아웃/locale)와 무관한 운영 신호 전용. 미설정이면 no-op.
+// 항상 fire-and-forget 으로 호출할 것.
+export async function sendAdminPush(body: string): Promise<void> {
+  try {
+    if (!env.admin.notifyUserId) return;
+
+    const { data: tokens, error } = await supabase
+      .from('device_tokens')
+      .select('expo_push_token')
+      .eq('user_id', env.admin.notifyUserId);
+    if (error) {
+      console.error('[sendAdminPush] token select error:', error.message);
+      return;
+    }
+    if (!tokens || tokens.length === 0) return;
+
+    const messages = (tokens as DeviceTokenRow[]).map((t) => ({
+      to: t.expo_push_token,
+      sound: 'default' as const,
+      title: 'haru admin',
+      body,
+      data: { type: 'admin' },
+      channelId: 'default',
+      priority: 'high' as const,
+    }));
+
+    const response = await fetch(EXPO_PUSH_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        accept: 'application/json',
+        'accept-encoding': 'gzip,deflate',
+      },
+      body: JSON.stringify(messages),
+    });
+    if (!response.ok) {
+      console.error(`[sendAdminPush] Expo Push API HTTP ${response.status}`);
+    }
+  } catch (error) {
+    console.error('[sendAdminPush] unhandled error:', error);
+  }
+}

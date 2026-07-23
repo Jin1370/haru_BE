@@ -116,6 +116,9 @@ export const env = {
       process.env.ADMIN_DASHBOARD_ENABLED === 'true'
         ? required('ADMIN_SECRET')
         : '',
+    // 운영자 실계정 user id. 설정 시 신규 프로필 생성마다 이 계정의
+    // device_tokens 로 알림 push 발송. 미설정이면 기능 자체 off.
+    notifyUserId: process.env.ADMIN_NOTIFY_USER_ID ?? null,
   },
 
   // message-moderation-v1 (PR2): 누적 신고 임계치.

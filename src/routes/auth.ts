@@ -498,10 +498,55 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
   // is keyed by userId so we don't need to capture URLs.
   const { data: prevProfile } = await supabase
     .from('profiles')
-    .select('elevenlabs_voice_id')
+    .select('elevenlabs_voice_id, voice_intro, created_at')
     .eq('id', userId)
     .maybeSingle();
   const voiceCloneId = (prevProfile?.elevenlabs_voice_id as string | null) ?? null;
+
+  // (0.5) deletion_stats 스냅샷 (mig 043) — swipes / user_preferences /
+  // profile_photos 는 아래에서 즉시 삭제되고 profiles 는 anonymize 되므로,
+  // 지우기 전에 카운트/boolean 만 세서 audit 1 row 로 남긴다 ("가입 직후
+  // 이탈한 유저가 탈퇴 전에 뭘 해봤는지" — raw row 보존 없이 최소화 정합,
+  // 365 일 후 cleanupAuditTables sweep 이 폐기). 실패는 console.error 만
+  // — 통계가 탈퇴(삭제권 행사)를 막지 않는다.
+  const [swipesSent, likesSent, likesReceived, photoRows, prefsRow] = await Promise.all([
+    supabase.from('swipes').select('id', { count: 'exact', head: true }).eq('swiper_id', userId),
+    supabase
+      .from('swipes')
+      .select('id', { count: 'exact', head: true })
+      .eq('swiper_id', userId)
+      .eq('direction', 'like'),
+    supabase
+      .from('swipes')
+      .select('id', { count: 'exact', head: true })
+      .eq('swiped_id', userId)
+      .eq('direction', 'like'),
+    supabase
+      .from('profile_photos')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId),
+    supabase
+      .from('user_preferences')
+      .select('user_id', { count: 'exact', head: true })
+      .eq('user_id', userId),
+  ]);
+  [swipesSent, likesSent, likesReceived, photoRows, prefsRow].forEach((r) => {
+    if (r.error) console.error('[deleteAccount] deletion_stats count failed:', r.error.message);
+  });
+  const { error: statsErr } = await supabase.from('deletion_stats').insert({
+    user_id: userId,
+    account_created_at: (prevProfile?.created_at as string | null) ?? null,
+    swipe_count: swipesSent.count ?? 0,
+    like_count: likesSent.count ?? 0,
+    received_like_count: likesReceived.count ?? 0,
+    had_voice_clone: Boolean(voiceCloneId),
+    had_voice_intro: Boolean(prevProfile?.voice_intro),
+    photo_count: photoRows.count ?? 0,
+    preferences_set: (prefsRow.count ?? 0) > 0,
+  });
+  if (statsErr) {
+    console.error('[deleteAccount] deletion_stats insert failed:', statsErr.message);
+  }
 
   // (1) Anonymize the profile row. NOT NULL columns (display_name,
   // birth_date, gender, nationality, language) are kept satisfied with

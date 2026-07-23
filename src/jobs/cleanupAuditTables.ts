@@ -12,6 +12,8 @@ import { supabase } from '../config/supabase';
 //     통신자료 제공 요청).
 //   * blocks            (mig 002) — 사용자 차단 audit. created_at 기준.
 //     동일 sprint, 동일 근거. 가해자 차단 패턴 추적용 audit 성격으로 분류.
+//   * deletion_stats    (mig 043) — 탈퇴 시점 활동 요약 스냅샷. deleted_at 기준.
+//     카운트/boolean 만 담는 익명화-인접 통계라 raw PII 없음 — 이탈 분석용.
 //
 // 정책:
 //   사용자 결정 (2026-05-24) — 90 일 → 1 년 보관. 운영 관점 (재범자 식별,
@@ -36,16 +38,17 @@ function cutoffIso(daysAgo: number): string {
 }
 
 type AuditTable = {
-  table: 'moderation_blocks' | 'freeze_events' | 'reports' | 'blocks';
-  timeColumn: 'blocked_at' | 'triggered_at' | 'created_at';
-  key: 'moderation' | 'freeze' | 'reports' | 'blocks';
+  table: 'moderation_blocks' | 'freeze_events' | 'reports' | 'blocks' | 'deletion_stats';
+  timeColumn: 'blocked_at' | 'triggered_at' | 'created_at' | 'deleted_at';
+  key: 'moderation' | 'freeze' | 'reports' | 'blocks' | 'deletionStats';
 };
 
 const AUDIT_TABLES: AuditTable[] = [
-  { table: 'moderation_blocks', timeColumn: 'blocked_at',   key: 'moderation' },
-  { table: 'freeze_events',     timeColumn: 'triggered_at', key: 'freeze'     },
-  { table: 'reports',           timeColumn: 'created_at',   key: 'reports'    },
-  { table: 'blocks',            timeColumn: 'created_at',   key: 'blocks'     },
+  { table: 'moderation_blocks', timeColumn: 'blocked_at',   key: 'moderation'    },
+  { table: 'freeze_events',     timeColumn: 'triggered_at', key: 'freeze'        },
+  { table: 'reports',           timeColumn: 'created_at',   key: 'reports'       },
+  { table: 'blocks',            timeColumn: 'created_at',   key: 'blocks'        },
+  { table: 'deletion_stats',    timeColumn: 'deleted_at',   key: 'deletionStats' },
 ];
 
 async function sweepAuditTable(
@@ -72,6 +75,7 @@ export async function sweepAuditTables(): Promise<{
   freezeDeleted: number;
   reportsDeleted: number;
   blocksDeleted: number;
+  deletionStatsDeleted: number;
   errors: number;
 }> {
   const cutoff = cutoffIso(RETENTION_DAYS);
@@ -82,10 +86,11 @@ export async function sweepAuditTables(): Promise<{
     AUDIT_TABLES.map((t, i) => [t.key, results[i]]),
   ) as Record<AuditTable['key'], { deleted: number; error: boolean }>;
   return {
-    moderationDeleted: lookup.moderation.deleted,
-    freezeDeleted:     lookup.freeze.deleted,
-    reportsDeleted:    lookup.reports.deleted,
-    blocksDeleted:     lookup.blocks.deleted,
+    moderationDeleted:    lookup.moderation.deleted,
+    freezeDeleted:        lookup.freeze.deleted,
+    reportsDeleted:       lookup.reports.deleted,
+    blocksDeleted:        lookup.blocks.deleted,
+    deletionStatsDeleted: lookup.deletionStats.deleted,
     errors: results.filter((r) => r.error).length,
   };
 }
@@ -100,7 +105,8 @@ function runSweep(label: string): void {
         r.moderationDeleted > 0 ||
         r.freezeDeleted > 0 ||
         r.reportsDeleted > 0 ||
-        r.blocksDeleted > 0
+        r.blocksDeleted > 0 ||
+        r.deletionStatsDeleted > 0
       ) {
         console.log(`[audit-cleanup.sweep] ${label}`, r);
       }

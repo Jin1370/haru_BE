@@ -63,9 +63,9 @@ STEP 2 — Translate the tagged text into the target language:
 - The source may be broken, abbreviated, or grammatically off (typos, dropped words like "that me smile" meaning "that made me smile"). Infer the intended meaning and translate that naturally — do NOT reproduce the brokenness.
 - Preserve meaning and emotional intent fully. Do NOT abbreviate or shorten.
 - CRITICAL: Inline ElevenLabs audio tags written as [laughs], [sad], or similar [single_word] forms in square brackets, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
-- Match the source register: default to polite tone, but preserve casual register if the source is clearly casual:
-  - Korean: 해요체 (편한 존댓말) by default. Avoid stiff 습니다체 unless the source is clearly formal. Allow 반말 only if the source is clearly 반말.
-  - Japanese: です/ます is the safe default. If the source is clearly casual, use natural casual forms (だ/だよ/だし) — do not force formal.
+- Match the source register — MIRROR it, never normalize toward polite:
+  - Korean: if the source is 반말, the output MUST be 반말 (e.g. "일찍 일어나는 이유가 있어?" must NOT become "...있어요?"). If the source is polite, use 해요체; avoid stiff 습니다체 unless the source is clearly formal. Only when the source language marks no politeness (e.g. English) default to 해요체.
+  - Japanese: mirror likewise — casual source MUST stay casual (だ/だよ/だし), polite source → です/ます. Only when the source marks no politeness default to です/ます.
   - English: contemporary conversational tone, contractions allowed (I'm, you'll). No business-speak.
   - Chinese: 您 by default. Allow 你 if the source is clearly casual.
 - Keep proper nouns in their original or properly romanized form.
@@ -123,9 +123,9 @@ STEP 2 — Produce the tagged text in every requested language:
 - CRITICAL: Inline ElevenLabs audio tags written as [laughs], [sad], or similar [single_word] forms in square brackets, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
 - Preserve the speaker's intent, mood, and casual/playful register. Voice intros are typically 80-160 characters and aim to invite a stranger to swipe right.
 - Match natural spoken length within ±20% of the source character count. Do NOT pad or truncate to extremes.
-- Use a register appropriate for casual self-introduction in each language:
-  - Korean: 해요체 (편한 존댓말). Avoid stiff 습니다체 unless the source is clearly formal. Allow 반말 only if the source is clearly 반말.
-  - Japanese: です/ます is the safe default. If the source is clearly casual, use natural casual forms (だ/だよ/だし) — do not force formal.
+- Use a register appropriate for casual self-introduction in each language — MIRROR the source register, never normalize toward polite:
+  - Korean: if the source is 반말, the output MUST be 반말. If the source is polite, use 해요체; avoid stiff 습니다체 unless the source is clearly formal. Only when the source language marks no politeness (e.g. English) default to 해요체.
+  - Japanese: mirror likewise — casual source MUST stay casual (だ/だよ/だし), polite source → です/ます. Only when the source marks no politeness default to です/ます.
   - English: contemporary conversational tone, contractions allowed (I'm, you'll). No "thee/thou", no business-speak.
 - Preserve proper nouns, emoji, and onomatopoeia (e.g., 두근두근, ドキドキ).
 - Do NOT translate hashtags or @mentions if present.

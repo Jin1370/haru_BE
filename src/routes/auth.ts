@@ -498,7 +498,7 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
   // is keyed by userId so we don't need to capture URLs.
   const { data: prevProfile } = await supabase
     .from('profiles')
-    .select('elevenlabs_voice_id, voice_intro, created_at')
+    .select('elevenlabs_voice_id, voice_intro, created_at, nationality, gender')
     .eq('id', userId)
     .maybeSingle();
   const voiceCloneId = (prevProfile?.elevenlabs_voice_id as string | null) ?? null;
@@ -536,6 +536,8 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
   const { error: statsErr } = await supabase.from('deletion_stats').insert({
     user_id: userId,
     account_created_at: (prevProfile?.created_at as string | null) ?? null,
+    nationality: (prevProfile?.nationality as string | null) ?? null,
+    gender: (prevProfile?.gender as string | null) ?? null,
     swipe_count: swipesSent.count ?? 0,
     like_count: likesSent.count ?? 0,
     received_like_count: likesReceived.count ?? 0,

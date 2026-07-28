@@ -147,6 +147,7 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
     interests,
     terms_consent,
     voice_consent,
+    referral_code,
   } = req.body;
 
   // LAUNCH_CHECKLIST #2 — 서버측 만 18세 미만 차단. 형식·캘린더 유효성은
@@ -262,6 +263,11 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
     upsertPayload.voice_intro_translations = {};
     upsertPayload.voice_intro_audio_urls = {};
     upsertPayload.voice_intro_audio_status = {};
+  }
+  // 추천 코드는 최초 생성(!prev)일 때만 기록 — 이후 프로필 수정으로 코드를
+  // 바꿔치기하는 것을 차단(정산 무결성). 빈 문자열은 미입력 취급.
+  if (!prev && referral_code) {
+    upsertPayload.referral_code = referral_code;
   }
 
   const { data, error } = await supabase

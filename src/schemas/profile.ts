@@ -69,6 +69,19 @@ export const profileUpsertSchema = z.object({
   // 생체정보 처리 별도 동의 (PIPA §23).
   terms_consent: z.boolean().optional(),
   voice_consent: z.boolean().optional(),
+  // 파트너 추천 코드 (한일교류회 등 유입원 추적). 최초 프로필 생성 시에만 기록되고
+  // (라우트 !prev 분기) 이후 수정 무시. GROUP BY 집계 신뢰성을 위해 trim + 대문자
+  // 정규화 — 구두로 전달된 코드가 대소문자·공백 차이로 다른 파트너로 집계되는 것 방지.
+  // 빈 문자열은 코드 미입력으로 취급 (라우트에서 falsy → 미기록).
+  // 영문 대소문자 + 숫자만 허용 (정규화로 대문자화). `*` 라 빈 문자열(미입력)은
+  // 통과시키고, 그 외 특수문자/공백/한글은 400 으로 거른다.
+  referral_code: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .max(40)
+    .regex(/^[A-Z0-9]*$/, { message: 'referral code must be alphanumeric' })
+    .optional(),
 });
 
 // photo-reorder-no-reconvert sprint — PATCH /api/profile/photos/order.

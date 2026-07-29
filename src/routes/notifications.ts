@@ -65,13 +65,14 @@ router.delete('/token', validateBody(unregisterTokenSchema), async (req: AuthReq
 router.get('/preferences', async (req: AuthRequest, res: Response) => {
   const { data } = await supabase
     .from('user_preferences')
-    .select('notify_messages, notify_matches')
+    .select('*')
     .eq('user_id', req.userId!)
     .maybeSingle();
 
   res.json({
     notify_messages: data?.notify_messages ?? true,
     notify_matches: data?.notify_matches ?? true,
+    notify_likes: data?.notify_likes ?? true,
   });
 });
 
@@ -80,6 +81,7 @@ router.patch('/preferences', validateBody(updatePreferencesSchema), async (req: 
   const patch = req.body as {
     notify_messages?: boolean;
     notify_matches?: boolean;
+    notify_likes?: boolean;
   };
 
   const { data, error } = await supabase
@@ -92,7 +94,7 @@ router.patch('/preferences', validateBody(updatePreferencesSchema), async (req: 
       },
       { onConflict: 'user_id' },
     )
-    .select('notify_messages, notify_matches')
+    .select('*')
     .single();
 
   if (error) {
@@ -106,6 +108,7 @@ router.patch('/preferences', validateBody(updatePreferencesSchema), async (req: 
   res.json({
     notify_messages: data?.notify_messages ?? true,
     notify_matches: data?.notify_matches ?? true,
+    notify_likes: data?.notify_likes ?? true,
   });
 });
 

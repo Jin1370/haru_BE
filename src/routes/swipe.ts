@@ -506,6 +506,48 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   res.json(results);
 });
 
+// 받은 좋아요 푸시 게이트 — 이 like 가 수신자의 받은 좋아요 탭에 실제로 노출되는가.
+// 위 GET /likes-received 의 visible 필터(이미 스와이프함 / is_active / 성별·연령
+// 선호 / 크로스언어 / 사진 / 시청자 언어 보이스 인트로 슬롯)를 한 명분으로 재사용.
+// 노출되지 않을 like 까지 푸시하면 "좋아요 왔다" 는 알림을 열었는데 탭이 그대로인
+// 거짓 신호가 된다. 차단·freeze 는 sendPushToUser 가 이미 검사하므로 생략.
+async function isLikeVisibleToReceiver(likerId: string, receiverId: string): Promise<boolean> {
+  const [receiverProfile, prefsResult, receiverSwipe] = await Promise.all([
+    supabase.from('profiles').select('language').eq('id', receiverId).maybeSingle(),
+    supabase.from('user_preferences').select('*').eq('user_id', receiverId).maybeSingle(),
+    // 수신자가 이미 이 상대를 스와이프(pass)했으면 받은 좋아요 풀에서 제외됨.
+    supabase.from('swipes').select('id').eq('swiper_id', receiverId).eq('swiped_id', likerId).limit(1),
+  ]);
+
+  if ((receiverSwipe.data ?? []).length > 0) return false;
+
+  const viewerLanguage = (receiverProfile.data?.language as string | null) ?? '';
+
+  let query = supabase
+    .from('profiles')
+    .select('language, voice_intro_audio_urls')
+    .eq('id', likerId)
+    .eq('is_active', true);
+  query = applyPrefFilters(query, prefsResult.data);
+
+  const { data: liker, error } = await query.maybeSingle();
+  if (error) {
+    console.error('[isLikeVisibleToReceiver] liker select error:', error.message);
+    return false;
+  }
+  const row = liker as any;
+  if (!row?.language) return false;
+  if (viewerLanguage && row.language === viewerLanguage) return false;
+
+  const slotUrls = (row.voice_intro_audio_urls ?? {}) as Partial<
+    Record<VoiceIntroSlotLanguage, string | null>
+  >;
+  if (!slotUrls[pickViewerSlot(viewerLanguage)]) return false;
+
+  const photos = await fetchReadyPhotosByUser([likerId], 'like-push');
+  return (photos.get(likerId) ?? []).length > 0;
+}
+
 // 사용자 로컬 자정 기준 [today_start_utc, today_start_utc + 24h) 범위를 계산.
 // tzOffsetMinutes 는 JS Date#getTimezoneOffset() 시맨틱 (UTC - local, 분).
 function computeLocalDayRangeUtc(nowMs: number, tzOffsetMinutes: number): {
@@ -822,6 +864,17 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
           });
       }
     }
+
+  // 6) 받은 좋아요 푸시 — 매치가 성사되지 않은 like 에만 (성사된 경우는 위 match
+  //    푸시가 커버). 익명 문구 + fire-and-forget.
+  if (direction === 'like' && !reciprocal) {
+    const likerId = req.userId!;
+    isLikeVisibleToReceiver(likerId, swiped_id)
+      .then((visible) =>
+        visible ? sendPushToUser(swiped_id, { type: 'like', liker_id: likerId }) : undefined,
+      )
+      .catch((err) => console.error('[sendPushToUser like]', err));
+  }
 
   res.json({ direction, match });
 });

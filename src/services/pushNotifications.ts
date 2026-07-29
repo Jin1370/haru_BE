@@ -18,6 +18,12 @@ export type PushPayload =
       match_id: string;
       matched_user_id: string;
       matched_name: string;
+    }
+  // 받은 좋아요 — 익명 (body 에 이름 없음, data 에 liker_id 없음). FE 는 탭 시
+  // 받은 좋아요 탭으로만 이동하고 누가 눌렀는지는 정상 API 로 확인한다.
+  | {
+      type: 'like';
+      liker_id: string;
     };
 
 interface DeviceTokenRow {
@@ -53,7 +59,11 @@ export async function sendPushToUser(
 ): Promise<void> {
   try {
     const counterpartyId =
-      payload.type === 'message' ? payload.sender_id : payload.matched_user_id;
+      payload.type === 'message'
+        ? payload.sender_id
+        : payload.type === 'match'
+          ? payload.matched_user_id
+          : payload.liker_id;
 
     // 1) 차단 양방향 검증 — message.ts 의 OR 패턴과 동일
     const { data: blocks } = await supabase
@@ -88,7 +98,9 @@ export async function sendPushToUser(
     // 2) 옵트아웃 검증 — user_preferences 행이 없으면 default true (전송)
     const { data: prefs } = await supabase
       .from('user_preferences')
-      .select('notify_messages, notify_matches')
+      // '*' — mig 047 미적용 환경에서 notify_likes 컬럼 지정 시 쿼리 자체가 400 이
+      // 되어 기존 message/match 옵트아웃까지 무시되는 회귀를 회피.
+      .select('*')
       .eq('user_id', receiverId)
       .maybeSingle();
 
@@ -97,6 +109,10 @@ export async function sendPushToUser(
         return;
       }
       if (payload.type === 'match' && prefs.notify_matches === false) {
+        return;
+      }
+      // mig 047 미적용 윈도우에서는 notify_likes 가 undefined → 전송 (기본 ON).
+      if (payload.type === 'like' && prefs.notify_likes === false) {
         return;
       }
     }
@@ -176,15 +192,23 @@ export async function sendPushToUser(
       (receiverProfile?.language as string | null | undefined) ?? null,
     );
 
+    // like 는 익명 문구라 {name} 자리가 없다 (빈 문자열 보간은 no-op).
     const name =
-      payload.type === 'message' ? payload.sender_name : payload.matched_name;
+      payload.type === 'message'
+        ? payload.sender_name
+        : payload.type === 'match'
+          ? payload.matched_name
+          : '';
     const body = buildPushBody(payload.type as PushMessageType, locale, name);
     // dev 알림 싱크(label 있는 토큰)는 테스터 폰 1대 전용이라 수신 dev 계정의
     // 언어(ja 등)와 무관하게 한국어로 고정 — 테스터 가독성. 실유저 토큰(label
     // null)은 위 수신자 언어 body 그대로.
     const sinkBody = buildPushBody(payload.type as PushMessageType, 'ko', name);
 
-    const data: Record<string, string> = { type: payload.type, match_id: payload.match_id };
+    const data: Record<string, string> = { type: payload.type };
+    if (payload.type !== 'like') {
+      data.match_id = payload.match_id;
+    }
     if (payload.type === 'message') {
       data.sender_id = payload.sender_id;
     }

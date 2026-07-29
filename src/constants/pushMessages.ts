@@ -30,6 +30,13 @@ const PUSH_MESSAGES = {
     ja: '{name}さんとマッチしました！',
     en: 'You matched with {name}!',
   },
+  // 좋아요는 익명 — 이름을 넣지 않는다. 트레이에 남는 개인정보 0 + 앱을 열어
+  // 확인하게 만드는 동기 유지 (받은 좋아요 탭에서 누구인지 확인).
+  like: {
+    ko: '새로운 좋아요가 도착했어요',
+    ja: '新しいいいねが届きました',
+    en: 'You received a new like',
+  },
 } as const;
 
 export type PushMessageType = keyof typeof PUSH_MESSAGES;

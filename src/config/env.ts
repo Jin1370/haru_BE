@@ -113,6 +113,11 @@ export const env = {
       .split(',')
       .map((c) => c.trim().toUpperCase())
       .filter(Boolean),
+    // 파트너 코드 면제가 지속되는 기간(일). profiles.created_at(가입 시점) 기준으로
+    // 이 기간이 지나면 일반 사용자와 동일한 캡이 적용된다. 기간 제한을 사실상 없애려면
+    // 큰 값(365)을 넣는다. 코드 미보유자에게는 이 값과 무관하게 항상 캡이 적용된다.
+    unlimitedLikeCodeDays: z.coerce.number().int().min(1).max(365).default(30)
+      .parse(process.env.UNLIMITED_LIKE_CODE_DAYS),
   },
 
   // dev/QA 어드민 대시보드 — 출시 빌드에서는 ADMIN_DASHBOARD_ENABLED 미설정

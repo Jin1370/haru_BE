@@ -16,7 +16,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 
 // ── env mock (mutable) — passResetEnabled 를 per-test 토글 ──
-const envState = vi.hoisted(() => ({ passResetEnabled: true, unlimitedLikeCodes: [] as string[] }));
+const envState = vi.hoisted(() => ({
+  passResetEnabled: true,
+  unlimitedLikeCodes: [] as string[],
+  unlimitedLikeCodeDays: 30,
+}));
 vi.mock('../src/config/env', () => ({
   env: {
     port: 3000,
@@ -38,6 +42,9 @@ vi.mock('../src/config/env', () => ({
       dailyLikeLimit: 15,
       get unlimitedLikeCodes() {
         return envState.unlimitedLikeCodes;
+      },
+      get unlimitedLikeCodeDays() {
+        return envState.unlimitedLikeCodeDays;
       },
     },
     admin: { dashboardEnabled: false, secret: '' },
@@ -63,8 +70,11 @@ vi.mock('../src/services/pushNotifications', () => ({
 const captured = vi.hoisted(() => ({
   // 공통 (freeze 가드)
   frozen: { is_active: true as boolean, frozen_at: null as null | string },
-  // 파트너 초대코드 면제 조회 (hasUnlimitedLikes)
-  referral: { data: null as null | { referral_code: string | null }, error: null as null | { message: string } },
+  // like 예산 면제 조회 (hasUnlimitedLikes) — 초대코드 + 가입 경과일
+  referral: {
+    data: null as null | { referral_code: string | null; created_at?: string },
+    error: null as null | { message: string },
+  },
 
   // POST /swipe
   reciprocal: { data: null as null | { id: string }, error: null as null | { code?: string; message: string } },
@@ -199,6 +209,7 @@ function authToken(userId = VIEWER): string {
 beforeEach(() => {
   envState.passResetEnabled = true;
   envState.unlimitedLikeCodes = [];
+  envState.unlimitedLikeCodeDays = 30;
   captured.frozen = { is_active: true, frozen_at: null };
   captured.referral = { data: null, error: null };
   captured.reciprocal = { data: null, error: null };
@@ -335,9 +346,12 @@ describe('POST /api/discover/swipe — 하루 like 예산 캡 + 면제', () => {
     expect(captured.swipeInsertPayload).toBeNull();
   });
 
-  it('(3-1) 예산 소진 + 파트너 코드(화이트리스트) 보유 → 캡 우회 200', async () => {
+  it('(3-1) 예산 소진 + 파트너 코드(화이트리스트) + 가입 30일 이내 → 캡 우회 200', async () => {
     envState.unlimitedLikeCodes = ['HANIL'];
-    captured.referral = { data: { referral_code: 'HANIL' }, error: null };
+    captured.referral = {
+      data: { referral_code: 'HANIL', created_at: new Date(Date.now() - 5 * 86_400_000).toISOString() },
+      error: null,
+    };
     captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
     captured.budgetCount = { count: 15, error: null };
 
@@ -353,7 +367,28 @@ describe('POST /api/discover/swipe — 하루 like 예산 캡 + 면제', () => {
 
   it('(3-2) 화이트리스트 밖 코드는 면제 없음 → 429', async () => {
     envState.unlimitedLikeCodes = ['HANIL'];
-    captured.referral = { data: { referral_code: 'AAA' }, error: null }; // 임의 입력 코드
+    captured.referral = {
+      data: { referral_code: 'AAA', created_at: new Date().toISOString() }, // 임의 입력 코드
+      error: null,
+    };
+    captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
+    captured.budgetCount = { count: 15, error: null };
+
+    const res = await request(app)
+      .post('/api/discover/swipe?tz_offset_minutes=0')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
+      .send({ swiped_id: SWIPED, direction: 'like' });
+
+    expect(res.status).toBe(429);
+    expect(res.body.code).toBe('daily_limit_reached');
+  });
+
+  it('(3-3) 파트너 코드 보유라도 가입 30일 초과면 → 유예 종료 429', async () => {
+    envState.unlimitedLikeCodes = ['HANIL'];
+    captured.referral = {
+      data: { referral_code: 'HANIL', created_at: new Date(Date.now() - 31 * 86_400_000).toISOString() },
+      error: null,
+    };
     captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
     captured.budgetCount = { count: 15, error: null };
 

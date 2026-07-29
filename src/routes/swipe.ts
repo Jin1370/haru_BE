@@ -527,27 +527,36 @@ function computeLocalDayRangeUtc(nowMs: number, tzOffsetMinutes: number): {
   };
 }
 
-// 파트너 초대코드(한일교류회 등) 가입자의 like 예산 면제 여부.
+// like 예산 면제 여부 — 파트너 초대코드(한일교류회 등) 가입자의 **가입 후 N일** 동안만
+// 일일 캡을 우회한다. 코드 보유 AND 기간 이내 둘 다 만족해야 하며, 기간이 지나면
+// 일반 사용자와 동일하게 캡이 적용된다.
 //
-// env.discover.unlimitedLikeCodes 화이트리스트와 대조 — 코드 스키마가 임의 영숫자를
-// 통과시키므로 "코드 있음" 만으로 열면 아무 문자열이나 입력해 특권을 얻는다.
-// referral_code 는 최초 프로필 생성 시에만 기록되고 이후 수정 불가(profile.ts !prev
-// 분기)라, 가입 후 코드를 갈아끼워 특권을 얻는 경로도 없다.
+// `referral_code IS NOT NULL` 로 열지 않는 이유: 코드 스키마가 임의 영숫자를
+// 통과시키므로(화이트리스트 없음) 아무 문자열이나 입력하면 특권을 얻는다.
+// referral_code 는 최초 프로필 생성 시에만 기록되고 수정 불가(profile.ts !prev
+// 분기)라, 가입 후 코드를 갈아끼워 특권을 얻거나 기간을 리셋하는 경로도 없다.
 //
-// error 시 false(=캡 유지) 로 fail-closed. 이 조회는 캡에 이미 걸린 순간에만
+// error 시 false(=캡 유지) 로 fail-closed. POST 경로에선 캡에 이미 걸린 순간에만
 // 호출되므로 DB 블립 시 결과는 평소와 같은 429 뿐이다.
 async function hasUnlimitedLikes(userId: string): Promise<boolean> {
-  if (env.discover.unlimitedLikeCodes.length === 0) return false;
+  const { unlimitedLikeCodes, unlimitedLikeCodeDays } = env.discover;
+  if (unlimitedLikeCodes.length === 0) return false;
+
   const { data, error } = await supabase
     .from('profiles')
-    .select('referral_code')
+    .select('referral_code, created_at')
     .eq('id', userId)
     .single();
   if (error) {
-    console.error('[swipe] referral_code lookup failed:', error.message);
+    console.error('[swipe] like exemption lookup failed:', error.message);
     return false;
   }
-  return env.discover.unlimitedLikeCodes.includes(data?.referral_code ?? '');
+
+  if (!unlimitedLikeCodes.includes(data?.referral_code ?? '')) return false;
+  // created_at 부재는 기간 판정 불가 → 면제 없음(fail-closed).
+  if (!data?.created_at) return false;
+  const ageMs = Date.now() - new Date(data.created_at).getTime();
+  return ageMs < unlimitedLikeCodeDays * 24 * 60 * 60 * 1000;
 }
 
 // 면제 사용자에게 quota 가 돌려줄 한도. FE 는 limit 을 화면에 렌더링하지 않고

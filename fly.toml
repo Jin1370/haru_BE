@@ -22,5 +22,8 @@ primary_region = 'nrt'
 
 [[vm]]
   size = 'shared-cpu-1x'
-  memory = '512mb'
+  # 2026-07-18 OOM 사고(512MB 에서 node RSS ~400MB + 사진 워터컬러 변환 스파이크로
+  # kill) 후 1GB. CLI `fly scale memory` 만 하면 다음 `fly deploy` 가 이 파일 값으로
+  # 되돌려버리므로(실제로 512 로 되돌아가 있었음) 반드시 여기에 박아둔다.
+  memory = '1gb'
   cpus = 1

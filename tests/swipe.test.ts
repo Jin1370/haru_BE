@@ -16,7 +16,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 
 // ── env mock (mutable) — passResetEnabled 를 per-test 토글 ──
-const envState = vi.hoisted(() => ({ passResetEnabled: true }));
+const envState = vi.hoisted(() => ({ passResetEnabled: true, unlimitedLikeCodes: [] as string[] }));
 vi.mock('../src/config/env', () => ({
   env: {
     port: 3000,
@@ -36,6 +36,9 @@ vi.mock('../src/config/env', () => ({
         return envState.passResetEnabled;
       },
       dailyLikeLimit: 15,
+      get unlimitedLikeCodes() {
+        return envState.unlimitedLikeCodes;
+      },
     },
     admin: { dashboardEnabled: false, secret: '' },
     moderation: { autoFreezeReportThreshold: 3 },
@@ -60,6 +63,8 @@ vi.mock('../src/services/pushNotifications', () => ({
 const captured = vi.hoisted(() => ({
   // 공통 (freeze 가드)
   frozen: { is_active: true as boolean, frozen_at: null as null | string },
+  // 파트너 초대코드 면제 조회 (hasUnlimitedLikes)
+  referral: { data: null as null | { referral_code: string | null }, error: null as null | { message: string } },
 
   // POST /swipe
   reciprocal: { data: null as null | { id: string }, error: null as null | { code?: string; message: string } },
@@ -85,6 +90,10 @@ vi.mock('../src/config/supabase', () => {
     if (t === 'profiles') {
       // .in() 체인 = 매치 push 의 display_name 조회. 그 외 = freeze 가드 maybeSingle.
       if (b._hasIn) return { data: [], error: null };
+      // 파트너 코드 면제 조회 (hasUnlimitedLikes) — freeze 가드와 컬럼으로 구분.
+      if (typeof b._cols === 'string' && b._cols.includes('referral_code')) {
+        return captured.referral;
+      }
       return { data: captured.frozen, error: null };
     }
     if (t === 'swipes') {
@@ -119,6 +128,7 @@ vi.mock('../src/config/supabase', () => {
       _hasIn: false,
       select(_cols?: string, opts?: unknown) {
         if (b._op !== 'insert' && b._op !== 'delete') b._op = 'select';
+        b._cols = _cols;
         if (opts !== undefined) b._selectOpts = opts;
         return b;
       },
@@ -188,7 +198,9 @@ function authToken(userId = VIEWER): string {
 
 beforeEach(() => {
   envState.passResetEnabled = true;
+  envState.unlimitedLikeCodes = [];
   captured.frozen = { is_active: true, frozen_at: null };
+  captured.referral = { data: null, error: null };
   captured.reciprocal = { data: null, error: null };
   captured.budgetCount = { count: 0, error: null };
   captured.passCount = { count: 0, error: null };
@@ -321,6 +333,37 @@ describe('POST /api/discover/swipe — 하루 like 예산 캡 + 면제', () => {
     expect(res.body.code).toBe('daily_limit_reached');
     // 캡 초과 시 INSERT 는 실행되지 않아야 함.
     expect(captured.swipeInsertPayload).toBeNull();
+  });
+
+  it('(3-1) 예산 소진 + 파트너 코드(화이트리스트) 보유 → 캡 우회 200', async () => {
+    envState.unlimitedLikeCodes = ['HANIL'];
+    captured.referral = { data: { referral_code: 'HANIL' }, error: null };
+    captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
+    captured.budgetCount = { count: 15, error: null };
+
+    const res = await request(app)
+      .post('/api/discover/swipe?tz_offset_minutes=0')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
+      .send({ swiped_id: SWIPED, direction: 'like' });
+
+    expect(res.status).toBe(200);
+    // 면제라도 non-reciprocal like 는 예산 카운트에 계속 기록된다 (계측 보존).
+    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(true);
+  });
+
+  it('(3-2) 화이트리스트 밖 코드는 면제 없음 → 429', async () => {
+    envState.unlimitedLikeCodes = ['HANIL'];
+    captured.referral = { data: { referral_code: 'AAA' }, error: null }; // 임의 입력 코드
+    captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
+    captured.budgetCount = { count: 15, error: null };
+
+    const res = await request(app)
+      .post('/api/discover/swipe?tz_offset_minutes=0')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
+      .send({ swiped_id: SWIPED, direction: 'like' });
+
+    expect(res.status).toBe(429);
+    expect(res.body.code).toBe('daily_limit_reached');
   });
 
   it('(4) 예산 소진(15) + reciprocal like → 429 아님, 통과 + 매치 (면제가 캡 우회)', async () => {

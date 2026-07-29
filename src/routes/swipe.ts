@@ -527,6 +527,34 @@ function computeLocalDayRangeUtc(nowMs: number, tzOffsetMinutes: number): {
   };
 }
 
+// 파트너 초대코드(한일교류회 등) 가입자의 like 예산 면제 여부.
+//
+// env.discover.unlimitedLikeCodes 화이트리스트와 대조 — 코드 스키마가 임의 영숫자를
+// 통과시키므로 "코드 있음" 만으로 열면 아무 문자열이나 입력해 특권을 얻는다.
+// referral_code 는 최초 프로필 생성 시에만 기록되고 이후 수정 불가(profile.ts !prev
+// 분기)라, 가입 후 코드를 갈아끼워 특권을 얻는 경로도 없다.
+//
+// error 시 false(=캡 유지) 로 fail-closed. 이 조회는 캡에 이미 걸린 순간에만
+// 호출되므로 DB 블립 시 결과는 평소와 같은 429 뿐이다.
+async function hasUnlimitedLikes(userId: string): Promise<boolean> {
+  if (env.discover.unlimitedLikeCodes.length === 0) return false;
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('referral_code')
+    .eq('id', userId)
+    .single();
+  if (error) {
+    console.error('[swipe] referral_code lookup failed:', error.message);
+    return false;
+  }
+  return env.discover.unlimitedLikeCodes.includes(data?.referral_code ?? '');
+}
+
+// 면제 사용자에게 quota 가 돌려줄 한도. FE 는 limit 을 화면에 렌더링하지 않고
+// dailyLimitReached(count >= limit) 비교와 낙관 카운트 클램프에만 쓰므로, 큰 수
+// 하나로 "무제한" 이 FE 변경 없이 성립한다.
+const UNLIMITED_LIKE_LIMIT = 999_999;
+
 // 디스커버 일일 카드 카운트 (오늘 사용한 스와이프 수). 기기 간 동기화를 위한 endpoint.
 // FE 마운트 시 호출 → in-memory 카운트 기준으로 사용. 스와이프마다 다음 마운트에 동기화.
 router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, res: Response) => {
@@ -567,7 +595,11 @@ router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, r
   }
 
   const used = usedResult.count ?? 0;
-  const dailyLimit = env.discover.dailyLikeLimit;
+  // 파트너 코드 면제자는 사실상 무제한 — FE 의 소프트 게이트(dailyLimitReached)가
+  // 절대 참이 되지 않게 큰 한도를 내려준다. POST 의 하드 캡도 동일 조건으로 우회.
+  const dailyLimit = (await hasUnlimitedLikes(req.userId!))
+    ? UNLIMITED_LIKE_LIMIT
+    : env.discover.dailyLikeLimit;
   res.json({
     // count/limit/remaining 의미 = 오늘 소모한 like 예산 / 한도 / 잔여.
     // (총 스와이프 수가 아니라 non-reciprocal like 만 — 매치 완성 like·pass 는 면제.)
@@ -688,7 +720,9 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
       return;
     }
 
-    if ((usedToday ?? 0) >= env.discover.dailyLikeLimit) {
+    // 캡에 걸린 순간에만 파트너 코드 면제를 조회한다 — 정상 경로(한도 미달)에는
+    // 쿼리가 추가되지 않아 핫패스 비용 0.
+    if ((usedToday ?? 0) >= env.discover.dailyLikeLimit && !(await hasUnlimitedLikes(req.userId!))) {
       res.status(429).json({ error: 'Daily like limit reached', code: 'daily_limit_reached' });
       return;
     }

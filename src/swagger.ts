@@ -668,7 +668,7 @@ export const swaggerDocument = {
           400: { description: '파라미터 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
           409: { description: '이미 스와이프함', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          429: { description: '일일 like 예산(DAILY_LIKE_LIMIT, 기본 15) 도달 — 서버측 하드 캡. 매치 완성 like·pass 는 미적용(면제).', content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string', example: 'Daily like limit reached' }, code: { type: 'string', example: 'daily_limit_reached' } }, required: ['error', 'code'] } } } },
+          429: { description: '일일 like 예산(DAILY_LIKE_LIMIT, 기본 15) 도달 — 서버측 하드 캡. 매치 완성 like·pass 는 미적용(면제). 파트너 초대코드 가입자(profiles.referral_code ∈ UNLIMITED_LIKE_CODES)도 캡 우회 — 이 경우 GET /quota 의 limit 이 999999 로 내려간다.', content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string', example: 'Daily like limit reached' }, code: { type: 'string', example: 'daily_limit_reached' } }, required: ['error', 'code'] } } } },
         },
       },
     },

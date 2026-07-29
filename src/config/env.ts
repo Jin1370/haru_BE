@@ -104,6 +104,15 @@ export const env = {
     // 수집 후 조정 — strategist 후속 P1). min=1 max=1000 zod 검증.
     dailyLikeLimit: z.coerce.number().int().min(1).max(1000).default(15)
       .parse(process.env.DAILY_LIKE_LIMIT),
+    // like 예산 면제 파트너 코드 (한일교류회 등). 가입 시 입력한 profiles.referral_code
+    // 가 이 목록에 있으면 일일 like 캡을 우회한다. `referral_code IS NOT NULL` 로
+    // 열지 않는 이유: 스키마가 임의 영숫자 40자를 통과시켜(화이트리스트 없음) 아무
+    // 문자열이나 입력하면 특권을 얻는다. env 목록이라 파트너 추가는 시크릿 갱신만
+    // (재배포 불필요). 미설정 = 빈 배열 = 아무도 면제 없음(안전 기본값).
+    unlimitedLikeCodes: (process.env.UNLIMITED_LIKE_CODES ?? '')
+      .split(',')
+      .map((c) => c.trim().toUpperCase())
+      .filter(Boolean),
   },
 
   // dev/QA 어드민 대시보드 — 출시 빌드에서는 ADMIN_DASHBOARD_ENABLED 미설정

@@ -91,6 +91,11 @@ export const swaggerDocument = {
             },
           },
           is_active: { type: 'boolean' },
+          has_password: {
+            type: 'boolean',
+            description:
+              'GET /profile/me 전용. 이메일+비밀번호 identity 보유 여부. false 면 구글/애플 전용 계정이라 FE 가 비밀번호 변경 메뉴를 숨긴다.',
+          },
           created_at: { type: 'string', format: 'date-time' },
           updated_at: { type: 'string', format: 'date-time' },
         },

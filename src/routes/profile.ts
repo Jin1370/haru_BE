@@ -125,11 +125,23 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
     data.voice_intro_audio_urls as Record<string, string | null> | null,
   );
 
+  // 비밀번호 로그인 수단 보유 여부. 구글/애플로만 가입한 계정은 password 가 없어
+  // 비밀번호 변경이 불가능한데, 시도하면 WRONG_CURRENT_PASSWORD 로 떨어져 "틀렸다"
+  // 는 오해를 준다 → FE 가 설정 화면에서 해당 메뉴를 아예 감추도록 노출.
+  // 조회 실패 시엔 true (메뉴 노출 = 기존 동작) 로 보수적 폴백.
+  const { data: userData, error: userErr } = await supabase.auth.admin.getUserById(req.userId!);
+  if (userErr) {
+    console.error('[profile.me.get_user_failed]', userErr.message);
+  }
+  const identities = userData?.user?.identities ?? [];
+  const hasPassword = userErr ? true : identities.some((i) => i.provider === 'email');
+
   res.json({
     ...data,
     voice_intro_audio_urls: signedVoiceIntroUrls,
     photos: responsePhotos,
     photo_statuses: photoStatuses,
+    has_password: hasPassword,
   });
 });
 

@@ -2,7 +2,9 @@ import { Router, Response } from 'express';
 import multer from 'multer';
 import { supabase } from '../config/supabase';
 import { uploadFile } from '../services/storage';
-import { createVoiceClone, deleteVoiceClone } from '../services/elevenlabs';
+import { createVoiceClone, deleteVoiceClone, type PersonaGender } from '../services/elevenlabs';
+import { generateVoiceIntroAudios } from '../services/voiceIntro';
+import { findBioPhraseByText } from '../constants/bioPhrasesCatalog';
 import { authMiddleware } from '../middleware/auth';
 import { requireNotFrozen } from '../utils/freezeGuard';
 import { env } from '../config/env';
@@ -101,10 +103,16 @@ router.post('/clone', requireNotFrozen, upload.single('audio'), async (req: Auth
     let recloneGuardActive = true;
     let prevRecloneCount = 0;
     let prevWindowStartIso: string | null = null;
+    // 재등록 후 voice intro 를 옛 문구 그대로 새 목소리로 재생성하기 위한 값들.
+    let voiceIntro: string | null = null;
+    let authorLanguage: string | null = null;
+    let profileGender: PersonaGender | undefined;
     {
       const { data, error } = await supabase
         .from('profiles')
-        .select('elevenlabs_voice_id, voice_reclone_count, voice_reclone_window_start')
+        .select(
+          'elevenlabs_voice_id, voice_reclone_count, voice_reclone_window_start, voice_intro, language, gender',
+        )
         .eq('id', req.userId!)
         .single();
       if (error) {
@@ -112,14 +120,20 @@ router.post('/clone', requireNotFrozen, upload.single('audio'), async (req: Auth
         recloneGuardActive = false;
         const { data: vidOnly } = await supabase
           .from('profiles')
-          .select('elevenlabs_voice_id')
+          .select('elevenlabs_voice_id, voice_intro, language, gender')
           .eq('id', req.userId!)
           .single();
         prevVoiceId = (vidOnly?.elevenlabs_voice_id as string | null) ?? null;
+        voiceIntro = (vidOnly?.voice_intro as string | null) ?? null;
+        authorLanguage = (vidOnly?.language as string | null) ?? null;
+        profileGender = (vidOnly?.gender as PersonaGender | null) ?? undefined;
       } else {
         prevVoiceId = (data?.elevenlabs_voice_id as string | null) ?? null;
         prevRecloneCount = (data?.voice_reclone_count as number | null) ?? 0;
         prevWindowStartIso = (data?.voice_reclone_window_start as string | null) ?? null;
+        voiceIntro = (data?.voice_intro as string | null) ?? null;
+        authorLanguage = (data?.language as string | null) ?? null;
+        profileGender = (data?.gender as PersonaGender | null) ?? undefined;
       }
     }
 
@@ -196,6 +210,37 @@ router.post('/clone', requireNotFrozen, upload.single('audio'), async (req: Auth
       deleteVoiceClone(prevVoiceId).catch((err) => {
         console.error('[Voice Clone] old voice cleanup failed:', prevVoiceId, err);
       });
+    }
+
+    // 재등록(재녹음)이면 보이스 한마디를 **기존 문구 그대로** 새 목소리로 재합성.
+    // 안 하면 프로필의 한마디만 옛 목소리로 남아 디스커버 첫인상과 채팅 목소리가
+    // 어긋난다. 최초 등록은 대상 아님 — 마법사 순서가 voice → intro 라 한마디를
+    // 저장하는 시점에 PUT /api/profile/me 가 이미 파이프라인을 돌린다.
+    // 프리셋 문구면 카탈로그 손번역을 재사용해 Gemini 호출까지 생략 (표시 문구 불변).
+    // fire-and-forget — 실패해도 클론 등록 자체는 성공 응답 (슬롯 status='failed').
+    if (isReRecord && voiceIntro) {
+      // 응답 **전에** 슬롯을 pending 으로 내려둔다. FE 는 clone 성공 직후
+      // loadProfile() 을 부르는데(useVoice.uploadClone), 파이프라인이 자체 리셋을
+      // commit 하기 전에 그 GET 이 도착하면 status='ready' + 곧 삭제될 옛 URL 을
+      // 받아 재생이 깨지고, 프로필 화면 폴링(allSlotsSettled)도 시작되지 않는다.
+      // 여기서 먼저 내려두면 FE 가 항상 "합성 중"을 보고 ready 전이까지 폴링한다.
+      const { error: pendingErr } = await supabase
+        .from('profiles')
+        .update({ voice_intro_audio_status: { ko: 'pending', ja: 'pending', en: 'pending' } })
+        .eq('id', req.userId!);
+      if (pendingErr) {
+        console.error('[voice.clone.voice_intro_pending_mark_failed]', pendingErr.message);
+      }
+      generateVoiceIntroAudios(
+        req.userId!,
+        voiceIntro,
+        voiceId,
+        authorLanguage,
+        findBioPhraseByText(voiceIntro)?.text,
+        profileGender,
+      ).catch((err) =>
+        console.error('[voice.clone.voice_intro_regen_failed]', req.userId, err),
+      );
     }
 
     // 재생성 직후 버튼이 갱신된 잔여 횟수를 즉시 반영하도록 응답에 reclone 상태

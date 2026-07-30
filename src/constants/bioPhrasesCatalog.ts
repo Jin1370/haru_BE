@@ -36,7 +36,7 @@ export const BIO_PHRASE_CATALOG: readonly BioPhraseEntry[] = [
   {
     id: 'listen-1',
     text: {
-      ko: '고민 듣는 거 좋아해요.\n뭐든지 상담해주세요.',
+      ko: '고민 듣는 거 좋아해요.\n뭐든지 얘기해주세요.',
       en: "I'm a good listener — bring me whatever's on your mind.",
       ja: '悩みを聞くのが好きです。\n何でも相談してくださいね。',
     },
@@ -80,4 +80,17 @@ const CATALOG_BY_ID = new Map(BIO_PHRASE_CATALOG.map((entry) => [entry.id, entry
 
 export function lookupBioPhrase(id: string): BioPhraseEntry | undefined {
   return CATALOG_BY_ID.get(id);
+}
+
+// 텍스트 역인덱스. phrase_id 는 PUT /api/profile/me 페이로드 전용이라 DB 에 남지
+// 않으므로, 저장된 voice_intro 텍스트만으로 프리셋 여부를 되짚어야 하는 경로
+// (voice clone 재등록 시 voice intro 재생성) 에서 사용한다. 매칭되면 Gemini 대신
+// 카탈로그 손번역을 그대로 재사용 — 재생성 후 표시 문구가 바뀌지 않는다.
+const CATALOG_BY_TEXT = new Map<string, BioPhraseEntry>();
+for (const entry of BIO_PHRASE_CATALOG) {
+  for (const text of Object.values(entry.text)) CATALOG_BY_TEXT.set(text, entry);
+}
+
+export function findBioPhraseByText(text: string): BioPhraseEntry | undefined {
+  return CATALOG_BY_TEXT.get(text);
 }

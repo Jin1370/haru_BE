@@ -22,7 +22,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     user_id: req.userId,
     min_age: 18,
     max_age: 100,
-    preferred_genders: ['male', 'female', 'other'],
+    preferred_genders: ['male', 'female'],
     preferred_nationalities: [],
   });
 });

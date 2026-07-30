@@ -4,9 +4,10 @@ import { NATIONALITY_CODES } from './profile';
 export const preferenceSchema = z.object({
   min_age: z.number().int().min(18).max(100).optional().default(18),
   max_age: z.number().int().min(18).max(100).optional().default(100),
+  // 'other' 는 고를 수 있지만 기본 선택은 male+female (mig 048 / FE 초기 상태와 동일).
   preferred_genders: z.array(z.enum(['male', 'female', 'other']))
     .optional()
-    .default(['male', 'female', 'other']),
+    .default(['male', 'female']),
   // ISO-3166-1 alpha-2 country codes from the launch whitelist. Empty = no
   // nationality preference. (Language preference was removed — mig 042 —
   // since language is derived from nationality.)

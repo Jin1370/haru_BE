@@ -53,7 +53,7 @@ type ViewerPrefs = {
 // 사전 SQL 필터: 성별/연령만 (디스커버 / 받은좋아요 공용). 언어·국가 선호는
 // 티어 정렬 신호로 사용되므로 여기서 IN 필터로 후보를 제거하지 않는다
 // (미부합 후보는 하위 티어로 밀려나 노출만 후순위).
-function applyPrefFilters<Q>(query: Q, prefs: any): Q {
+export function applyPrefFilters<Q>(query: Q, prefs: any): Q {
   if (!prefs) return query;
   let q: any = query;
   if (prefs.preferred_genders && prefs.preferred_genders.length > 0) {
@@ -65,7 +65,13 @@ function applyPrefFilters<Q>(query: Q, prefs: any): Q {
       .toISOString().split('T')[0];
     q = q.lte('birth_date', maxBirthDate);
   }
-  if (prefs.max_age) {
+  // max_age 가 슬라이더 상한이면 "그 나이 이상 전부" 의미 — FE 라벨이 `40+` 로
+  // 표시하므로(haru_FE/src/components/ui/AgeRangeSlider.tsx:106-107) 상한 필터를
+  // 걸지 않는다. 안 그러면 41세 이상은 누구의 디스커버에도 안 뜬다(FE 슬라이더가
+  // 40 초과를 저장할 수 없어 모든 계정이 max_age=40).
+  // 이 값은 haru_FE/src/utils/preferences.ts 의 MAX_AGE 와 동일해야 한다.
+  const OPEN_ENDED_MAX_AGE = 40;
+  if (prefs.max_age && prefs.max_age < OPEN_ENDED_MAX_AGE) {
     const minBirthDate = new Date(now.getFullYear() - prefs.max_age - 1, now.getMonth(), now.getDate())
       .toISOString().split('T')[0];
     q = q.gte('birth_date', minBirthDate);

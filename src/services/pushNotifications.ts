@@ -44,6 +44,31 @@ interface ExpoPushResponse {
 
 const EXPO_PUSH_ENDPOINT = 'https://exp.host/--/api/v2/push/send';
 
+// Expo Push API 호출 + 5xx 1회 재시도.
+// 5xx 는 "응답을 받았다 = 확실히 미전달" 이라 재시도해도 중복 알림이 안 난다.
+// 반대로 네트워크 에러/타임아웃은 "전달됐는데 응답만 유실" 일 수 있어 재시도
+// 하지 않고 throw 를 그대로 올린다 (중복 푸시가 유실보다 나쁨).
+// 지연 재시도(큐)도 하지 않는다 — 이미 읽은 알림이 몇 분 뒤 다시 뜨면 "새 메시지
+// 온 줄" 착각을 만든다. 1.5초 안에 회복 안 되면 그냥 포기.
+export async function postToExpo(messages: unknown[]): Promise<Response> {
+  const send = () =>
+    fetch(EXPO_PUSH_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        accept: 'application/json',
+        'accept-encoding': 'gzip,deflate',
+      },
+      body: JSON.stringify(messages),
+    });
+
+  const first = await send();
+  if (first.status < 500) return first;
+
+  await new Promise((r) => setTimeout(r, 1500));
+  return send();
+}
+
 // 핵심 송신 헬퍼.
 //   1. 차단 양방향 → silent skip
 //   2. 옵트아웃 (notify_messages / notify_matches) → silent skip
@@ -228,20 +253,14 @@ export async function sendPushToUser(
       priority: 'high' as const,
     }));
 
-    const response = await fetch(EXPO_PUSH_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        accept: 'application/json',
-        'accept-encoding': 'gzip,deflate',
-      },
-      body: JSON.stringify(messages),
-    });
+    const response = await postToExpo(messages);
 
     if (!response.ok) {
-      console.error(
-        `[sendPushToUser] Expo Push API HTTP ${response.status}`,
-      );
+      // 5xx 는 Expo 측 일시 장애 — 우리 결함이 아니고 (재시도 후에도 실패 시)
+      // 푸시 1건 유실뿐이라 warn 으로 남겨 Sentry(captureConsole error-only)
+      // 이벤트에서 제외. 4xx 는 우리 페이로드/토큰 문제라 error 유지.
+      const log = response.status >= 500 ? console.warn : console.error;
+      log(`[sendPushToUser] Expo Push API HTTP ${response.status}`);
       return;
     }
 
@@ -314,17 +333,10 @@ export async function sendAdminPush(body: string): Promise<void> {
       priority: 'high' as const,
     }));
 
-    const response = await fetch(EXPO_PUSH_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        accept: 'application/json',
-        'accept-encoding': 'gzip,deflate',
-      },
-      body: JSON.stringify(messages),
-    });
+    const response = await postToExpo(messages);
     if (!response.ok) {
-      console.error(`[sendAdminPush] Expo Push API HTTP ${response.status}`);
+      const log = response.status >= 500 ? console.warn : console.error;
+      log(`[sendAdminPush] Expo Push API HTTP ${response.status}`);
     }
   } catch (error) {
     console.error('[sendAdminPush] unhandled error:', error);

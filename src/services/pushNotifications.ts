@@ -24,6 +24,10 @@ export type PushPayload =
   | {
       type: 'like';
       liker_id: string;
+    }
+  // 시스템 리마인더 — 상대방이 없다 (차단/freeze 검증 대상 없음).
+  | {
+      type: 'voice_reminder';
     };
 
 interface DeviceTokenRow {
@@ -88,36 +92,41 @@ export async function sendPushToUser(
         ? payload.sender_id
         : payload.type === 'match'
           ? payload.matched_user_id
-          : payload.liker_id;
+          : payload.type === 'like'
+            ? payload.liker_id
+            : null;
 
-    // 1) 차단 양방향 검증 — message.ts 의 OR 패턴과 동일
-    const { data: blocks } = await supabase
-      .from('blocks')
-      .select('id')
-      .or(
-        `and(blocker_id.eq.${receiverId},blocked_id.eq.${counterpartyId}),and(blocker_id.eq.${counterpartyId},blocked_id.eq.${receiverId})`,
-      )
-      .limit(1);
+    // 1) 차단 양방향 검증 — message.ts 의 OR 패턴과 동일.
+    // counterparty 가 없는 시스템 알림(voice_reminder)은 1) 1.5) 를 건너뛴다.
+    if (counterpartyId) {
+      const { data: blocks } = await supabase
+        .from('blocks')
+        .select('id')
+        .or(
+          `and(blocker_id.eq.${receiverId},blocked_id.eq.${counterpartyId}),and(blocker_id.eq.${counterpartyId},blocked_id.eq.${receiverId})`,
+        )
+        .limit(1);
 
-    if (blocks && blocks.length > 0) {
-      return;
-    }
+      if (blocks && blocks.length > 0) {
+        return;
+      }
 
-    // 1.5) 송신자/매칭 상대방 freeze 검증 — auth.ts 의 deleteAccount 는 auth.users
-    // 를 anonymize 만 하므로 is_active=false / deleted_at 으로 비활성 상태를
-    // 판별한다. 탈퇴 후 옛 매치에서 흘러온 메시지·매치 푸시가 트레이에 잔존하지
-    // 않게 차단. admin freeze 케이스도 동일 분기로 처리.
-    const { data: counterpartyProfile } = await supabase
-      .from('profiles')
-      .select('is_active, deleted_at')
-      .eq('id', counterpartyId)
-      .maybeSingle();
-    if (
-      !counterpartyProfile ||
-      counterpartyProfile.is_active === false ||
-      counterpartyProfile.deleted_at
-    ) {
-      return;
+      // 1.5) 송신자/매칭 상대방 freeze 검증 — auth.ts 의 deleteAccount 는 auth.users
+      // 를 anonymize 만 하므로 is_active=false / deleted_at 으로 비활성 상태를
+      // 판별한다. 탈퇴 후 옛 매치에서 흘러온 메시지·매치 푸시가 트레이에 잔존하지
+      // 않게 차단. admin freeze 케이스도 동일 분기로 처리.
+      const { data: counterpartyProfile } = await supabase
+        .from('profiles')
+        .select('is_active, deleted_at')
+        .eq('id', counterpartyId)
+        .maybeSingle();
+      if (
+        !counterpartyProfile ||
+        counterpartyProfile.is_active === false ||
+        counterpartyProfile.deleted_at
+      ) {
+        return;
+      }
     }
 
     // 2) 옵트아웃 검증 — user_preferences 행이 없으면 default true (전송)
@@ -217,7 +226,8 @@ export async function sendPushToUser(
       (receiverProfile?.language as string | null | undefined) ?? null,
     );
 
-    // like 는 익명 문구라 {name} 자리가 없다 (빈 문자열 보간은 no-op).
+    // like / voice_reminder 는 이름 없는 문구라 {name} 자리가 없다 (빈 문자열
+    // 보간은 no-op).
     const name =
       payload.type === 'message'
         ? payload.sender_name
@@ -231,7 +241,7 @@ export async function sendPushToUser(
     const sinkBody = buildPushBody(payload.type as PushMessageType, 'ko', name);
 
     const data: Record<string, string> = { type: payload.type };
-    if (payload.type !== 'like') {
+    if (payload.type === 'message' || payload.type === 'match') {
       data.match_id = payload.match_id;
     }
     if (payload.type === 'message') {

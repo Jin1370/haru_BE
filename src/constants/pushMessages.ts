@@ -37,6 +37,13 @@ const PUSH_MESSAGES = {
     ja: '新しいいいねが届きました',
     en: 'You received a new like',
   },
+  // 목소리 미등록 리마인더 — 계정당 1회. 카드가 왜 안 보이는지(디스커버 노출
+  // 조건 = 보이스 클론 + 한마디)를 알려주는 게 핵심이라 이유를 body 에 넣는다.
+  voice_reminder: {
+    ko: '목소리 등록하는 것을 깜빡하셨나요? 1분 안에 등록하고 자유롭게 대화해보세요.',
+    ja: '声の登録をお忘れではありませんか？1分で登録して、自由に会話してみましょう。',
+    en: 'Forgot to record your voice? Set it up in a minute and start talking freely.',
+  },
 } as const;
 
 export type PushMessageType = keyof typeof PUSH_MESSAGES;

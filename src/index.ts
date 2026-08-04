@@ -25,6 +25,7 @@ import adminRoutes from './routes/admin';
 import { startAudioExpiryScheduler } from './jobs/purgeExpiredAudio';
 import { startAuditCleanupScheduler } from './jobs/cleanupAuditTables';
 import { startPhotoConversionRetryScheduler } from './jobs/retryFailedPhotoConversions';
+import { startVoiceReminderScheduler } from './jobs/remindVoiceSetup';
 
 export const app = express();
 
@@ -176,4 +177,6 @@ if (process.env.NODE_ENV !== 'test') {
   // photo-watercolor-pipeline sprint: pending/failed 사진 변환 재시도 sweep.
   // 부팅 120s 후 1회 + 10 분 interval. 백필 row 처리 + transient 실패 자동 복구.
   startPhotoConversionRetryScheduler();
+  // 가입 24h 경과 + voice clone 미등록 사용자에게 1회 리마인더 푸시. 6h interval.
+  startVoiceReminderScheduler();
 }

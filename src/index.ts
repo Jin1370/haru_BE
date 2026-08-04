@@ -97,10 +97,14 @@ if (allowedOrigins.length > 0) {
         }
       },
       credentials: true,
+      // ⚠️ admin 대시보드가 보내는 헤더를 추가할 때 여기도 같이 넣어야 한다.
+      // 누락 시 preflight 가 그 헤더를 거절해 브라우저에서 "Failed to fetch" 로만
+      // 보인다 (서버 로그엔 아무 흔적 없음).
       allowedHeaders: [
         'Content-Type',
         'Authorization',
         'X-Admin-Secret',
+        'X-Admin-User',
         'X-Admin-Impersonate',
       ],
     }),

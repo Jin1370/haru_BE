@@ -1,7 +1,8 @@
 // audio-expiry sprint
 //
-// 일일 sweep: 수신자가 청취 완료한 지 30일이 지난 음성 메시지 파일을 Storage
-// 에서 삭제하고 audio_url=NULL + audio_purged_at=now() 로 표기. 텍스트/번역
+// 일일 sweep: 마지막 활동(청취 / 재합성 / 미청취면 발송)으로부터 30일이 지난
+// 음성 메시지 파일을 Storage 에서 삭제하고 audio_url=NULL +
+// audio_purged_at=now() 로 표기. 텍스트/번역
 // 컬럼은 절대 건드리지 않는다 — 매치가 살아있는 동안 텍스트는 유지가 정책.
 //
 // 재생성 (POST /api/matches/:matchId/messages/:messageId/audio) 으로 음성을
@@ -43,11 +44,27 @@ export interface PurgeResult {
 export async function purgeExpiredAudio(): Promise<PurgeResult> {
   const cutoff = new Date(Date.now() - AUDIO_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
-  // eligibility:
+  // eligibility — "마지막 활동으로부터 30일":
   //   1) audio_url IS NOT NULL — 현재 활성 음성을 보유
   //   2) audio_purged_at IS NULL — 이미 퍼지된 row 재처리 회피
-  //   3) listened_at < cutoff — 수신자가 청취 완료한 지 30일 이상 경과
-  //   4) audio_refreshed_at IS NULL OR < cutoff — 재생성 음성도 30일 경과 후 재퍼지
+  //   3) created_at < cutoff — 보낸 지 30일 이상 경과
+  //   4) listened_at IS NULL OR < cutoff — 청취했다면 그로부터도 30일 경과
+  //   5) audio_refreshed_at IS NULL OR < cutoff — 재생성 음성도 30일 경과 후 재퍼지
+  //
+  // 3+4 가 곧 "들었으면 들은 시각, 안 들었으면 보낸 시각" 기준이다. 옛 규칙은
+  // listened_at NOT NULL 을 요구해서 **끝내 안 들은 음성이 영구 잔존**했다
+  // (매치만 되고 채팅을 안 연 경우 / 언매치·차단으로 끊긴 마지막 메시지 /
+  // 발신자 탈퇴 후 수신자 미방문). 30일 넘게 안 들었으면 나중에 들을 가능성이
+  // 낮다는 판단으로 폐기 대상에 포함.
+  //
+  // 트레이드오프(수용됨): 뒤늦게 연 수신자는 재합성 버튼을 탭해야 듣게 되고,
+  // 그 사이 발신자가 탈퇴했으면 클론이 없어 410 — 그 메시지는 영영 못 듣는다.
+  // 드문 조합이고, 탈퇴한 사용자의 합성 음성이 계속 서빙되지 않는 건 오히려
+  // 프라이버시 이득이라 예외를 두지 않는다.
+  //
+  // 3) 이 4)/5) 의 필요조건이라 (listened_at/refreshed_at 은 항상 created_at
+  // 이후) 세 조건의 AND 가 GREATEST(...) < cutoff 와 동치. 체이닝된 .or() 는
+  // 서로 AND 로 결합된다 (PostgREST, dev 실측 확인).
   //
   // 정렬 / pagination 은 필요 없음 — UPDATE 가 멱등하고 다음 사이클이 이어
   // 처리한다. SELECT 만으로 row id 와 audio_url 을 확보한 뒤, Storage delete
@@ -58,8 +75,8 @@ export async function purgeExpiredAudio(): Promise<PurgeResult> {
     .select('id, audio_url, audio_refreshed_at')
     .not('audio_url', 'is', null)
     .is('audio_purged_at', null)
-    .not('listened_at', 'is', null)
-    .lt('listened_at', cutoff)
+    .lt('created_at', cutoff)
+    .or(`listened_at.is.null,listened_at.lt.${cutoff}`)
     .or(`audio_refreshed_at.is.null,audio_refreshed_at.lt.${cutoff}`)
     .limit(SWEEP_BATCH_SIZE);
 

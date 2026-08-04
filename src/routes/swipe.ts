@@ -587,7 +587,9 @@ function computeLocalDayRangeUtc(nowMs: number, tzOffsetMinutes: number): {
 // error 시 false(=캡 유지) 로 fail-closed. POST 경로에선 캡에 이미 걸린 순간에만
 // 호출되므로 DB 블립 시 결과는 평소와 같은 429 뿐이다.
 async function hasUnlimitedLikes(userId: string): Promise<boolean> {
-  const { unlimitedLikeCodes, unlimitedLikeCodeDays } = env.discover;
+  const { unlimitedLikeCodes, unlimitedLikeCodeDays, unlimitedLikeUserIds } = env.discover;
+  // 계정 단위 면제 — 기간 제한 없음, DB 조회 없음.
+  if (unlimitedLikeUserIds.includes(userId)) return true;
   if (unlimitedLikeCodes.length === 0) return false;
 
   const { data, error } = await supabase

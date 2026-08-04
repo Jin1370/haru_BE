@@ -118,6 +118,13 @@ export const env = {
     // 큰 값(365)을 넣는다. 코드 미보유자에게는 이 값과 무관하게 항상 캡이 적용된다.
     unlimitedLikeCodeDays: z.coerce.number().int().min(1).max(365).default(30)
       .parse(process.env.UNLIMITED_LIKE_CODE_DAYS),
+    // 계정 단위 like 캡 면제 (운영/테스터 계정). profiles.id(UUID) 목록.
+    // 코드 경로와 달리 기간 제한 없음 — 시크릿에서 빼면 즉시 일반 캡으로 복귀.
+    // DB 조회 없이 판정되므로 hasUnlimitedLikes 최상단에서 short-circuit.
+    unlimitedLikeUserIds: (process.env.UNLIMITED_LIKE_USER_IDS ?? '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean),
   },
 
   // dev/QA 어드민 대시보드 — 출시 빌드에서는 ADMIN_DASHBOARD_ENABLED 미설정
@@ -130,6 +137,19 @@ export const env = {
       process.env.ADMIN_DASHBOARD_ENABLED === 'true'
         ? required('ADMIN_SECRET')
         : '',
+    // 팀 운영용 계정별 로그인. `ADMIN_USERS=sejin:pw1,minji:pw2` 형식.
+    // 각 운영자는 auth.users.user_metadata.dev_owner 가 자기 id 인 dev seed 계정만
+    // 보고 임퍼소네이션할 수 있다 (routes/admin.ts + middleware/auth.ts 에서 강제).
+    // 미설정이면 기존처럼 ADMIN_SECRET 단독 = 전 계정 접근(슈퍼유저)만 동작.
+    users: (process.env.ADMIN_USERS ?? '')
+      .split(',')
+      .map((pair) => pair.trim())
+      .filter(Boolean)
+      .reduce<Record<string, string>>((acc, pair) => {
+        const idx = pair.indexOf(':');
+        if (idx > 0) acc[pair.slice(0, idx).trim()] = pair.slice(idx + 1).trim();
+        return acc;
+      }, {}),
     // 운영자 실계정 user id. 설정 시 신규 프로필 생성마다 이 계정의
     // device_tokens 로 알림 push 발송. 미설정이면 기능 자체 off.
     notifyUserId: process.env.ADMIN_NOTIFY_USER_ID ?? null,

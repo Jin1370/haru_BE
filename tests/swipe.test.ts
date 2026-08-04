@@ -20,6 +20,7 @@ const envState = vi.hoisted(() => ({
   passResetEnabled: true,
   unlimitedLikeCodes: [] as string[],
   unlimitedLikeCodeDays: 30,
+  unlimitedLikeUserIds: [] as string[],
 }));
 vi.mock('../src/config/env', () => ({
   env: {
@@ -45,6 +46,9 @@ vi.mock('../src/config/env', () => ({
       },
       get unlimitedLikeCodeDays() {
         return envState.unlimitedLikeCodeDays;
+      },
+      get unlimitedLikeUserIds() {
+        return envState.unlimitedLikeUserIds;
       },
     },
     admin: { dashboardEnabled: false, secret: '' },
@@ -211,6 +215,7 @@ beforeEach(() => {
   envState.passResetEnabled = true;
   envState.unlimitedLikeCodes = [];
   envState.unlimitedLikeCodeDays = 30;
+  envState.unlimitedLikeUserIds = [];
   captured.frozen = { is_active: true, frozen_at: null };
   captured.referral = { data: null, error: null };
   captured.reciprocal = { data: null, error: null };
@@ -363,6 +368,25 @@ describe('POST /api/discover/swipe — 하루 like 예산 캡 + 면제', () => {
 
     expect(res.status).toBe(200);
     // 면제라도 non-reciprocal like 는 예산 카운트에 계속 기록된다 (계측 보존).
+    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(true);
+  });
+
+  it('(3-1a) 예산 소진 + 계정 화이트리스트 → 코드/기간 무관 캡 우회 200', async () => {
+    envState.unlimitedLikeUserIds = [VIEWER];
+    // referral_code 없음 + 가입 1년 경과라도 계정 면제가 우선.
+    captured.referral = {
+      data: { referral_code: null, created_at: new Date(Date.now() - 365 * 86_400_000).toISOString() },
+      error: null,
+    };
+    captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
+    captured.budgetCount = { count: 15, error: null };
+
+    const res = await request(app)
+      .post('/api/discover/swipe?tz_offset_minutes=0')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
+      .send({ swiped_id: SWIPED, direction: 'like' });
+
+    expect(res.status).toBe(200);
     expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(true);
   });
 

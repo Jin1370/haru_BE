@@ -11,29 +11,56 @@ import { env } from '../config/env';
 
 const router = Router();
 
-// 어드민 시크릿 가드 — 모든 admin 라우트 진입 차단
+// 요청자가 어떤 운영자인지. null = 슈퍼유저(ADMIN_SECRET 단독) → 전 계정 접근.
+export type AdminOperator = string | null;
+
+// 제시된 (아이디, 시크릿) 조합을 검증해 운영자를 해석한다.
+//   * ADMIN_SECRET 와 일치 → 슈퍼유저(null)
+//   * ADMIN_USERS 의 (id, pw) 쌍과 일치 → 그 운영자 id
+//   * 그 외 → undefined (인증 실패)
+export function resolveAdminOperator(
+  userId: unknown,
+  secret: unknown,
+): AdminOperator | undefined {
+  if (typeof secret !== 'string' || secret.length === 0) return undefined;
+  if (secret === env.admin.secret) return null;
+  if (typeof userId !== 'string' || userId.length === 0) return undefined;
+  const expected = env.admin.users[userId];
+  return expected && expected === secret ? userId : undefined;
+}
+
+// 어드민 가드 — 모든 admin 라우트 진입 차단 + req 에 운영자 주입.
 function adminSecretGuard(req: Request, res: Response, next: NextFunction): void {
-  const provided = req.headers['x-admin-secret'];
-  if (typeof provided !== 'string' || provided !== env.admin.secret) {
-    res.status(401).json({ error: 'Invalid admin secret' });
+  const operator = resolveAdminOperator(
+    req.headers['x-admin-user'],
+    req.headers['x-admin-secret'],
+  );
+  if (operator === undefined) {
+    res.status(401).json({ error: 'Invalid admin credentials' });
     return;
   }
+  (req as Request & { adminOperator?: AdminOperator }).adminOperator = operator;
   next();
 }
 
 // 어드민 시크릿 검증 (대시보드 로그인용)
 // 클라이언트가 입력한 secret 이 유효한지 확인. 200 이면 sessionStorage 에 저장.
-router.post('/auth/verify', adminSecretGuard, (_req, res) => {
-  res.json({ ok: true });
+router.post('/auth/verify', adminSecretGuard, (req, res) => {
+  const operator = (req as Request & { adminOperator?: AdminOperator }).adminOperator ?? null;
+  res.json({ ok: true, operator });
 });
 
 // dev seed 계정 목록 조회
 // auth.users 에서 user_metadata.is_dev_seed=true 인 항목 + 각자 profile 정보 결합.
-router.get('/accounts', adminSecretGuard, async (_req, res) => {
+router.get('/accounts', adminSecretGuard, async (_req: Request, res: Response) => {
   try {
     // 1) auth.users 페이지네이션 스캔 (seed 마커 필터) — notify-sink 와 공용 헬퍼.
     // listUsers 실패 throw 는 아래 catch 가 동일 문구의 500 으로 변환.
-    const seedUsers = await listSeedUsers();
+    const operator = (_req as Request & { adminOperator?: AdminOperator }).adminOperator ?? null;
+    // 소유자 격리 — 슈퍼유저가 아니면 dev_owner 가 자기 id 인 계정만 노출.
+    const seedUsers = (await listSeedUsers()).filter(
+      (u) => operator === null || u.owner === operator,
+    );
 
     if (seedUsers.length === 0) {
       res.json({ accounts: [] });
@@ -122,9 +149,14 @@ router.get('/accounts', adminSecretGuard, async (_req, res) => {
 
 // is_dev_seed=true 인 auth.users 전체 스캔 (페이지네이션). /accounts + notify-sink 공용.
 async function listSeedUsers(): Promise<
-  { id: string; email: string | null; persona_index: number | null }[]
+  { id: string; email: string | null; persona_index: number | null; owner: string | null }[]
 > {
-  const seedUsers: { id: string; email: string | null; persona_index: number | null }[] = [];
+  const seedUsers: {
+    id: string;
+    email: string | null;
+    persona_index: number | null;
+    owner: string | null;
+  }[] = [];
   const perPage = 1000;
   for (let page = 1; ; page++) {
     const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
@@ -136,6 +168,7 @@ async function listSeedUsers(): Promise<
           id: user.id,
           email: user.email ?? null,
           persona_index: typeof meta.persona_index === 'number' ? meta.persona_index : null,
+          owner: typeof meta.dev_owner === 'string' ? meta.dev_owner : null,
         });
       }
     }
@@ -145,7 +178,7 @@ async function listSeedUsers(): Promise<
 }
 
 // 현재 싱크 상태 조회.
-router.get('/notify-sink', adminSecretGuard, async (_req, res) => {
+router.get('/notify-sink', adminSecretGuard, async (_req: Request, res: Response) => {
   try {
     const { data, error } = await supabase
       .from('dev_notification_sinks')
@@ -154,7 +187,13 @@ router.get('/notify-sink', adminSecretGuard, async (_req, res) => {
       res.status(500).json({ error: error.message });
       return;
     }
-    const rows = data ?? [];
+    // 운영자 격리 — 자기 소유 dev 계정의 싱크만 집계.
+    const operator = (_req as Request & { adminOperator?: AdminOperator }).adminOperator ?? null;
+    const ownedIds =
+      operator === null
+        ? null
+        : new Set((await listSeedUsers()).filter((u) => u.owner === operator).map((u) => u.id));
+    const rows = (data ?? []).filter((r) => !ownedIds || ownedIds.has(r.dev_user_id));
     const tokens = new Set(rows.map((r) => r.expo_push_token));
     const accounts = new Set(rows.map((r) => r.dev_user_id));
 
@@ -241,10 +280,14 @@ router.post('/notify-sink', adminSecretGuard, async (req, res) => {
       return;
     }
 
-    // 3) dev seed 계정 + 표시명.
-    const seedUsers = await listSeedUsers();
+    // 3) dev seed 계정 + 표시명. 운영자 격리 — 자기 소유 계정에만 연결한다
+    //    (남의 계정 알림을 자기 폰으로 돌리는 것 차단).
+    const operator = (req as Request & { adminOperator?: AdminOperator }).adminOperator ?? null;
+    const seedUsers = (await listSeedUsers()).filter(
+      (u) => operator === null || u.owner === operator,
+    );
     if (seedUsers.length === 0) {
-      res.status(400).json({ error: 'dev seed 계정이 없습니다' });
+      res.status(400).json({ error: '연결할 dev seed 계정이 없습니다' });
       return;
     }
     const { data: profiles } = await supabase
@@ -288,7 +331,7 @@ router.post('/notify-sink', adminSecretGuard, async (req, res) => {
 });
 
 // 싱크 전체 해제.
-router.delete('/notify-sink', adminSecretGuard, async (_req, res) => {
+router.delete('/notify-sink', adminSecretGuard, async (_req: Request, res: Response) => {
   try {
     const { error, count } = await supabase
       .from('dev_notification_sinks')

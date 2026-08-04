@@ -30,6 +30,7 @@ vi.mock('../src/config/env', () => ({
       dailyLikeLimit: 15,
       unlimitedLikeCodes: [] as string[],
       unlimitedLikeCodeDays: 30,
+      unlimitedLikeUserIds: [] as string[],
     },
     admin: { dashboardEnabled: false, secret: '' },
     moderation: { autoFreezeReportThreshold: 3 },

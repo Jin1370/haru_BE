@@ -330,13 +330,25 @@ router.post('/notify-sink', adminSecretGuard, async (req, res) => {
   }
 });
 
-// 싱크 전체 해제.
+// 싱크 해제 — 운영자는 자기 담당 계정분만, 슈퍼유저는 전체.
 router.delete('/notify-sink', adminSecretGuard, async (_req: Request, res: Response) => {
   try {
-    const { error, count } = await supabase
-      .from('dev_notification_sinks')
-      .delete({ count: 'exact' })
-      .not('id', 'is', null);
+    // 운영자 격리 — 자기 담당 dev 계정의 싱크만 해제. 슈퍼유저는 전체.
+    const operator = (_req as Request & { adminOperator?: AdminOperator }).adminOperator ?? null;
+    let query = supabase.from('dev_notification_sinks').delete({ count: 'exact' });
+    if (operator === null) {
+      query = query.not('id', 'is', null);
+    } else {
+      const ownedIds = (await listSeedUsers())
+        .filter((u) => u.owner === operator)
+        .map((u) => u.id);
+      if (ownedIds.length === 0) {
+        res.json({ cleared: 0 });
+        return;
+      }
+      query = query.in('dev_user_id', ownedIds);
+    }
+    const { error, count } = await query;
     if (error) {
       res.status(500).json({ error: error.message });
       return;

@@ -35,6 +35,76 @@ export function extractPath(bucket: string, publicUrl: string): string {
   return decodeURIComponent(publicUrl.slice(idx + marker.length));
 }
 
+// ── 사용자 자산 정리 ────────────────────────────────────────────────
+// 탈퇴(anonymize) 와 계정 하드 삭제가 공유. 이전엔 auth.ts / delete-user.ts /
+// cleanup-dev-accounts.ts 가 각자 구현해 서로 어긋나 있었다 (스크립트 쪽은
+// photos 하위 폴더를 안 훑어 사진 본체가 잔존).
+
+// Storage list 는 재귀적이지 않아 하위 폴더를 안 훑는다 — 폴더별 호출 필요.
+const USER_FOLDERS: Array<[bucket: string, folder: (u: string) => string]> = [
+  ['photos', (u) => u], // 옛 평면 구조 (mig 028 이전) + dev 시드
+  ['photos', (u) => `${u}/originals`], // 변환 전 원본 (실패/대기분 잔존 가능)
+  ['photos', (u) => `${u}/converted`], // 워터컬러 변환본
+  ['voice-intro-audio', (u) => u],
+];
+
+async function removeFolder(bucket: string, folder: string): Promise<number> {
+  const { data: files, error: listErr } = await supabase.storage.from(bucket).list(folder);
+  if (listErr) throw new Error(`list ${bucket}/${folder}: ${listErr.message}`);
+  // 하위 폴더 엔트리(id === null)는 remove 대상이 아니다 — 위 목록이 직접 훑는다.
+  const paths = (files ?? []).filter((f) => f.id !== null).map((f) => `${folder}/${f.name}`);
+  if (paths.length === 0) return 0;
+  const { error: rmErr } = await supabase.storage.from(bucket).remove(paths);
+  if (rmErr) throw new Error(`remove ${bucket}/${folder}: ${rmErr.message}`);
+  return paths.length;
+}
+
+// 사진 + 보이스 한마디. userId 로 경로가 결정되므로 계정 삭제 전후 아무 때나 호출 가능.
+export async function purgeUserFolders(userId: string): Promise<number> {
+  const counts = await Promise.all(USER_FOLDERS.map(([b, f]) => removeFolder(b, f(userId))));
+  return counts.reduce((a, b) => a + b, 0);
+}
+
+// 음성 메시지. voice-messages 버킷은 `{messageId}.mp3` 평면 구조라 userId 폴더가
+// 없다 — messages.audio_url 로만 소유자를 알 수 있고, 계정을 하드 삭제하면 매치
+// CASCADE 로 그 행들이 사라져 영구 고아가 된다. **반드시 삭제 전** 에 호출할 것.
+//
+// 상대가 보낸 메시지도 포함한다: 매치가 CASCADE 로 지워지면 양쪽 메시지 행이 모두
+// 사라지므로 상대의 음성 파일도 같이 고아가 된다.
+//
+// 탈퇴(anonymize) 경로에서는 호출하지 않는다 — 매치·메시지가 살아있어 상대방
+// 채팅방에서 계속 재생돼야 하고, 30일 TTL sweep 이 나중에 회수한다.
+export async function purgeUserVoiceMessages(userId: string): Promise<number> {
+  const { data: matches, error: matchErr } = await supabase
+    .from('matches')
+    .select('id')
+    .or(`user1_id.eq.${userId},user2_id.eq.${userId}`);
+  if (matchErr) throw new Error(`matches 조회 실패: ${matchErr.message}`);
+  const matchIds = (matches ?? []).map((m) => m.id as string);
+  if (matchIds.length === 0) return 0;
+
+  const { data: msgs, error: msgErr } = await supabase
+    .from('messages')
+    .select('audio_url')
+    .in('match_id', matchIds)
+    .not('audio_url', 'is', null);
+  if (msgErr) throw new Error(`messages 조회 실패: ${msgErr.message}`);
+
+  const paths: string[] = [];
+  for (const m of msgs ?? []) {
+    try {
+      paths.push(extractPath('voice-messages', (m.audio_url as string).split('?')[0]));
+    } catch {
+      // legacy/corrupted URL — 경로를 못 만들면 스킵 (지울 대상을 특정 못 함).
+    }
+  }
+  if (paths.length === 0) return 0;
+
+  const { error: rmErr } = await supabase.storage.from('voice-messages').remove(paths);
+  if (rmErr) throw new Error(`remove voice-messages: ${rmErr.message}`);
+  return paths.length;
+}
+
 // LAUNCH_CHECKLIST #3 — 클론 보이스 버킷(voice-intro-audio)을 private 로 돌린 뒤,
 // 무인증 영구 다운로드(딥페이크 학습용 수집) 표면을 없애기 위한 on-read 서명 URL.
 //

@@ -4,6 +4,7 @@ import { env } from '../config/env';
 import { supabase, supabaseAuth } from '../config/supabase';
 import { authMiddleware } from '../middleware/auth';
 import { deleteVoiceClone } from '../services/elevenlabs';
+import { purgeUserFolders } from '../services/storage';
 import { AuthRequest } from '../types';
 
 const router = Router();
@@ -456,26 +457,10 @@ router.post('/change-password', authMiddleware, async (req: AuthRequest, res: Re
 //     the message bubble keep playing. The clone source is gone so no
 //     further synthesis is possible.
 async function cleanupDeletedUserAssets(userId: string, voiceCloneId: string | null) {
-  const removeFolder = async (bucket: string, folder: string) => {
-    const { data: files, error: listErr } = await supabase.storage.from(bucket).list(folder);
-    if (listErr) throw new Error(`list ${bucket}/${folder}: ${listErr.message}`);
-    if (!files || files.length === 0) return;
-    const paths = files.map((f) => `${folder}/${f.name}`);
-    const { error: rmErr } = await supabase.storage.from(bucket).remove(paths);
-    if (rmErr) throw new Error(`remove ${bucket}/${folder}: ${rmErr.message}`);
-  };
-
-  // photo-watercolor-pipeline sprint: photos 버킷 하위 폴더 cleanup.
-  //   * photos/{userId}/ — 옛 평면 구조 (mig 028 이전 업로드)
-  //   * photos/{userId}/originals/ — 비동기 변환 전 원본 (변환 성공 시 즉시 폐기되지만
-  //     실패/대기 중인 원본이 잔존 가능)
-  //   * photos/{userId}/converted/ — 변환본 (현재 응답에서 노출 중인 사진)
-  // list/remove 가 재귀적이지 않으므로 폴더별 호출. 빈 폴더는 무해 (list 가 빈 배열).
+  // photos 3폴더(평면/originals/converted) + voice-intro-audio.
+  // voice-messages 는 의도적으로 제외 — 위 주석 참고.
   const tasks: Array<{ name: string; run: () => Promise<unknown> }> = [
-    { name: 'photos', run: () => removeFolder('photos', userId) },
-    { name: 'photos-originals', run: () => removeFolder('photos', `${userId}/originals`) },
-    { name: 'photos-converted', run: () => removeFolder('photos', `${userId}/converted`) },
-    { name: 'voice-intro-audio', run: () => removeFolder('voice-intro-audio', userId) },
+    { name: 'storage-folders', run: () => purgeUserFolders(userId) },
   ];
 
   if (voiceCloneId) {

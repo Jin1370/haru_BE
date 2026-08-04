@@ -12,16 +12,27 @@
 //   보존하려면 cleanup 전에 unmark:dev 로 해제하세요.
 //
 // 삭제 순서:
-//   1) Storage 정리 (photos / voice-intro-audio / voice-messages)
-//   2) auth.users 삭제 → profiles/swipes/matches/messages/blocks/reports/user_preferences
+//   1) Storage 정리 (voice-messages 는 CASCADE 로 경로를 잃기 전에 먼저)
+//   2) ElevenLabs 보이스 클론 (mig 049 트리거가 미정리 계정의 삭제를 거부)
+//   3) auth.users 삭제 → profiles/swipes/matches/messages/blocks/reports/user_preferences
 //      는 ON DELETE CASCADE 로 자동 정리.
 
 import 'dotenv/config';
 import { supabase } from '../src/config/supabase';
+import { purgeUserFolders, purgeUserVoiceMessages } from '../src/services/storage';
+import { purgeVoiceClone } from './purge-voice-clone';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
-const STORAGE_BUCKETS = ['photos', 'voice-intro-audio', 'voice-messages'];
+async function cleanupStorageFor(userId: string): Promise<void> {
+  if (DRY_RUN) {
+    console.log('  [dry] storage 정리 스킵');
+    return;
+  }
+  // voice-messages 는 계정 삭제 전에 — CASCADE 후엔 경로를 잃는다.
+  console.log(`  voice-messages: ${await purgeUserVoiceMessages(userId)} files removed`);
+  console.log(`  photos + voice-intro-audio: ${await purgeUserFolders(userId)} files removed`);
+}
 
 async function listDevSeedUserIds(): Promise<{ id: string; email: string | null }[]> {
   const out: { id: string; email: string | null }[] = [];
@@ -42,25 +53,6 @@ async function listDevSeedUserIds(): Promise<{ id: string; email: string | null 
     page++;
   }
   return out;
-}
-
-async function cleanupStorageFor(userId: string): Promise<void> {
-  for (const bucket of STORAGE_BUCKETS) {
-    const { data, error } = await supabase.storage.from(bucket).list(userId);
-    if (error) continue;
-    if (!data || data.length === 0) continue;
-    const paths = data.map((f) => `${userId}/${f.name}`);
-    if (DRY_RUN) {
-      console.log(`  [dry] ${bucket}: ${paths.length} files`);
-      continue;
-    }
-    const { error: rmErr } = await supabase.storage.from(bucket).remove(paths);
-    if (rmErr) {
-      console.error(`  storage cleanup 실패 (${bucket}): ${rmErr.message}`);
-    } else {
-      console.log(`  ${bucket}: ${paths.length} files removed`);
-    }
-  }
 }
 
 async function main() {
@@ -90,10 +82,13 @@ async function main() {
     try {
       await cleanupStorageFor(t.id);
       if (DRY_RUN) {
-        console.log('  [dry] auth.users 삭제 스킵');
+        console.log('  [dry] voice clone / auth.users 삭제 스킵');
         okCount++;
         continue;
       }
+      // mig 049 트리거가 voice_id 가 남은 계정의 삭제를 거부한다. 실패 시 throw
+      // → 이 계정만 실패 처리하고 다음으로 넘어간다.
+      await purgeVoiceClone(t.id);
       const { error } = await supabase.auth.admin.deleteUser(t.id);
       if (error) {
         console.error(`  ✗ deleteUser 실패: ${error.message}`);

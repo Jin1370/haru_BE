@@ -157,10 +157,32 @@ router.get('/notify-sink', adminSecretGuard, async (_req, res) => {
     const rows = data ?? [];
     const tokens = new Set(rows.map((r) => r.expo_push_token));
     const accounts = new Set(rows.map((r) => r.dev_user_id));
+
+    // 어떤 "마스터 계정"(=알림을 실제로 받는 폰의 로그인 계정)이 붙어 있는지 역추적.
+    // sink 행에는 토큰만 있으므로 device_tokens 로 소유자를 찾고 이메일을 조회한다.
+    // 토큰이 회전/폐기되어 device_tokens 에서 사라졌으면 목록에서 자연 제외된다.
+    const masters: string[] = [];
+    if (tokens.size > 0) {
+      const { data: owners, error: ownerErr } = await supabase
+        .from('device_tokens')
+        .select('user_id')
+        .in('expo_push_token', [...tokens]);
+      if (ownerErr) {
+        console.error('[admin/notify-sink GET] device_tokens lookup failed:', ownerErr.message);
+      } else {
+        for (const userId of new Set((owners ?? []).map((o) => o.user_id as string))) {
+          const { data: userData } = await supabase.auth.admin.getUserById(userId);
+          const email = userData?.user?.email;
+          if (email) masters.push(email);
+        }
+      }
+    }
+
     res.json({
       linked_accounts: accounts.size,
       tokens: tokens.size,
       labels: [...new Set(rows.map((r) => r.label).filter(Boolean))] as string[],
+      masters,
     });
   } catch (err) {
     console.error('[admin/notify-sink GET] error:', err);

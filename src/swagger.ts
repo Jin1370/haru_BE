@@ -732,7 +732,7 @@ export const swaggerDocument = {
         tags: ['Match'],
         summary: '채팅 상대의 부가 프로필 (시청자 언어 보이스 인트로 미러)',
         description:
-          'birth_date / interests / 시청자 언어 슬롯의 voice_intro_audio_url 을 반환. ' +
+          'birth_date / gender / interests / 시청자 언어 슬롯의 voice_intro_audio_url 을 반환. ' +
           'voice_intro_audio_url 은 viewer 의 profiles.language → ko/ja/en 슬롯 매핑으로 ' +
           'voice_intro_audio_urls JSONB 에서 추출해 미러한다(디스커버 응답과 동일 정책). ' +
           'FE 가 supabase 에서 단일 voice_intro_audio_url 컬럼을 직접 select 하던 경로를 대체.',
@@ -749,6 +749,7 @@ export const swaggerDocument = {
                   required: ['birth_date', 'interests', 'voice_intro_audio_url'],
                   properties: {
                     birth_date: { type: 'string', format: 'date' },
+                    gender: { type: 'string', enum: ['male', 'female', 'other'], nullable: true },
                     interests: { type: 'array', items: { type: 'string' } },
                     voice_intro_audio_url: { type: 'string', format: 'uri', nullable: true },
                   },

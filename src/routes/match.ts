@@ -286,7 +286,7 @@ router.get('/:matchId/partner', async (req: AuthRequest, res: Response) => {
     supabase.from('profiles').select('language').eq('id', userId).maybeSingle(),
     supabase
       .from('profiles')
-      .select('birth_date, interests, voice_intro_audio_urls')
+      .select('birth_date, gender, interests, voice_intro_audio_urls')
       .eq('id', partnerId)
       .maybeSingle(),
   ]);
@@ -321,6 +321,7 @@ router.get('/:matchId/partner', async (req: AuthRequest, res: Response) => {
 
   res.json({
     birth_date: (partnerResult.data.birth_date as string | null) ?? '',
+    gender: (partnerResult.data.gender as string | null) ?? null,
     interests: (partnerResult.data.interests as string[] | null) ?? [],
     voice_intro_audio_url: voiceIntroAudioUrl,
   });

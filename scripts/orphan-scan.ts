@@ -82,11 +82,13 @@ async function main() {
   const msgIds = [...new Set(aged.map((f) => msgIdOf(f.name)))];
 
   const alive = new Set<string>();
-  for (let i = 0; i < msgIds.length; i += 500) {
+  // 청크 100 — UUID 100개면 쿼리스트링 ~4KB. 500 은 URL 길이 상한에 걸려
+  // "fetch failed" 로 떨어진다 (prod 실측).
+  for (let i = 0; i < msgIds.length; i += 100) {
     const { data, error } = await supabase
       .from('messages')
       .select('id')
-      .in('id', msgIds.slice(i, i + 500));
+      .in('id', msgIds.slice(i, i + 100));
     if (error) {
       console.error(`messages 조회 실패: ${error.message}`);
       return;

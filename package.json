@@ -12,8 +12,6 @@
     "seed:dev": "tsx scripts/seed-dev-accounts.ts",
     "cleanup:dev": "tsx scripts/cleanup-dev-accounts.ts",
     "cleanup:dev:dry": "tsx scripts/cleanup-dev-accounts.ts --dry-run",
-    "mark:dev": "tsx scripts/mark-dev-account.ts",
-    "unmark:dev": "tsx scripts/mark-dev-account.ts --unmark",
     "rename:dev": "tsx scripts/rename-dev-accounts.ts",
     "rename:dev:dry": "tsx scripts/rename-dev-accounts.ts --dry-run"
   },

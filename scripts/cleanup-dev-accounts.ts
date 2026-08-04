@@ -8,8 +8,8 @@
 //   npx tsx scripts/cleanup-dev-accounts.ts --dry-run   # 미리보기만
 //
 // 주의:
-//   mark-dev-account.ts 로 수동 마크한 계정도 동일 기준에 걸려 삭제됨.
-//   보존하려면 cleanup 전에 unmark:dev 로 해제하세요.
+//   SQL 로 수동 마크(is_dev_seed=true)한 계정도 동일 기준에 걸려 삭제됨.
+//   보존하려면 cleanup 전에 그 계정의 is_dev_seed 마커를 지우세요.
 //
 // 삭제 순서:
 //   1) Storage 정리 (voice-messages 는 CASCADE 로 경로를 잃기 전에 먼저)

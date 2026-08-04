@@ -89,7 +89,11 @@ if (allowedOrigins.length > 0) {
         if (allowedOrigins.some((p) => originMatches(origin, p))) {
           callback(null, true);
         } else {
-          callback(new Error(`CORS blocked: ${origin}`));
+          // Error 를 넘기면 express 에러 핸들러까지 올라가 500 + Sentry 이슈가 된다.
+          // 차단은 브라우저가 CORS 헤더 부재로 하는 것이라 false 로 충분 — 동작은
+          // 동일하고 정상적인 거절이 예외로 잡히지 않는다.
+          console.warn(`[cors] blocked origin: ${origin}`);
+          callback(null, false);
         }
       },
       credentials: true,

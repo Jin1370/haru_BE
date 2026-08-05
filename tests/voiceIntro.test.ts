@@ -147,6 +147,7 @@ describe('generateVoiceIntroAudios', () => {
       text: '안녕하세요',
       sourceLanguage: 'ko',
       targetLanguages: ['ko', 'ja', 'en'],
+      speaker: { gender: null },
     });
     expect(hoisted.synthesizeSpeechMock).toHaveBeenCalledTimes(3);
 
@@ -172,6 +173,7 @@ describe('generateVoiceIntroAudios', () => {
       text: 'こんにちは',
       sourceLanguage: 'ja',
       targetLanguages: ['ko', 'ja', 'en'],
+      speaker: { gender: null },
     });
     const profile = hoisted.supabaseState.profile;
     expect(profile.voice_intro_audio_urls.ja).toMatch(/voice-intro-ja-/);
@@ -187,6 +189,7 @@ describe('generateVoiceIntroAudios', () => {
       text: 'Hello',
       sourceLanguage: 'en',
       targetLanguages: ['ko', 'ja', 'en'],
+      speaker: { gender: null },
     });
     const profile = hoisted.supabaseState.profile;
     expect(profile.voice_intro_audio_urls.en).toMatch(/voice-intro-en-/);
@@ -202,6 +205,7 @@ describe('generateVoiceIntroAudios', () => {
       text: 'Hello (TH user)',
       sourceLanguage: 'en',
       targetLanguages: ['ko', 'ja', 'en'],
+      speaker: { gender: null },
     });
     const profile = hoisted.supabaseState.profile;
     expect(profile.voice_intro_audio_urls.en).toMatch(/voice-intro-en-/);
@@ -336,6 +340,7 @@ describe('generateVoiceIntroAudios', () => {
       text: '안녕',
       sourceLanguage: 'ko',
       targetLanguages: ['ko', 'ja', 'en'],
+      speaker: { gender: null },
     });
   });
 

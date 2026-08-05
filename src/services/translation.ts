@@ -26,6 +26,48 @@ CRITICAL — precise removal: remove the marker characters completely, leaving n
 Use EXACTLY [laughs] and [sad]. No other tag names, no variants like [laugh].
 If the text has no such marker, insert no tag.`;
 
+// 호칭(kinship-style address term) 규칙.
+//
+// 사고 사례: 연하 일본인 남성의 「お姉さん」이 한국어로 '언니'(여성 화자 전용)로
+// 번역·TTS 됨. 원인은 Gemini 에 화자/청자의 성별·나이가 전혀 안 넘어가서 —
+// 소스 언어(ja/en)엔 그 구분이 없으니 모델이 기본값을 찍을 수밖에 없었다.
+// 아래 규칙 + 프로필 주입으로 "소스 단어를 직역"이 아니라 "타깃 언어 관습으로
+// 재계산" 하도록 강제한다.
+const ADDRESS_TERM_RULES = `ADDRESS TERMS (kinship-style terms of address) — RECOMPUTE, never transliterate:
+The Speaker / Addressee profile lines given in the user message are the ONLY source of truth for gender and age. Never infer gender or age from the source wording, and never carry a source-language address term across literally — the source language often does not encode the distinction the target language requires.
+- Korean output: the term depends on the SPEAKER's gender AND the age gap, not on the source word.
+  - speaker male → older female: 누나 (NEVER 언니) | older male: 형
+  - speaker female → older female: 언니 | older male: 오빠
+  - addressee same age or younger: use their name or 너 — NEVER 누나/언니/형/오빠, and do not use 동생 as a vocative.
+  - unknown age/gender, or speaker gender "other": drop the kinship term and address them by name or neutrally. Omitting is far safer than guessing — a wrong term implies a wrong gender and is deeply jarring.
+- Japanese output: お姉さん/お兄さん are NOT the default rendering of Korean 누나/언니/형/오빠; prefer 名前+さん or second person. Use お姉さん/お兄さん only when the source clearly addresses a stranger that way and the age gap supports it.
+- English output: no equivalent exists. NEVER render 오빠/누나/언니/형/お姉さん/お兄さん as "brother"/"sister"/"older sister" — that reads as an actual sibling. Use the name, "you", or drop it.
+- Thai output: พี่ (older) / น้อง (younger) are gender-neutral — the speaker's gender does NOT change them. Attach the polite particle by the SPEAKER's gender: male ครับ, female ค่ะ.
+- Hindi output: भैया (older male) / दीदी (older female); for a peer use the name. Keep आप/तुम consistent with the source register.
+These rules override any literal reading of the source. Producing a term the profile lines contradict is the single worst failure in this task.`;
+
+export interface AddressParty {
+    gender?: string | null; // 'male' | 'female' | 'other'
+    birthDate?: string | null; // profiles.birth_date (YYYY-MM-DD)
+}
+
+function ageFrom(birthDate?: string | null): number | null {
+    if (!birthDate) return null;
+    const born = new Date(birthDate);
+    if (Number.isNaN(born.getTime())) return null;
+    const now = new Date();
+    let age = now.getFullYear() - born.getFullYear();
+    const monthDiff = now.getMonth() - born.getMonth();
+    if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < born.getDate())) age--;
+    return age >= 0 && age < 130 ? age : null;
+}
+
+function describeParty(label: string, party?: AddressParty): string {
+    const gender = party?.gender ?? "unknown gender";
+    const age = ageFrom(party?.birthDate);
+    return `${label}: ${gender}, ${age === null ? "unknown age" : `${age} years old`}`;
+}
+
 const vertexAi = new VertexAI({
     project: env.vertexAi.projectId,
     location: env.vertexAi.location,
@@ -72,6 +114,8 @@ STEP 2 — Translate the tagged text into the target language:
 - Do NOT respond to the content — only translate.
 - Return valid JSON only.
 
+${ADDRESS_TERM_RULES}
+
 Output schema:
 { "translation": string }`;
 
@@ -91,8 +135,12 @@ const model = vertexAi.getGenerativeModel({
 export async function translateMessage(params: {
     text: string;
     targetLanguage: string;
+    speaker?: AddressParty;
+    addressee?: AddressParty;
 }): Promise<{ translation: string }> {
     const userPrompt = `Target language: ${params.targetLanguage}
+${describeParty("Speaker (who wrote this message)", params.speaker)}
+${describeParty("Addressee (who reads it)", params.addressee)}
 Text to translate: ${JSON.stringify(params.text)}`;
 
     const result = await model.generateContent({
@@ -132,6 +180,9 @@ STEP 2 — Produce the tagged text in every requested language:
 - Do NOT add any new content the speaker did not say (no extra greetings, no sign-offs).
 - Output VALID JSON only.
 
+${ADDRESS_TERM_RULES}
+A voice intro has no single addressee — there is no Addressee profile line. When the source refers to the kind of person the speaker is looking for (e.g. 年上のお姉さん / 연하남), pick the term from the SPEAKER's gender plus the older/younger direction stated in the source (male speaker + older woman → 누나, never 언니). If the direction is not stated, use a neutral phrasing instead of guessing a kinship term.
+
 Output schema:
 { "translations": { "<lang>": "<translation>", ... }, "detected_source_language": "<bcp47-ish>" }
 The keys of "translations" must be exactly the languages requested by the user; no extras, none missing.`;
@@ -153,6 +204,7 @@ export async function translateVoiceIntro(params: {
     text: string;
     sourceLanguage: VoiceIntroSlotLanguage;
     targetLanguages: VoiceIntroSlotLanguage[];
+    speaker?: AddressParty;
 }): Promise<{
     translations: Partial<Record<VoiceIntroSlotLanguage, string>>;
     detectedSourceLanguage: string;
@@ -163,6 +215,7 @@ export async function translateVoiceIntro(params: {
 
     const userPrompt = `Source language: ${params.sourceLanguage}
 Target languages: ${JSON.stringify(params.targetLanguages)}
+${describeParty("Speaker (who recorded this intro)", params.speaker)}
 Voice intro text: ${JSON.stringify(params.text)}`;
 
     const result = await voiceIntroModel.generateContent({

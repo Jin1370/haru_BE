@@ -227,6 +227,8 @@ export async function generateVoiceIntroAudios(
         text: voiceIntroText,
         sourceLanguage: authorLang,
         targetLanguages: VOICE_INTRO_SLOT_LANGUAGES,
+        // 호칭 재계산용 — 화자 성별이 없으면 Gemini 가 한국어 누나/언니를 찍는다.
+        speaker: { gender: gender ?? null },
       });
       for (const lang of VOICE_INTRO_SLOT_LANGUAGES) {
         const value = translations[lang];

@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/node';
 import { supabase } from '../config/supabase';
 import { uploadFile } from '../services/storage';
 import { synthesizeSpeech, type PersonaGender } from '../services/elevenlabs';
-import { translateMessage } from '../services/translation';
+import { translateMessage, type AddressParty } from '../services/translation';
 import {
   replaceTagsForDisplay,
   ensureSpeakableForTTS,
@@ -211,9 +211,11 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   // 발신자/수신자 프로필 조회 (mig 009 이후 단일 scalar `language` 사용)
   // push-notifications sprint: sender_name 푸시 페이로드용 display_name 동시 조회.
   // gender 는 elevenlabs.synthesizeSpeech 의 persona tag 분기에 사용.
+  // gender + birth_date 는 양쪽 다 조회 — 번역 호칭(누나/언니/형/오빠, พี่+ครับ/ค่ะ)
+  // 이 화자 성별 × 나이차로 결정되므로 Gemini 에 두 프로필을 모두 넘겨야 한다.
   const [senderResult, recipientResult] = await Promise.all([
-    supabase.from('profiles').select('language, elevenlabs_voice_id, display_name, gender').eq('id', req.userId!).single(),
-    supabase.from('profiles').select('language').eq('id', recipientId).single(),
+    supabase.from('profiles').select('language, elevenlabs_voice_id, display_name, gender, birth_date').eq('id', req.userId!).single(),
+    supabase.from('profiles').select('language, gender, birth_date').eq('id', recipientId).single(),
   ]);
 
   const sender = senderResult.data;
@@ -226,6 +228,16 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   // 'male' 의 [warm, gently] 는 baseline 안정성 보조라 유지.
   const rawGender = (sender?.gender as PersonaGender) ?? null;
   const senderGender: PersonaGender = rawGender === 'female' ? null : rawGender;
+  // 주의: senderGender 는 persona 용으로 female 이 null 로 지워진 값이라
+  // 호칭 판정에 쓰면 안 된다 — 반드시 raw 프로필 값을 넘긴다.
+  const speaker: AddressParty = {
+    gender: (sender?.gender as string | null) ?? null,
+    birthDate: (sender?.birth_date as string | null) ?? null,
+  };
+  const addressee: AddressParty = {
+    gender: (recipient?.gender as string | null) ?? null,
+    birthDate: (recipient?.birth_date as string | null) ?? null,
+  };
 
   if (!sender || !recipient || !senderLang || !recipientLang) {
     res.status(404).json({ error: 'Profile not found' });
@@ -416,6 +428,8 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
       text,
       senderLang,
       recipientLang,
+      speaker,
+      addressee,
       emotion: storedEmotion,
       voiceId,
       queuedAt,
@@ -548,7 +562,7 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
   // 1) 매치 멤버 검증
   const { data: match } = await supabase
     .from('matches')
-    .select('id, unmatched_at')
+    .select('id, unmatched_at, user1_id, user2_id')
     .eq('id', matchId)
     .or(`user1_id.eq.${req.userId!},user2_id.eq.${req.userId!}`)
     .single();
@@ -586,11 +600,15 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
   // 4) 송신자 프로필 — 현재 voice clone + gender + language 조회. 메시지의
   // original_language 가 truth source 이지만 gender persona / voice_id 는 현재
   // 시점의 sender 프로필을 사용한다 (재녹음했을 수 있음).
-  const { data: sender } = await supabase
-    .from('profiles')
-    .select('elevenlabs_voice_id, gender')
-    .eq('id', msg.sender_id)
-    .single();
+  // 호칭 재계산 컨텍스트는 최초 합성과 동일해야 한다 — 안 넘기면 재합성 음성만
+  // '언니'/'누나'가 뒤바뀌어 표시 텍스트와 어긋난다.
+  const recipientId = msg.sender_id === match.user1_id ? match.user2_id : match.user1_id;
+  const [senderResult, recipientResult] = await Promise.all([
+    supabase.from('profiles').select('elevenlabs_voice_id, gender, birth_date').eq('id', msg.sender_id).single(),
+    supabase.from('profiles').select('gender, birth_date').eq('id', recipientId).single(),
+  ]);
+  const sender = senderResult.data;
+  const recipientProfile = recipientResult.data;
 
   const voiceId = (sender?.elevenlabs_voice_id as string | null) ?? null;
   if (!voiceId) {
@@ -613,6 +631,14 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
     const { translation } = await translateMessage({
       text: originalText,
       targetLanguage: recipientLang,
+      speaker: {
+        gender: (sender?.gender as string | null) ?? null,
+        birthDate: (sender?.birth_date as string | null) ?? null,
+      },
+      addressee: {
+        gender: (recipientProfile?.gender as string | null) ?? null,
+        birthDate: (recipientProfile?.birth_date as string | null) ?? null,
+      },
     });
 
     // [laughs] 만 audible — [sad] 등은 TTS 에서 제거 (사용자 정책).
@@ -678,6 +704,8 @@ interface ProcessJob {
   text: string;
   senderLang: string;
   recipientLang: string;
+  speaker: AddressParty;
+  addressee: AddressParty;
   emotion: Exclude<Emotion, 'neutral'> | null;
   voiceId: string;
   queuedAt: string;
@@ -694,6 +722,8 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
     text,
     senderLang,
     recipientLang,
+    speaker,
+    addressee,
     emotion,
     voiceId,
     queuedAt,
@@ -714,6 +744,8 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
     const { translation } = await translateMessage({
       text,
       targetLanguage: recipientLang,
+      speaker,
+      addressee,
     });
     // identity: 같은 언어이고 display(태그→슬랭 복원) 텍스트가 원문과 동일 →
     // 번역 인디케이터 숨김(translated_text=null). 코드스위칭(프로필=ko인데 영어로

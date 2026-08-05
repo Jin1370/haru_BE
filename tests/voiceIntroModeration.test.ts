@@ -126,6 +126,7 @@ describe('voiceIntro service — audio tag pipeline (non-preset, Gemini 단독 �
       text: '오늘 너무 힘들어 ㅠㅠ',
       sourceLanguage: 'ko',
       targetLanguages: ['ko', 'ja', 'en'],
+      speaker: { gender: null },
     });
   });
 
@@ -190,6 +191,7 @@ describe('voiceIntro service — audio tag pipeline (non-preset, Gemini 단독 �
       text: '안녕하세요',
       sourceLanguage: 'ko',
       targetLanguages: ['ko', 'ja', 'en'],
+      speaker: { gender: null },
     });
     const profile = hoisted.supabaseState.profile;
     expect(profile.voice_intro_translations).toEqual({

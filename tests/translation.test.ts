@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock @google-cloud/vertexai BEFORE importing the module under test so the
 // VertexAI client is never instantiated against real credentials. vi.hoisted
@@ -71,6 +71,75 @@ describe('translateMessage', () => {
     mockGenerateText(JSON.stringify({ translation: 'hello [laughs 오늘 [sad' }));
     const { translation } = await translateMessage({ text: 'x', targetLanguage: 'ko' });
     expect(translation).toBe('hello 오늘');
+  });
+});
+
+// ── 호칭(누나/언니/형/오빠) 재계산 컨텍스트 ────────────────────────────────
+// Gemini 에 화자/청자 성별·나이를 안 넘겨서 연하 남성의 「お姉さん」이 '언니'로
+// 번역되던 사고의 회귀 가드. 실제 호칭 선택은 Gemini 책임이라 유닛으로 검증
+// 불가 — 여기선 프로필이 프롬프트에 정확히 실리는지(+ 만 나이 계산)만 본다.
+describe('address term context', () => {
+  beforeEach(() => {
+    generateContentMock.mockReset();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-05T00:00:00Z'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function lastPrompt(): string {
+    return generateContentMock.mock.calls[0]?.[0]?.contents?.[0]?.parts?.[0]?.text ?? '';
+  }
+
+  it('화자/청자의 성별 + 만 나이를 프롬프트에 싣는다', async () => {
+    mockGenerateText(JSON.stringify({ translation: '누나 안녕' }));
+    await translateMessage({
+      text: 'お姉さん、こんにちは',
+      targetLanguage: 'ko',
+      speaker: { gender: 'male', birthDate: '2000-08-05' },
+      addressee: { gender: 'female', birthDate: '1994-01-01' },
+    });
+    expect(lastPrompt()).toContain('Speaker (who wrote this message): male, 26 years old');
+    expect(lastPrompt()).toContain('Addressee (who reads it): female, 32 years old');
+  });
+
+  it('생일 전이면 한 살 적게 계산 (만 나이 경계)', async () => {
+    mockGenerateText(JSON.stringify({ translation: 'hi' }));
+    await translateMessage({
+      text: 'x',
+      targetLanguage: 'en',
+      speaker: { gender: 'male', birthDate: '2000-08-06' }, // 내일 생일
+    });
+    expect(lastPrompt()).toContain('male, 25 years old');
+  });
+
+  it('프로필 누락/무효 날짜는 unknown 으로 표기 (호출은 정상 진행)', async () => {
+    mockGenerateText(JSON.stringify({ translation: 'hi' }));
+    await translateMessage({
+      text: 'x',
+      targetLanguage: 'en',
+      speaker: { gender: null, birthDate: 'not-a-date' },
+    });
+    expect(lastPrompt()).toContain('Speaker (who wrote this message): unknown gender, unknown age');
+    expect(lastPrompt()).toContain('Addressee (who reads it): unknown gender, unknown age');
+  });
+
+  it('voice intro 는 화자 프로필만 싣는다 (수신자 없음)', async () => {
+    mockGenerateText(
+      JSON.stringify({
+        translations: { ko: '안녕', ja: 'こんにちは', en: 'hi' },
+        detected_source_language: 'ko',
+      }),
+    );
+    await translateVoiceIntro({
+      text: '안녕하세요',
+      sourceLanguage: 'ko',
+      targetLanguages: ['ko', 'ja', 'en'],
+      speaker: { gender: 'female' },
+    });
+    expect(lastPrompt()).toContain('Speaker (who recorded this intro): female, unknown age');
+    expect(lastPrompt()).not.toContain('Addressee');
   });
 });
 

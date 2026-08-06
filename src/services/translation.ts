@@ -33,7 +33,13 @@ If the text has no such marker, insert no tag.`;
 // 소스 언어(ja/en)엔 그 구분이 없으니 모델이 기본값을 찍을 수밖에 없었다.
 // 아래 규칙 + 프로필 주입으로 "소스 단어를 직역"이 아니라 "타깃 언어 관습으로
 // 재계산" 하도록 강제한다.
+//
+// 사고 사례 2: 영어 "Hi" 가 '오빠 안녕' 으로 번역됨. 위 규칙이 "소스에 호칭이
+// 있을 때 어떤 말로 바꿀지" 만 정하고 "없을 때 넣지 말 것" 을 안 막아서, 모델이
+// 한국어 대화 관습대로 호칭을 창작했다. audio tag 의 "literal only" 가드와 같은
+// 형태로 삽입 금지 규칙을 맨 앞에 둔다.
 const ADDRESS_TERM_RULES = `ADDRESS TERMS (kinship-style terms of address) — RECOMPUTE, never transliterate:
+CRITICAL — never ADD an address term: the rules below apply ONLY when the source text literally contains a term of address. If the source has none, the translation has none. Never insert 누나/언니/형/오빠/자기/여보 · お姉さん/お兄さん/君 · พี่/น้อง/भैया/दीदी, and never insert the addressee's name, just because the target language often does. "Hi" → "안녕" (NEVER "오빠 안녕"). Adding an address term the source never had is as wrong as producing the wrong one.
 The Speaker / Addressee profile lines given in the user message are the ONLY source of truth for gender and age. Never infer gender or age from the source wording, and never carry a source-language address term across literally — the source language often does not encode the distinction the target language requires.
 - Korean output: the term depends on the SPEAKER's gender AND the age gap, not on the source word.
   - speaker male → older female: 누나 (NEVER 언니) | older male: 형

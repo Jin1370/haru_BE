@@ -216,7 +216,8 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   let query = supabase
     .from('profiles')
     .select('id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, created_at')
-    .eq('is_active', true);
+    .eq('is_active', true)
+    .is('frozen_at', null);
 
   if (uniqueExcludeIds.length > 0) {
     query = query.not('id', 'in', `(${uniqueExcludeIds.join(',')})`);
@@ -417,7 +418,8 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
       'id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, created_at',
     )
     .in('id', eligibleIds)
-    .eq('is_active', true);
+    .eq('is_active', true)
+    .is('frozen_at', null);
 
   query = applyPrefFilters(query, prefs);
 
@@ -533,7 +535,8 @@ async function isLikeVisibleToReceiver(likerId: string, receiverId: string): Pro
     .from('profiles')
     .select('language, voice_intro_audio_urls')
     .eq('id', likerId)
-    .eq('is_active', true);
+    .eq('is_active', true)
+    .is('frozen_at', null);
   query = applyPrefFilters(query, prefsResult.data);
 
   const { data: liker, error } = await query.maybeSingle();

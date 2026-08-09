@@ -272,3 +272,45 @@ describe('translateVoiceIntro', () => {
     ).rejects.toThrow(/Voice intro translation missing for language: ja/);
   });
 });
+
+// ── 대화 맥락(직전 2턴) 주입 ────────────────────────────────────────────────
+// Gemini 응답 품질은 유닛으로 검증 불가하지만, "맥락이 user prompt 에 실제로
+// 실렸는가 / 없을 때 블록이 안 생기는가" 는 결정적이라 여기서 잠근다.
+describe('translateMessage — conversation context', () => {
+  beforeEach(() => generateContentMock.mockReset());
+
+  function lastUserPrompt(): string {
+    return generateContentMock.mock.calls[0][0].contents[0].parts[0].text as string;
+  }
+
+  it('context 를 주면 Speaker/Addressee 라벨로 오래된 것부터 실린다', async () => {
+    mockGenerateText(JSON.stringify({ translation: 'ok' }));
+    await translateMessage({
+      text: '응 그거',
+      targetLanguage: 'ja',
+      context: [
+        { role: 'addressee', text: '어제 그 영화 봤어?' },
+        { role: 'speaker', text: '무슨 영화?' },
+      ],
+    });
+    const p = lastUserPrompt();
+    expect(p).toContain('Conversation so far');
+    expect(p.indexOf('어제 그 영화 봤어?')).toBeLessThan(p.indexOf('무슨 영화?'));
+    expect(p).toContain('Addressee: "어제 그 영화 봤어?"');
+    expect(p).toContain('Speaker: "무슨 영화?"');
+    // 번역 대상은 여전히 마지막 줄 하나뿐
+    expect(p).toContain('Text to translate: "응 그거"');
+  });
+
+  it('context 가 없으면 블록 자체가 생기지 않는다', async () => {
+    mockGenerateText(JSON.stringify({ translation: 'ok' }));
+    await translateMessage({ text: '안녕', targetLanguage: 'ja' });
+    expect(lastUserPrompt()).not.toContain('Conversation so far');
+  });
+
+  it('빈 배열도 블록을 만들지 않는다', async () => {
+    mockGenerateText(JSON.stringify({ translation: 'ok' }));
+    await translateMessage({ text: '안녕', targetLanguage: 'ja', context: [] });
+    expect(lastUserPrompt()).not.toContain('Conversation so far');
+  });
+});

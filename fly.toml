@@ -20,6 +20,11 @@ primary_region = 'nrt'
   min_machines_running = 0
   processes = ['app']
 
+# SIGTERM 후 SIGKILL 까지 기다리는 시간. 기본값 5초로는 src/index.ts 의 그레이스풀
+# 드레인(최대 15초)이 5초 시점에 강제 종료돼 무의미해진다 — 202 비동기 경로의
+# 음성 메시지 파이프라인이 5~10초 걸리므로 그 위로 여유를 둔다.
+kill_timeout = 20
+
 [[vm]]
   size = 'shared-cpu-1x'
   # 2026-07-18 OOM 사고(512MB 에서 node RSS ~400MB + 사진 워터컬러 변환 스파이크로

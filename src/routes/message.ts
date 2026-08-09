@@ -3,7 +3,11 @@ import * as Sentry from '@sentry/node';
 import { supabase } from '../config/supabase';
 import { uploadFile } from '../services/storage';
 import { synthesizeSpeech, type PersonaGender } from '../services/elevenlabs';
-import { translateMessage, type AddressParty } from '../services/translation';
+import {
+  translateMessage,
+  type AddressParty,
+  type MessageContextEntry,
+} from '../services/translation';
 import {
   replaceTagsForDisplay,
   ensureSpeakableForTTS,
@@ -44,6 +48,14 @@ export function endProcessing(id: string): void {
   inFlightMessages.delete(id);
 }
 
+// 그레이스풀 셧다운용. 202 경로는 응답을 먼저 보내고 뒤에서 번역→TTS→업로드→INSERT
+// 를 돌리므로, 배포로 프로세스가 즉사하면 그 메시지는 DB row 자체가 안 생겨 조용히
+// 사라진다(발신자는 202 를 받아 성공으로 처리 → 재전송도 안 함). index.ts 의 SIGTERM
+// 핸들러가 이 값이 0 이 될 때까지 기다렸다가 종료한다.
+export function inFlightCount(): number {
+  return inFlightMessages.size;
+}
+
 type MessageRow = Record<string, unknown>;
 
 // idempotent-send: INSERT ... ON CONFLICT (id) DO NOTHING 후 scoped 재반환.
@@ -57,6 +69,58 @@ type MessageRow = Record<string, unknown>;
 //
 // R1 (IDOR) 방어의 핵심: 재반환 SELECT 는 반드시 id AND match_id AND sender_id 로
 // scope 한다. 미scoped SELECT 는 남의 매치 메시지 UUID probe → 원문 유출.
+// 번역 맥락용 직전 2턴 조회.
+//
+// 한 문장만 보면 지시어("그거")·생략 주어·짧은 응답("응")의 지시 대상이 없어서
+// 번역이 밋밋한 직역으로 떨어지고, ㅠㅠ 가 [laughs] 인지 [sad] 인지도 그 메시지
+// 안에서만 판단하게 된다. 직전 대화를 같이 넘겨 Gemini 가 지시 대상·말투·태그를
+// 대화 흐름에 맞춰 고르게 한다.
+//
+// 원문(original_text)을 넘긴다 — 번역본이 아니라 실제로 오간 말이 맥락이고, 두
+// 사람이 서로 다른 언어로 쓰므로 섞여 있는 게 정상이다(프롬프트에 명시).
+// beforeIso 로 대상 메시지 자신과 그 뒤 메시지를 배제한다 (전송 경로는 아직
+// INSERT 전이지만, 동시 전송으로 더 최신 row 가 있을 수 있다).
+//
+// 실패해도 번역 자체는 진행한다 — 맥락은 품질 향상이지 필수 입력이 아니다.
+// 다만 error 는 삼키지 않고 가시화한다.
+//
+// 4턴인 이유. 비용·지연은 제약이 아니다 — 실측상 맥락 10턴이 전체 입력의 2.4%,
+// 지연 차이는 Gemini 자체 편차(2.5~6.5초)에 묻혀 측정조차 안 된다. 진짜 제약은
+// 정확도이고, 여기선 "많을수록 좋다"가 성립하지 않는다:
+//   * 창이 커질수록 서로 다른 주제가 섞여 들어와 모델이 잘못된 선행사를 고를
+//     후보가 늘어난다 (같은 단어가 반대 뜻으로 등장하는 함정 포함).
+//   * 이득은 빨리 포화된다 — 지시어·생략 주어·말투 판정은 대부분 1~3턴에서 끝난다.
+// 2턴은 "상대 1 + 나 1" 이라 끼어들기가 한 번만 더 있어도 진짜 선행사를 놓친다.
+// 4턴이 교차를 흡수하면서 주제가 뒤섞이지는 않는 지점.
+const CONTEXT_TURNS = 4;
+
+async function fetchConversationContext(
+  matchId: string,
+  beforeIso: string,
+  senderId: string,
+): Promise<MessageContextEntry[]> {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('sender_id, original_text, created_at')
+    .eq('match_id', matchId)
+    .lt('created_at', beforeIso)
+    .order('created_at', { ascending: false })
+    .limit(CONTEXT_TURNS);
+
+  if (error) {
+    console.error(`[fetchConversationContext] match=${matchId}:`, error.message);
+    return [];
+  }
+
+  return (data ?? [])
+    .reverse() // 오래된 것부터 — 대화 순서대로 읽히게
+    .map((m: any) => ({
+      role: (m.sender_id === senderId ? 'speaker' : 'addressee') as MessageContextEntry['role'],
+      text: (m.original_text as string | null) ?? '',
+    }))
+    .filter((c) => c.text.trim().length > 0);
+}
+
 async function idempotentInsertMessage(
   payload: Record<string, unknown>,
   matchId: string,
@@ -639,6 +703,13 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
         gender: (recipientProfile?.gender as string | null) ?? null,
         birthDate: (recipientProfile?.birth_date as string | null) ?? null,
       },
+      // 최초 합성과 같은 맥락을 넘겨야 재합성 음성만 다른 번역이 되지 않는다
+      // (호칭 컨텍스트와 같은 이유 — 위 주석 참고).
+      context: await fetchConversationContext(
+        matchId as string,
+        msg.created_at as string,
+        msg.sender_id as string,
+      ),
     });
 
     // [laughs] 만 audible — [sad] 등은 TTS 에서 제거 (사용자 정책).
@@ -746,6 +817,7 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
       targetLanguage: recipientLang,
       speaker,
       addressee,
+      context: await fetchConversationContext(matchId, queuedAt, senderId),
     });
     // identity: 같은 언어이고 display(태그→슬랭 복원) 텍스트가 원문과 동일 →
     // 번역 인디케이터 숨김(translated_text=null). 코드스위칭(프로필=ko인데 영어로

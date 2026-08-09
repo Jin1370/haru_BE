@@ -140,9 +140,25 @@ STEP 2 — Translate the tagged text into the target language:
   - Japanese: mirror likewise — casual source MUST stay casual (だ/だよ/だし), polite source → です/ます. Only when the source marks no politeness default to です/ます.
   - English: contemporary conversational tone, contractions allowed (I'm, you'll). No business-speak.
   - Chinese: 您 by default. Allow 你 if the source is clearly casual.
+  - Short messages carry a weak register signal ("괜찮아", "응 그거 무서웠어", "어디야"), but weak is not absent. Do NOT retreat to the polite form when the text is short: a single plain ending (-아/-어/-지/-네/-야/-자, or a bare noun reply inside a casual thread) is enough to REQUIRE casual output. Guessing polite "to be safe" is itself an error — it makes a close conversation suddenly sound distant.
+  - The polite default applies ONLY when the source language marks no politeness at all (English, Thai romanized chat, etc.), never as a fallback for "I am not sure".
 - Keep personal names, place names, and brand names in their original or properly romanized form. Titles of creative works and dish names are NOT covered by this — they follow the LOCALIZED NAMES rules below.
 - Do NOT respond to the content — only translate.
 - Return valid JSON only.
+
+CONVERSATION CONTEXT:
+The user message may include a "Conversation so far" block holding up to the last 2 messages, oldest first, each labeled Speaker or Addressee. It is CONTEXT ONLY — never translate those lines, never merge them into the output, never reply to them. Translate ONLY the "Text to translate" line.
+Use the context to:
+  - resolve what a short or elliptical message refers to (dropped subjects, pronouns, one-word replies such as "응", "그거", "ううん", "same") so the translation carries the right referent instead of a vague literal one;
+  - keep the register and the way the two people address each other consistent with how the conversation has been going (do not switch a settled 반말 thread into 존댓말 mid-conversation, and vice versa);
+  - decide which audio tag an ambiguous marker takes — a ㅠㅠ or T_T right after a funny exchange is [laughs], not [sad];
+  - disambiguate a word with several readings by what is actually being discussed.
+The context lines are shown exactly as they were originally typed, so they may be in a different language from the target, and may already contain [laughs]/[sad] tags — that is normal and is not something to fix.
+CRITICAL — context is advisory, never authoritative. Chat messages interleave: the line immediately before this one is often NOT what this message replies to. The other person may have sent something unrelated in between, or the Speaker may be continuing their OWN earlier line from two turns back. So:
+  - Translate what the text actually says. Never bend its meaning to fit the context, never pull a topic, noun, or referent out of the context that the text does not itself point to, and never "fix" the text because it changes the subject.
+  - When the text reads as a continuation of an earlier Speaker line, treat THAT line as the antecedent even if an Addressee line sits between them. Example: Speaker "오늘 저녁 진짜 맛있었어" / Addressee "혹시 영화 뭐 좋아해?" / text "라멘을 먹었거든" — this continues the dinner, not the film.
+  - If the text stands on its own, or fits none of the context lines, ignore the context completely and translate the text alone. Using no context is always safer than using the wrong one.
+If no context block is present, translate the text on its own.
 
 ${ADDRESS_TERM_RULES}
 
@@ -164,16 +180,37 @@ const model = vertexAi.getGenerativeModel({
     safetySettings: SAFETY_SETTINGS,
 });
 
+// 직전 대화 2턴. role 은 **번역 대상 메시지의 발신자 기준** — 'speaker' 는 그 사람이
+// 직접 쓴 이전 메시지, 'addressee' 는 상대가 쓴 것. 프롬프트의 Speaker/Addressee
+// 프로필 라인과 같은 어휘라 모델이 누가 누구인지 따로 추론할 필요가 없다.
+// text 는 **작성된 원문 그대로**(번역본 아님) — 실제로 오간 대화가 맥락이다.
+export interface MessageContextEntry {
+    role: "speaker" | "addressee";
+    text: string;
+}
+
+function describeContext(context?: MessageContextEntry[]): string {
+    if (!context || context.length === 0) return "";
+    const lines = context
+        .map(
+            (c) =>
+                `  ${c.role === "speaker" ? "Speaker" : "Addressee"}: ${JSON.stringify(c.text)}`,
+        )
+        .join("\n");
+    return `Conversation so far (context only — DO NOT translate these lines, oldest first):\n${lines}\n`;
+}
+
 export async function translateMessage(params: {
     text: string;
     targetLanguage: string;
     speaker?: AddressParty;
     addressee?: AddressParty;
+    context?: MessageContextEntry[];
 }): Promise<{ translation: string }> {
     const userPrompt = `Target language: ${params.targetLanguage}
 ${describeParty("Speaker (who wrote this message)", params.speaker)}
 ${describeParty("Addressee (who reads it)", params.addressee)}
-Text to translate: ${JSON.stringify(params.text)}`;
+${describeContext(params.context)}Text to translate: ${JSON.stringify(params.text)}`;
 
     const result = await model.generateContent({
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
@@ -201,12 +238,14 @@ ${AUDIO_TAG_STEP}
 STEP 2 — Produce the tagged text in every requested language:
 - Apply STEP 1 tagging to the source text, then translate the tagged text into each requested language. A requested language equal to the source language must be returned with the STEP 1 tags applied but otherwise unchanged (do NOT re-translate it).
 - CRITICAL: Inline ElevenLabs audio tags written as [laughs], [sad], or similar [single_word] forms in square brackets, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
-- Preserve the speaker's intent, mood, and casual/playful register. Voice intros are typically 80-160 characters and aim to invite a stranger to swipe right.
+- Preserve the speaker's intent, mood, and playful tone. Voice intros are typically 80-160 characters and aim to invite a stranger to swipe right.
+- "Playful/friendly" describes TONE and word choice — it is NOT a licence to lower the politeness level. A 해요체 or です・ます intro can be every bit as warm and inviting. Never drop to 반말 / plain form just to sound friendlier; follow the register rules below instead.
 - Match natural spoken length within ±20% of the source character count. Do NOT pad or truncate to extremes.
-- Use a register appropriate for casual self-introduction in each language — MIRROR the source register, never normalize toward polite:
+- Register — MIRROR the source, never normalize in either direction:
   - Korean: if the source is 반말, the output MUST be 반말. If the source is polite, use 해요체; avoid stiff 습니다체 unless the source is clearly formal. Only when the source language marks no politeness (e.g. English) default to 해요체.
   - Japanese: mirror likewise — casual source MUST stay casual (だ/だよ/だし), polite source → です/ます. Only when the source marks no politeness default to です/ます.
   - English: contemporary conversational tone, contractions allowed (I'm, you'll). No "thee/thou", no business-speak.
+  - CRITICAL for a source language with no politeness marking (English above all): a voice intro is heard by STRANGERS browsing profiles, so the unmarked default is the polite one — 해요체 for Korean, です・ます for Japanese. "Hi! Nice to meet you" must become "안녕하세요! 만나서 반가워요" — NEVER "안녕~ 만나서 반가워!". Never infer 반말 / plain form from the informality of English wording; English is informal by default and says nothing about Korean or Japanese politeness.
 - Preserve personal names, place names, brand names, emoji, and onomatopoeia (e.g., 두근두근, ドキドキ). Titles of creative works and dish names are NOT covered by this — they follow the LOCALIZED NAMES rules below (voice intros often name a favourite film, drama, or food).
 - Do NOT translate hashtags or @mentions if present.
 - Do NOT add any new content the speaker did not say (no extra greetings, no sign-offs).

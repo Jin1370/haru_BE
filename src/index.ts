@@ -26,6 +26,7 @@ import { startAudioExpiryScheduler } from './jobs/purgeExpiredAudio';
 import { startAuditCleanupScheduler } from './jobs/cleanupAuditTables';
 import { startPhotoConversionRetryScheduler } from './jobs/retryFailedPhotoConversions';
 import { startVoiceReminderScheduler } from './jobs/remindVoiceSetup';
+import { inFlightCount } from './routes/message';
 
 export const app = express();
 
@@ -163,10 +164,60 @@ if (env.admin.dashboardEnabled) {
 Sentry.setupExpressErrorHandler(app);
 app.use(errorMiddleware);
 
+// 그레이스풀 셧다운 — 배포 중 음성 메시지 유실 방지.
+//
+// 문제: voice clone 보유 발신자의 전송은 202 를 먼저 응답하고 뒤에서 번역 → TTS →
+// 업로드 → INSERT 를 5~10초간 돌린다(chat-audio-async-insert). 배포로 프로세스가
+// 즉사하면 DB row 자체가 안 생겨 메시지가 조용히 사라진다 — 발신자는 202 를 받아
+// 성공으로 처리했으므로 재전송조차 하지 않는다.
+//
+// 해결: SIGTERM 을 받으면 (1) 새 연결 접수 중단 (2) 진행 중인 파이프라인이 끝날
+// 때까지 대기 (3) 종료. 롤링 배포라 그동안 신규 요청은 다른 머신이 받으므로 사용자
+// 체감 중단은 없다.
+//
+// ⚠️ fly.toml 의 `kill_timeout` 이 이 값보다 커야 한다. Fly 기본값은 5초라, 그대로
+// 두면 여기서 15초를 기다려도 5초 시점에 SIGKILL 로 강제 종료되어 이 핸들러가
+// 무의미해진다 (fly.toml 에 kill_timeout = 20 으로 명시).
+const DRAIN_TIMEOUT_MS = 15_000;
+const DRAIN_POLL_MS = 250;
+
+function installGracefulShutdown(server: { close(cb?: () => void): void }): void {
+  let shuttingDown = false;
+
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return; // 신호가 두 번 와도 드레인은 한 번만
+    shuttingDown = true;
+    console.log(`[shutdown] ${signal} — draining (in-flight=${inFlightCount()})`);
+
+    // 1) 새 연결 접수 중단. 이미 열린 연결의 응답은 그대로 나간다.
+    server.close();
+
+    // 2) 진행 중인 메시지 파이프라인이 빌 때까지 대기 (상한 있음 — 안 그러면
+    //    배포가 영영 안 끝난다).
+    const deadline = Date.now() + DRAIN_TIMEOUT_MS;
+    while (inFlightCount() > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, DRAIN_POLL_MS));
+    }
+
+    const left = inFlightCount();
+    if (left > 0) {
+      // 상한 초과 — 남은 건 유실된다. 빈도가 잦으면 DRAIN_TIMEOUT_MS 를 올릴 신호.
+      console.error(`[shutdown] drain timeout — ${left} message pipeline(s) abandoned`);
+    } else {
+      console.log('[shutdown] drained cleanly');
+    }
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+}
+
 if (process.env.NODE_ENV !== 'test') {
-  app.listen(env.port, () => {
+  const server = app.listen(env.port, () => {
     console.log(`Server running on port ${env.port}`);
   });
+  installGracefulShutdown(server);
   // audio-expiry sprint: 청취 완료 + 30일 경과 음성 파일 일일 sweep 등록.
   // NODE_ENV=test 분기는 scheduler 내부에서도 가드되지만, listen 과 함께 묶어
   // 부팅 sequence 를 단일 위치로 유지.

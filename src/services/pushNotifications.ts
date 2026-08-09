@@ -48,6 +48,25 @@ interface ExpoPushResponse {
 
 const EXPO_PUSH_ENDPOINT = 'https://exp.host/--/api/v2/push/send';
 
+// 트레이 병합 키 (카카오톡식 "같은 방 알림은 한 줄"). Expo Push API 의
+//   * tag        — Android: 같은 tag 의 표시 중인 알림을 새 알림이 교체
+//   * collapseId — iOS(apns-collapse-id) + 전송 중 병합
+// 두 필드에 같은 값을 넣어 양 플랫폼 동작을 맞춘다.
+//
+// body 가 타입별 고정 문구(‘{name}님의 새 음성 메시지’)라 덮어써도 잃는 정보가
+// 없다 — 내용은 어차피 앱을 열어야 보이는 게 voice-first 정책이다.
+//
+// 길이 주의: apns-collapse-id 는 최대 64 바이트다. 그래서 `타입:uuid` 한 쌍까지만
+// 넣는다(최대 51 바이트). uuid 두 개를 이으면 82 바이트로 APNs 가 거부한다.
+//   * message/match — match_id 기준 = 채팅방(매치)당 한 줄. match_id 가 계정별로
+//     달라 dev 알림 싱크(한 폰에 여러 dev 계정)에서도 계정 간 교체가 안 일어난다.
+//   * like/voice_reminder — 익명·계정 단위라 receiverId 기준.
+export function buildGroupKey(payload: PushPayload, receiverId: string): string {
+  return payload.type === 'message' || payload.type === 'match'
+    ? `${payload.type}:${payload.match_id}`
+    : `${payload.type}:${receiverId}`;
+}
+
 // Expo Push API 호출 + 5xx 1회 재시도.
 // 5xx 는 "응답을 받았다 = 확실히 미전달" 이라 재시도해도 중복 알림이 안 난다.
 // 반대로 네트워크 에러/타임아웃은 "전달됐는데 응답만 유실" 일 수 있어 재시도
@@ -234,11 +253,33 @@ export async function sendPushToUser(
         : payload.type === 'match'
           ? payload.matched_name
           : '';
-    const body = buildPushBody(payload.type as PushMessageType, locale, name);
+    // 미청취 건수 — 같은 채팅방 알림이 한 줄로 병합되므로 "몇 건인지" 를 body 에
+    // 넣어야 이전 알림이 사라진 것처럼 보이지 않는다. 정의는 채팅 목록 배지
+    // (get_match_summaries_v4 의 unread_count) 와 동일: 상대가 보낸 + ready +
+    // 미청취. 이 시점엔 방금 INSERT 된 메시지도 포함된다(푸시가 INSERT 직후 발송).
+    // 실패하면 undefined 로 두어 기존 단수 문구로 폴백 — 개수 때문에 푸시를
+    // 통째로 잃지 않는다.
+    let unreadCount: number | undefined;
+    if (payload.type === 'message') {
+      const { count, error: countError } = await supabase
+        .from('messages')
+        .select('id', { count: 'exact', head: true })
+        .eq('match_id', payload.match_id)
+        .neq('sender_id', receiverId)
+        .eq('audio_status', 'ready')
+        .is('listened_at', null);
+      if (countError) {
+        console.error('[sendPushToUser] unread count error:', countError.message);
+      } else if (count !== null) {
+        unreadCount = count;
+      }
+    }
+
+    const body = buildPushBody(payload.type as PushMessageType, locale, name, unreadCount);
     // dev 알림 싱크(label 있는 토큰)는 테스터 폰 1대 전용이라 수신 dev 계정의
     // 언어(ja 등)와 무관하게 한국어로 고정 — 테스터 가독성. 실유저 토큰(label
     // null)은 위 수신자 언어 body 그대로.
-    const sinkBody = buildPushBody(payload.type as PushMessageType, 'ko', name);
+    const sinkBody = buildPushBody(payload.type as PushMessageType, 'ko', name, unreadCount);
 
     const data: Record<string, string> = { type: payload.type };
     if (payload.type === 'message' || payload.type === 'match') {
@@ -251,9 +292,14 @@ export async function sendPushToUser(
     // priority: 'high' — FCM 측에서 즉시 wakeup + Android Notification Channel
     // 의 IMPORTANCE_HIGH 와 결합해 화면 상단 헤드업/플로팅 배너로 노출시킨다.
     // 'default' 면 doze/대기 상태에서 지연 + 헤드업 미노출. APNs 는 무관.
+    const groupKey = buildGroupKey(payload, receiverId);
+
     const messages = dedupedTokens.map((t) => ({
       to: t.expo_push_token,
       sound: 'default' as const,
+      // 같은 채팅방(매치)의 알림이 트레이에 쌓이지 않고 최신 1건으로 덮인다.
+      tag: groupKey,
+      collapseId: groupKey,
       // label 있는 토큰(dev 알림 싱크)은 "haru · <수신계정명>" 으로 어느 계정
       // 알림인지 구분. 실유저 토큰(label null)은 기존대로 'haru'.
       title: t.label ? `haru · ${t.label}` : 'haru',

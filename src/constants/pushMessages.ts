@@ -25,6 +25,15 @@ const PUSH_MESSAGES = {
     ja: '{name}さんから新しいボイスメッセージ',
     en: 'New voice message from {name}',
   },
+  // 같은 채팅방 알림은 트레이에서 한 줄로 병합되므로(pushNotifications 의
+  // tag/collapseId), 2건 이상 쌓였을 때 몇 건인지 알려주지 않으면 이전 알림이
+  // 그냥 사라진 것처럼 보인다. 미청취 개수는 채팅 목록 배지(get_match_summaries_v4
+  // 의 unread_count)와 같은 정의를 쓴다.
+  message_multi: {
+    ko: '{name}님의 새 음성 메시지 {count}개',
+    ja: '{name}さんから新しいボイスメッセージ{count}件',
+    en: '{count} new voice messages from {name}',
+  },
   match: {
     ko: '{name}님과 매칭되었어요!',
     ja: '{name}さんとマッチしました！',
@@ -48,11 +57,17 @@ const PUSH_MESSAGES = {
 
 export type PushMessageType = keyof typeof PUSH_MESSAGES;
 
+// count 는 메시지 알림의 미청취 건수. 2건 이상일 때만 개수 문구로 바꾼다
+// (1건이면 개수를 붙여봐야 노이즈).
 export function buildPushBody(
   type: PushMessageType,
   locale: PushLocale,
   name: string,
+  count?: number,
 ): string {
-  const template = PUSH_MESSAGES[type][locale];
-  return template.replace('{name}', name);
+  const key: PushMessageType =
+    type === 'message' && count !== undefined && count > 1 ? 'message_multi' : type;
+  return PUSH_MESSAGES[key][locale]
+    .replace('{name}', name)
+    .replace('{count}', String(count ?? ''));
 }

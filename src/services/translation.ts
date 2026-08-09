@@ -52,6 +52,30 @@ The Speaker / Addressee profile lines given in the user message are the ONLY sou
 - Hindi output: भैया (older male) / दीदी (older female); for a peer use the name. Keep आप/तुम consistent with the source register.
 These rules override any literal reading of the source. Producing a term the profile lines contradict is the single worst failure in this task.`;
 
+// 작품명(영화·드라마·노래·책·만화·게임) + 음식명 규칙.
+//
+// 기존 프롬프트의 "Keep proper nouns in their original form" 은 인명·지명·브랜드엔
+// 맞지만 이 둘엔 틀린다. 작품은 각 나라에서 **공식 제목**으로 개봉·출간되고, 음식은
+// 각 나라가 **원어의 서로 다른 조각을 빌려와** 정착시키기 때문이다. 직역("장화홍련"
+// → "薔薇と紅蓮")도 음차("チャンファホンリョン")도 현지 사용자에겐 검색조차 안 되는
+// 문자열이다. 음식 쪽 대표 사례가 감바스 ↔ アヒージョ — 같은 요리인데 한국은 스페인어
+// gambas(새우), 일본은 ajillo(마늘기름)를 가져다 써서 두 이름이 겹치는 글자가 없다.
+//
+// 환각 방지가 이 규칙의 절반이다 — 그럴듯하지만 틀린 이름은 원문을 그대로 두는
+// 것보다 나쁘다(원문이면 최소한 검색은 된다). 확신이 없으면 원문 유지를 강제하고,
+// "비슷하지만 다른 것"으로 바꿔치기하는 것(된장찌개 → 味噌汁)도 함께 막는다.
+const LOCALIZED_NAME_RULES = `LOCALIZED NAMES — creative works (films, dramas, songs, books, manga/webtoons, games) and dish names — use the name established in the target market, never a literal translation:
+Output the title under which the work was officially released, published, or distributed in the target language's market, or the name by which the dish is actually known there. Do NOT translate the constituent words literally, and do NOT transliterate phonetically, when an established local name exists.
+  - Works, ko→ja: 장화홍련 → 箪笥 | 참교육 → 鉄槌教師 | 기생충 → パラサイト 半地下の家族 (NOT 寄生虫)
+  - Works, ja→ko: 箪笥 → 장화홍련 | 鉄槌教師 → 참교육 | 君の名は。 → 너의 이름은.
+  - Dishes, ko→ja: 감바스 → アヒージョ | 떡볶이 → トッポギ | 순대 → スンデ
+  - Dishes, ja→ko: アヒージョ → 감바스 | お好み焼き → 오코노미야키 | 唐揚げ → 가라아게
+  - The same applies to en / th / hi targets.
+An established local name is often completely unrelated to the source words — the two markets may have borrowed different parts of the same original foreign name (감바스 from Spanish "gambas", アヒージョ from "ajillo", one dish). That is expected and correct. Prefer it over any literal rendering.
+CRITICAL — never invent one: if you are not confident that an established local name exists, keep the source name as it is (romanized only if the target script makes it unreadable) instead of guessing. A plausible-sounding but wrong name is worse than the untranslated original, because the reader can still look the original up.
+CRITICAL — never substitute a different thing: map only to the SAME work or the SAME dish. If the target market has no equivalent, keep the source name — do not swap in something merely similar (된장찌개 is NOT 味噌汁).
+If a work or dish is known in the target market under its original or English name unchanged, keep that form.`;
+
 export interface AddressParty {
     gender?: string | null; // 'male' | 'female' | 'other'
     birthDate?: string | null; // profiles.birth_date (YYYY-MM-DD)
@@ -116,11 +140,13 @@ STEP 2 — Translate the tagged text into the target language:
   - Japanese: mirror likewise — casual source MUST stay casual (だ/だよ/だし), polite source → です/ます. Only when the source marks no politeness default to です/ます.
   - English: contemporary conversational tone, contractions allowed (I'm, you'll). No business-speak.
   - Chinese: 您 by default. Allow 你 if the source is clearly casual.
-- Keep proper nouns in their original or properly romanized form.
+- Keep personal names, place names, and brand names in their original or properly romanized form. Titles of creative works and dish names are NOT covered by this — they follow the LOCALIZED NAMES rules below.
 - Do NOT respond to the content — only translate.
 - Return valid JSON only.
 
 ${ADDRESS_TERM_RULES}
+
+${LOCALIZED_NAME_RULES}
 
 Output schema:
 { "translation": string }`;
@@ -181,10 +207,12 @@ STEP 2 — Produce the tagged text in every requested language:
   - Korean: if the source is 반말, the output MUST be 반말. If the source is polite, use 해요체; avoid stiff 습니다체 unless the source is clearly formal. Only when the source language marks no politeness (e.g. English) default to 해요체.
   - Japanese: mirror likewise — casual source MUST stay casual (だ/だよ/だし), polite source → です/ます. Only when the source marks no politeness default to です/ます.
   - English: contemporary conversational tone, contractions allowed (I'm, you'll). No "thee/thou", no business-speak.
-- Preserve proper nouns, emoji, and onomatopoeia (e.g., 두근두근, ドキドキ).
+- Preserve personal names, place names, brand names, emoji, and onomatopoeia (e.g., 두근두근, ドキドキ). Titles of creative works and dish names are NOT covered by this — they follow the LOCALIZED NAMES rules below (voice intros often name a favourite film, drama, or food).
 - Do NOT translate hashtags or @mentions if present.
 - Do NOT add any new content the speaker did not say (no extra greetings, no sign-offs).
 - Output VALID JSON only.
+
+${LOCALIZED_NAME_RULES}
 
 ${ADDRESS_TERM_RULES}
 A voice intro has no single addressee — there is no Addressee profile line. When the source refers to the kind of person the speaker is looking for (e.g. 年上のお姉さん / 연하남), pick the term from the SPEAKER's gender plus the older/younger direction stated in the source (male speaker + older woman → 누나, never 언니). If the direction is not stated, use a neutral phrasing instead of guessing a kinship term.

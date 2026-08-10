@@ -7,7 +7,12 @@ import { convertProfilePhoto } from '../services/photoConversion';
 import { addWatermark } from '../services/photoWatermark';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
-import { profileUpsertSchema, photoOrderSchema, isAdultBirthDate } from '../schemas/profile';
+import {
+  profileUpsertSchema,
+  photoOrderSchema,
+  acquisitionSchema,
+  isAdultBirthDate,
+} from '../schemas/profile';
 import { lookupBioPhrase } from '../constants/bioPhrasesCatalog';
 import { CONSENT_POLICY_VERSION } from '../constants/consent';
 import { requireNotFrozen } from '../utils/freezeGuard';
@@ -389,6 +394,36 @@ router.post('/consent', async (req: AuthRequest, res: Response) => {
     voice_consent_at: now,
   });
 });
+
+// 유입 경로 응답 (mig 051). 가입 완료 후 FE 가 1회 강제 노출하는 게이트의 저장 endpoint.
+//
+// write-once: `.is('acquisition_source', null)` 로 최초 1회만 기록된다. 이미 값이
+// 있으면 UPDATE 가 0행이지만 그대로 200 — 멱등하게 두어야 FE 가 재시도해도 안전하고,
+// "이미 응답함" 을 굳이 알려줄 이유도 없다. 응답 뒤 다시 안 묻는 것은 GET /me 의
+// acquisition_source 가 non-null 이 되는 것으로 FE 게이트가 자연 해제되며 보장된다.
+router.post(
+  '/acquisition',
+  requireNotFrozen,
+  validateBody(acquisitionSchema),
+  async (req: AuthRequest, res: Response) => {
+    // '직접 입력' 은 자유 텍스트를 `other:` prefix 로 같은 컬럼에 담는다
+    // (집계는 sns 와 동일하게 prefix 로 그룹).
+    const value =
+      req.body.source === 'other' && req.body.detail
+        ? `other:${req.body.detail}`
+        : req.body.source;
+    const { error } = await supabase
+      .from('profiles')
+      .update({ acquisition_source: value })
+      .eq('id', req.userId!)
+      .is('acquisition_source', null);
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    res.json({ acquisition_source: value });
+  },
+);
 
 // 프로필 사진 재배치 (photo-reorder-no-reconvert sprint).
 //

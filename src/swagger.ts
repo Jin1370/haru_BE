@@ -513,6 +513,58 @@ export const swaggerDocument = {
         },
       },
     },
+    '/api/profile/acquisition': {
+      post: {
+        tags: ['Profile'],
+        summary: '유입 경로 기록 (write-once)',
+        description:
+          '가입 완료 후 FE 가 1회 강제 노출하는 게이트의 저장 endpoint (mig 051). 이미 값이 있으면 UPDATE 0행이지만 멱등하게 200. 다시 묻지 않는 판정은 GET /api/profile/me 의 acquisition_source non-null 로 FE 가 수행.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  source: {
+                    type: 'string',
+                    enum: [
+                      'friend',
+                      'app_store',
+                      'web_search',
+                      'sns:instagram',
+                      'sns:x',
+                      'sns:youtube',
+                      'sns:facebook',
+                      'sns:threads',
+                      'sns:tiktok',
+                    ],
+                  },
+                },
+                required: ['source'],
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '기록됨 (또는 이미 기록되어 있어 무시됨)',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { acquisition_source: { type: 'string', example: 'sns:instagram' } },
+                },
+              },
+            },
+          },
+          400: { description: '허용되지 않은 source 값' },
+          401: { description: '인증 실패' },
+          403: { description: '계정 정지' },
+        },
+      },
+    },
     '/api/profile/photos': {
       post: {
         tags: ['Profile'],

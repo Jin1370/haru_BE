@@ -46,6 +46,30 @@ export function isAdultBirthDate(s: string): boolean {
   return parsed.getTime() <= eighteenYearsAgo.getTime();
 }
 
+// 유입 경로 (mig 051). SNS 는 `sns:` prefix 로 세부 플랫폼까지 한 컬럼에 담는다.
+// Keep in sync with FE `src/constants/acquisition.ts`.
+export const ACQUISITION_SOURCES = [
+  'friend',
+  'app_store',
+  'web_search',
+  'sns:instagram',
+  'sns:x',
+  'sns:youtube',
+  'sns:facebook',
+  'sns:threads',
+  'sns:tiktok',
+  'other',
+  // 건너뛰기. 값을 남겨야 "사용자당 1회" 가 유지된다 (null 이면 다음 실행에 또 물음).
+  'skipped',
+] as const;
+
+// detail = '직접 입력' 선택 시의 자유 텍스트. 라우트가 `other:<detail>` 로 합쳐 한
+// 컬럼에 저장한다 (운영자 조회용, 앱 어디에도 다시 표시하지 않는다).
+export const acquisitionSchema = z.object({
+  source: z.enum(ACQUISITION_SOURCES),
+  detail: z.string().trim().min(1).max(60).optional(),
+});
+
 export const profileUpsertSchema = z.object({
   display_name: z.string().min(1).max(50),
   birth_date: z

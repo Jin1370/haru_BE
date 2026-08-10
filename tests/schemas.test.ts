@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { profileUpsertSchema, LANGUAGE_CODES, isAdultBirthDate } from '../src/schemas/profile';
+import {
+  profileUpsertSchema,
+  acquisitionSchema,
+  ACQUISITION_SOURCES,
+  LANGUAGE_CODES,
+  isAdultBirthDate,
+} from '../src/schemas/profile';
 
 // Pure unit tests against the zod schemas — no DB or HTTP. After mig 009 the
 // language model collapsed to scalar `language` on profile and `string[]` on
@@ -122,3 +128,24 @@ describe('birth_date validation (LAUNCH_CHECKLIST #2)', () => {
   });
 });
 
+
+// mig 051 — 유입 경로. FE constants/acquisition.ts 의 값과 정확히 일치해야 하고
+// (게이트가 이 문자열을 그대로 보냄), 화이트리스트 밖 값은 400 으로 떨어져야 한다.
+describe('acquisitionSchema (mig 051)', () => {
+  it('accepts every whitelisted source', () => {
+    for (const source of ACQUISITION_SOURCES) {
+      expect(acquisitionSchema.safeParse({ source }).success).toBe(true);
+    }
+  });
+
+  it('rejects unknown / free-form sources', () => {
+    for (const source of ['sns', 'sns:linkedin', 'friend ', '', 'FRIEND']) {
+      expect(acquisitionSchema.safeParse({ source }).success).toBe(false);
+    }
+  });
+
+  it('keeps the sns: prefix so aggregation can group by channel', () => {
+    const sns = ACQUISITION_SOURCES.filter((s) => s.startsWith('sns:'));
+    expect(sns).toHaveLength(6);
+  });
+});

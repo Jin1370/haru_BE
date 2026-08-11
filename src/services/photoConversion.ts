@@ -120,10 +120,11 @@ export interface ConversionResult {
 // OpenAI 응답 카테고리 추출: gpt-image-2 가 거부 카테고리를 명시 반환하는 표준 필드가
 // 없으므로 (image moderation 은 text moderation 과 응답 shape 다름) error.message
 // 기반 heuristic + 'photo_generic' 폴백.
-function detectModerationRejection(err: unknown): {
+export function detectModerationRejection(err: unknown): {
   rejected: boolean;
   category: ModerationBlockEvent['category'];
   rawCategory?: string;
+  rawMessage?: string;
 } {
   const errAny = err as { status?: number; code?: string; message?: string; error?: { code?: string; message?: string } };
   const status = errAny.status;
@@ -144,22 +145,32 @@ function detectModerationRejection(err: unknown): {
     message.includes('safety filter');
 
   if (!codeIsModeration && !(status === 400 && messageIsModeration)) {
-    return { rejected: false, category: 'sexual' };
+    return { rejected: false, category: 'other' };
   }
 
-  // 카테고리 추출 heuristic — message 본문에서 키워드 매칭. 매칭 실패 시 'sexual'
-  // 폴백 (gpt-image-2 거부 사유의 통계적 최빈값). audit 정밀도가 떨어지지만 차단
-  // 자체의 정합성은 영향 없음.
-  let category: ModerationBlockEvent['category'] = 'sexual';
+  // 카테고리 추출 heuristic — message 본문에서 키워드 매칭. 매칭 실패 시 'other'
+  // (mig 052). 옛 폴백은 'sexual' 이었는데, gpt-image 계열 거부 사유 중 우리가
+  // 키워드로 못 잡는 유형(대표적으로 저작권 캐릭터 likeness)이 전부 성적 콘텐츠로
+  // 기록되어 운영자 daily review 에서 무고를 만들었다. 사유 미상은 미상으로 적는다.
+  let category: ModerationBlockEvent['category'] = 'other';
   if (message.includes('minor') || message.includes('child') || message.includes('underage')) {
     category = 'minor';
   } else if (message.includes('self-harm') || message.includes('self harm')) {
     category = 'self_harm';
   } else if (message.includes('drug') || message.includes('illicit')) {
     category = 'drug';
+  } else if (message.includes('sexual') || message.includes('nudity') || message.includes('nsfw')) {
+    category = 'sexual';
   }
 
-  return { rejected: true, category, rawCategory: code ?? 'gpt-image-2:safety_filter' };
+  return {
+    rejected: true,
+    category,
+    rawCategory: code ?? 'gpt-image-2:safety_filter',
+    // 제공자 원문 — category='other' 로 떨어진 케이스의 실제 사유를 사후 파악할
+    // 유일한 증거. 원본 사진은 거부 즉시 폐기되므로 재현이 불가하다.
+    rawMessage: errAny.message ?? errAny.error?.message,
+  };
 }
 
 // 백필 row 처리: original_path 가 'http(s)://' 로 시작하면 URL 로 간주 → fetch.
@@ -258,11 +269,33 @@ export async function convertProfilePhoto(input: ConversionInput): Promise<Conve
         surface: 'photo',
         rawCategory: rejection.rawCategory,
       });
-      await updatePhotoStatus(photoRowId, {
-        status: 'rejected',
-        failure_reason: 'moderation_rejected',
-        original_path: null,
-      });
+      // row 자체를 삭제한다 (옛 동작: status='rejected' 로 남겨두기).
+      // 거부된 row 는 남아있을 이유가 없다 — 재시도 불가(영구 거부)고, audit 는
+      // moderation_blocks 별도 테이블이라 독립적이다. 남겨두면 5칸 중 한 칸을
+      // 점유한 채 "빨간 X 슬롯" 으로 보일 뿐이다.
+      //
+      // ponytail: position gap 압축 안 함 — 거부 사진은 보통 마지막에 추가한 것이라
+      // 실사용에서 gap 이 안 생기고, 생겨도 그리드에 빈 "+" 칸으로 보이며 다음
+      // 업로드가 "첫 빈 자리" 를 채워 자연 회복된다. 중간 슬롯 거부가 흔해지면
+      // routes/profile.ts 의 DELETE 압축 로직을 헬퍼로 추출해 공유할 것.
+      const { error: deleteErr } = await supabase
+        .from('profile_photos')
+        .delete()
+        .eq('id', photoRowId);
+      if (deleteErr) {
+        // 삭제 실패 시 슬롯이 'processing' 으로 남아 영구 스피너가 된다 — status 를
+        // 되돌려 최소한 사용자가 만질 수 있는 상태(rejected)로 떨어뜨린다.
+        console.error('[photoConversion.delete_rejected_row_failed]', {
+          user_id: userId,
+          photo_row_id: photoRowId,
+          error: deleteErr.message,
+        });
+        await updatePhotoStatus(photoRowId, {
+          status: 'rejected',
+          failure_reason: 'moderation_rejected',
+          original_path: null,
+        });
+      }
       // 원본 Storage cleanup (Storage path 인 경우만). 백필 URL 은 skip.
       if (originalPath && !originalPath.startsWith('http')) {
         deleteFile('photos', originalPath).catch((e) =>
@@ -278,6 +311,7 @@ export async function convertProfilePhoto(input: ConversionInput): Promise<Conve
         photo_row_id: photoRowId,
         category: rejection.category,
         raw_category: rejection.rawCategory,
+        raw_message: rejection.rawMessage,
       });
       return {
         status: 'rejected',

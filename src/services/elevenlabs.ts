@@ -3,6 +3,7 @@ import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import { SILENCE_TAIL } from "../assets/silenceTail";
 import { env } from "../config/env";
 import { Emotion } from "../types";
+import { readKoreanNumbersForTTS } from "../utils/textNormalization";
 
 const client = new ElevenLabsClient({ apiKey: env.elevenlabs.apiKey });
 
@@ -79,12 +80,15 @@ export async function synthesizeSpeech(
     // sanitizeAudioTags / stripAudioTags / replaceTagsForDisplay 는 canonical
     // `[laughs]` 리터럴 기준으로 그대로 동작(DB·UI 슬랭 복원 무영향).
     const laughAdjusted = text.replace(/\[laughs\]/g, "[soft laugh]");
+    // 숫자 오독 교정 — "1번째" 가 "일번째" 로 합성되는 문제. 위 laugh 변환과 같이
+    // TTS 입력 전용이라 DB/UI 텍스트는 숫자 그대로 유지된다.
+    const numeralAdjusted = readKoreanNumbersForTTS(laughAdjusted);
     // eleven_v3 는 종결 prosody 를 빠르게 마무리해 마지막 음절이 잘려 들리는
     // 경향이 있음 (특히 stability=1.0 Robust + 종결 punctuation 부재 시).
     // 텍스트 끝에 종결 punctuation 이 없으면 ellipsis 를 부착해 모델이 학습한
     // "문장 끝" 분포대로 자연 fade-out 을 유도. audio tag (`[soft laugh]` 등) 로
     // 끝나는 경우에도 효과음 직후 trailing silence 가 따라붙어 잘림 완화.
-    const trimmedText = laughAdjusted.trimEnd();
+    const trimmedText = numeralAdjusted.trimEnd();
     const hasTerminalPunctuation = /[.!?…。！？]$/.test(trimmedText);
     const paddedText = hasTerminalPunctuation ? trimmedText : `${trimmedText}…`;
     const prefixed = `${personaTag}${accentTag}${emotionTag}${paddedText}`;

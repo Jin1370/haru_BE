@@ -6,7 +6,27 @@ import {
   replaceTagsForDisplay,
   ensureSpeakableForTTS,
   hasSpeakableContent,
+  readKoreanNumbersForTTS,
 } from '../src/utils/textNormalization';
+
+// ── readKoreanNumbersForTTS — 숫자 오독 교정 (TTS 입력 전용) ──────────────────
+describe('readKoreanNumbersForTTS', () => {
+  it('고유어 단위 앞 숫자를 한글 수사로 (서수 1 은 첫)', () => {
+    expect(readKoreanNumbersForTTS('1번째로 좋아')).toBe('첫 번째로 좋아');
+    expect(readKoreanNumbersForTTS('2번째')).toBe('두 번째');
+    expect(readKoreanNumbersForTTS('20번째')).toBe('스무 번째');
+    expect(readKoreanNumbersForTTS('커피 2잔이랑 3개 주세요')).toBe('커피 두 잔이랑 세 개 주세요');
+    expect(readKoreanNumbersForTTS('7시에 만날래?')).toBe('일곱 시에 만날래?');
+    expect(readKoreanNumbersForTTS('나 25살이야')).toBe('나 25살이야'); // 21 이상은 그대로
+  });
+
+  it('한자어가 맞는 자리는 건드리지 않음', () => {
+    expect(readKoreanNumbersForTTS('3개월 됐어')).toBe('3개월 됐어');
+    expect(readKoreanNumbersForTTS('3번 버스')).toBe('3번 버스');
+    expect(readKoreanNumbersForTTS('10분 뒤에 2024년')).toBe('10분 뒤에 2024년');
+    expect(readKoreanNumbersForTTS('100개')).toBe('100개');
+  });
+});
 
 // ── sanitizeAudioTags — Gemini 출력 화이트리스트 검증 ─────────────────────────
 // 감정 마커 → audio tag 치환은 이제 Gemini(translation.ts STEP 1)가 수행하고,

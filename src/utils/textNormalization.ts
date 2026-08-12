@@ -79,6 +79,40 @@ export function stripNonAudibleTags(text: string): string {
     .trim();
 }
 
+// ── TTS 입력 전용: 아라비아 숫자 + 고유어 단위 → 한글 수사 ─────────────────────
+// TTS 엔진은 숫자를 한자어 수사(일/이/삼)로만 읽어 "1번째" 가 "일번째" 로 합성된다.
+// 한국어는 단위(수분류사)마다 고유어 수사(첫/두/세) 자리가 정해져 있어 그 자리에
+// 한자어가 들어가면 명백한 오독이다. TTS 입력에서만 치환하고 display 텍스트
+// (translated_text / voice intro 슬롯) 는 사용자가 쓴 숫자 그대로 둔다 — display 를
+// 바꾸면 identity 판정(senderLang===recipientLang && display===원문)이 깨져 번역
+// 인디케이터가 헛뜬다.
+//
+// 한자어가 맞는 단위(년/월/일/분/초/원/층)와 문맥에 따라 갈리는 단위("세 번" 은
+// 고유어지만 "3번 버스" 는 한자어) 는 의도적으로 제외 — 없던 오독을 새로 만들지
+// 않는 쪽이 우선.
+const NATIVE_NUMERALS = [
+  '', '한', '두', '세', '네', '다섯', '여섯', '일곱', '여덟', '아홉', '열',
+  '열한', '열두', '열세', '열네', '열다섯', '열여섯', '열일곱', '열여덟', '열아홉', '스무',
+];
+
+// '개월' 은 한자어(3개월 = 삼 개월). '개' 가 먼저 매칭되지 않도록 alternation 앞에
+// 두고 replacer 에서 원문 그대로 돌려보내는 미끼 항목이다.
+// ponytail: 21 이상은 그대로 둔다 (스물한/서른두… 조합 테이블이 필요한데 채팅에서
+// 거의 안 쓰인다). 필요해지면 여기에 10단위 접두 테이블만 추가.
+const NATIVE_COUNTER_PATTERN =
+  /(?<!\d)(\d{1,2})(?!\d)\s*(번째|개월|개|명|살|마리|시간|시|잔|병|그릇|가지)/g;
+
+export function readKoreanNumbersForTTS(text: string): string {
+  if (typeof text !== 'string' || text.length === 0) return text;
+  return text.replace(NATIVE_COUNTER_PATTERN, (match, digits: string, counter: string) => {
+    if (counter === '개월') return match;
+    const word = NATIVE_NUMERALS[Number(digits)];
+    if (!word) return match; // 0 · 21 이상
+    // 서수 1 만 '첫' ("한 번째" ❌ / "첫 번째" ⭕)
+    return `${counter === '번째' && digits === '1' ? '첫' : word} ${counter}`;
+  });
+}
+
 // ── 디스플레이용: audio tag → 타깃 언어 슬랭 치환 ──────────────────────────────
 //
 // 메시지 파이프라인에서 translated_text 는 UI 의 번역 인디케이터로 노출되는데,

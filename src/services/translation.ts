@@ -21,7 +21,10 @@ Markers to detect, across every language:
   - Thai: 555, ฮ่าๆ → [laughs].
   - Hindi: हाहा, हीही → [laughs].
 CRITICAL — literal only: insert a tag ONLY when such a marker literally appears. NEVER infer emotion from meaning. "아 오늘 너무 슬프다" (sad in meaning, NO marker) stays "아 오늘 너무 슬프다" with no tag. "아 오늘 너무 슬프다ㅠㅠ" becomes "아 오늘 너무 슬프다[sad]".
-CRITICAL — context chooses WHICH tag: the marker must still literally appear (never invent a tag from meaning alone), but whether it becomes [laughs] or [sad] follows the emotion the marker conveys IN CONTEXT, not its usual default. Korean ㅠㅠ / ㅜㅜ (and T_T) very often mean "crying FROM laughter" — when the surrounding text is about something funny, tag them [laughs], NOT [sad]. Example: "아 진짜 웃겨요ㅠㅠ" → "아 진짜 웃겨요[laughs]". Use [sad] only when the context is genuinely sad ("시험 망했어ㅠㅠ" → "시험 망했어[sad]"). With no such contextual signal, fall back to each marker's usual emotion (ㅋ/ㅎ/ww/haha/xD → [laughs]; ㅠ/ㅜ/T_T → [sad]).
+CRITICAL — each marker's tag is FIXED, never inverted by context or meaning:
+  - ㅋ / ㅎ / ｗ / ww / www / 笑 / 草 / haha / hehe / lol / lmao / rofl / xD / :D / =D / 555 / ฮ่าๆ / हाहा / हीही → ALWAYS [laughs]
+  - ㅠ / ㅜ / T_T / ;_; / Q_Q / :( / :'( → ALWAYS [sad]
+Korean ㅠㅠ sometimes means "crying from laughter", but do NOT re-read it as laughter even when the surrounding text is funny. The two errors are not symmetric: a [sad] tag on a playful line costs nothing (it is restored as ㅠㅠ, exactly what the sender typed, and makes no sound), while a [laughs] tag on ㅠㅠ rewrites the sender's ㅠㅠ into ㅋㅋㅋ and speaks it as laughter — inverting what they expressed. That inversion is the worst failure in this step. When in doubt, [sad].
 CRITICAL — precise removal: remove the marker characters completely, leaving no residue. "진짜 웃기네욬ㅋㅋㅋ" → "진짜 웃기네요[laughs]" (the fused 욬 is restored to 요; leaving "욬[laughs]" is WRONG).
 Use EXACTLY [laughs] and [sad]. No other tag names, no variants like [laugh].
 If the text has no such marker, insert no tag.`;
@@ -151,8 +154,8 @@ The user message may include a "Conversation so far" block holding up to the las
 Use the context to:
   - resolve what a short or elliptical message refers to (dropped subjects, pronouns, one-word replies such as "응", "그거", "ううん", "same") so the translation carries the right referent instead of a vague literal one;
   - keep the register and the way the two people address each other consistent with how the conversation has been going (do not switch a settled 반말 thread into 존댓말 mid-conversation, and vice versa);
-  - decide which audio tag an ambiguous marker takes — a ㅠㅠ or T_T right after a funny exchange is [laughs], not [sad];
   - disambiguate a word with several readings by what is actually being discussed.
+NEVER use the context to choose an audio tag. Tags follow the fixed per-marker mapping in STEP 1 and do not change with the surrounding conversation — a ㅠㅠ after a funny exchange is still [sad].
 The context lines are shown exactly as they were originally typed, so they may be in a different language from the target, and may already contain [laughs]/[sad] tags — that is normal and is not something to fix.
 CRITICAL — context is advisory, never authoritative. Chat messages interleave: the line immediately before this one is often NOT what this message replies to. The other person may have sent something unrelated in between, or the Speaker may be continuing their OWN earlier line from two turns back. So:
   - Translate what the text actually says. Never bend its meaning to fit the context, never pull a topic, noun, or referent out of the context that the text does not itself point to, and never "fix" the text because it changes the subject.

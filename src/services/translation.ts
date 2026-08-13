@@ -21,10 +21,10 @@ Markers to detect, across every language:
   - Thai: 555, ฮ่าๆ → [laughs].
   - Hindi: हाहा, हीही → [laughs].
 CRITICAL — literal only: insert a tag ONLY when such a marker literally appears. NEVER infer emotion from meaning. "아 오늘 너무 슬프다" (sad in meaning, NO marker) stays "아 오늘 너무 슬프다" with no tag. "아 오늘 너무 슬프다ㅠㅠ" becomes "아 오늘 너무 슬프다[sad]".
-CRITICAL — each marker's tag is FIXED, never inverted by context or meaning:
-  - ㅋ / ㅎ / ｗ / ww / www / 笑 / 草 / haha / hehe / lol / lmao / rofl / xD / :D / =D / 555 / ฮ่าๆ / हाहा / हीही → ALWAYS [laughs]
-  - ㅠ / ㅜ / T_T / ;_; / Q_Q / :( / :'( → ALWAYS [sad]
-Korean ㅠㅠ sometimes means "crying from laughter", but do NOT re-read it as laughter even when the surrounding text is funny. The two errors are not symmetric: a [sad] tag on a playful line costs nothing (it is restored as ㅠㅠ, exactly what the sender typed, and makes no sound), while a [laughs] tag on ㅠㅠ rewrites the sender's ㅠㅠ into ㅋㅋㅋ and speaks it as laughter — inverting what they expressed. That inversion is the worst failure in this step. When in doubt, [sad].
+CRITICAL — which tag a crying marker takes is decided by the SAME line only:
+  - Laughter markers (ㅋ / ㅎ / ｗ / ww / www / 笑 / 草 / haha / hehe / lol / lmao / rofl / xD / :D / =D / 555 / ฮ่าๆ / हाहा / हीही) are ALWAYS [laughs]. Never [sad].
+  - Crying markers (ㅠ / ㅜ / T_T / ;_; / Q_Q / :( / :'( ) default to [sad]. They become [laughs] ONLY when the very same "Text to translate" line also says, in words, that something is funny — 웃겨/웃김/웃기다/재밌, 面白い/ウケる, funny/hilarious, or a laughter marker sitting in that same line. Example: "아 진짜 웃겨요ㅠㅠ" → "아 진짜 웃겨요[laughs]" (the line says 웃겨). "시험 망했어ㅠㅠ" → "시험 망했어[sad]".
+  - A crying marker on its own ("ㅠㅠ", "T_T"), or on a line with no such words, is ALWAYS [sad] — even if the conversation before it was funny. NEVER let the preceding messages flip it: the sender typed ㅠㅠ on THIS line, and rendering that as ㅋㅋㅋ plus a laughing voice inverts what they expressed. That inversion is the worst failure in this step. When in doubt, [sad].
 CRITICAL — precise removal: remove the marker characters completely, leaving no residue. "진짜 웃기네욬ㅋㅋㅋ" → "진짜 웃기네요[laughs]" (the fused 욬 is restored to 요; leaving "욬[laughs]" is WRONG).
 Use EXACTLY [laughs] and [sad]. No other tag names, no variants like [laugh].
 If the text has no such marker, insert no tag.`;

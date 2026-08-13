@@ -9,6 +9,7 @@ import { pickViewerSlot } from './swipe';
 import { createSignedUrlFromStored } from '../services/storage';
 import { VOICE_INTRO_BUCKET } from '../services/voiceIntro';
 import { fetchReadyPhotosByUser } from '../services/profilePhotos';
+import { isCampaignBot } from '../services/campaignBot';
 
 const matchListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional().default(20),
@@ -195,7 +196,8 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
       ? {
           id: rawPartner.id,
           display_name: rawPartner.display_name,
-          nationality: rawPartner.nationality,
+          // 캠페인 봇은 신원 미상 — 디스커버 카드/채팅 프로필 모달과 정합.
+          nationality: isCampaignBot(rawPartner.id) ? '' : rawPartner.nationality,
           language: rawPartner.language,
           deleted_at: (rawPartner.deleted_at as string | null) ?? null,
           photos: photoAccess.all_photos_unlocked
@@ -319,11 +321,20 @@ router.get('/:matchId/partner', async (req: AuthRequest, res: Response) => {
     slotUrls[slot] as string | null | undefined,
   );
 
+  // 캠페인 봇은 디스커버 카드와 동일하게 신원 미상 — 카드에서 미상이던 상대가
+  // 채팅 프로필 모달에서 나이·성별이 드러나면 설정이 깨진다. 관심사는 그대로
+  // 노출한다 (공범 가능성이 관심사 겹침이라 오히려 보이는 편이 재미있다).
+  const identityHidden = isCampaignBot(partnerId);
+
   res.json({
-    birth_date: (partnerResult.data.birth_date as string | null) ?? '',
-    gender: (partnerResult.data.gender as string | null) ?? null,
+    birth_date: identityHidden ? '' : ((partnerResult.data.birth_date as string | null) ?? ''),
+    gender: identityHidden ? null : ((partnerResult.data.gender as string | null) ?? null),
     interests: (partnerResult.data.interests as string[] | null) ?? [],
     voice_intro_audio_url: voiceIntroAudioUrl,
+    // 캠페인 봇(하치와레)은 답장을 받지 않는다. FE 는 false 일 때 입력창을
+    // 잠금 안내문으로 바꾸고, 메시지가 아직 안 온 동안 "작성 중" 인디케이터를
+    // 띄운다. 서버측 강제는 POST /messages 의 403 이 담당.
+    can_reply: !isCampaignBot(partnerId),
   });
 });
 

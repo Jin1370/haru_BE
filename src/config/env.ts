@@ -127,6 +127,25 @@ export const env = {
       .filter(Boolean),
   },
 
+  // 캠페인 봇 (하치와레 발견 이벤트). 이 UUID 를 가진 프로필은:
+  //   1) like 를 받으면 상대 like 없이도 즉시 매치 (POST /swipe 에서 reciprocal 강제)
+  //   2) 매치 직후 자동으로 안내 메시지 3건 발송 (services/campaignBot.ts)
+  //   3) 사용자가 답장을 보낼 수 없음 (POST /messages 403 + FE 입력창 잠금)
+  // 미설정(null) = 전 기능 비활성. 캠페인 종료 시 시크릿에서 빼면 봇은 평범한
+  // 프로필로 돌아간다 (재배포 불필요). 프로필 자체를 지우는 것과 달리 기존
+  // 매치/메시지 이력은 그대로 남는다.
+  campaign: {
+    botUserId: process.env.CAMPAIGN_BOT_USER_ID?.trim() || null,
+    // 응모 안내 말풍선 끝의 "자세히 보기" 링크 (로케일별 X 공지 게시물).
+    // 미설정이면 그 줄 자체가 빠진다 — 게시물 URL 은 캠페인 시작 전엔 모르므로
+    // 코드에 박지 않고 시크릿으로 넣는다.
+    postUrls: {
+      ko: process.env.CAMPAIGN_POST_URL_KO?.trim() || '',
+      ja: process.env.CAMPAIGN_POST_URL_JA?.trim() || '',
+      en: process.env.CAMPAIGN_POST_URL_EN?.trim() || '',
+    },
+  },
+
   // dev/QA 어드민 대시보드 — 출시 빌드에서는 ADMIN_DASHBOARD_ENABLED 미설정
   // 으로 라우트/임퍼소네이션 경로 자체가 사라진다. ADMIN_SECRET 은 enabled
   // 일 때만 required. 프로덕션에서 실수로 활성화 + 빈 시크릿 = 무제한 침해

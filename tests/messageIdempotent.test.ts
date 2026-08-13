@@ -33,6 +33,8 @@ vi.mock('../src/config/env', () => ({
     image: { azureBaseUrl: '', azureApiKey: '', azureApiVersion: '2025-04-01-preview' },
     vertexAi: { projectId: 'test', location: 'us-central1' },
     discover: { passResetEnabled: true, dailyLikeLimit: 15 },
+    // 캠페인 봇 비활성 — isCampaignBot() 이 항상 false 라 메시지 경로는 무영향.
+    campaign: { botUserId: null, postUrls: { ko: '', ja: '', en: '' } },
     admin: { dashboardEnabled: false, secret: '' },
     moderation: { autoFreezeReportThreshold: 3 },
     voice: { recloneMonthlyCap: 2, recloneWindowDays: 30 },

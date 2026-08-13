@@ -23,6 +23,7 @@ import { isBlocked } from '../constants/moderationDictionary';
 import { checkOpenAiModeration } from '../services/openaiModeration';
 import { requireNotFrozen } from '../utils/freezeGuard';
 import { logModerationBlock } from '../utils/moderationAudit';
+import { isCampaignBot, sendCampaignEntryGuide } from '../services/campaignBot';
 import { randomUUID } from 'crypto';
 
 const router = Router();
@@ -256,6 +257,13 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   }
 
   const recipientId = match.user1_id === req.userId! ? match.user2_id : match.user1_id;
+
+  // 캠페인 봇에게는 답장할 수 없다. FE 가 입력창을 잠그지만(can_reply=false)
+  // 변조 클라이언트의 직접 호출을 라우트에서도 막는다.
+  if (isCampaignBot(recipientId)) {
+    res.status(403).json({ error: 'This partner cannot receive messages', code: 'reply_disabled' });
+    return;
+  }
 
   // 차단 여부 확인. 본 시점 (queue 시점) 에 차단을 검증하므로 비동기
   // pipeline 중간에 차단이 걸려도 메시지가 새어나가지 않는다. 단,
@@ -589,6 +597,16 @@ router.post('/:matchId/messages/:messageId/listened', async (req: AuthRequest, r
   }
 
   res.json(updated);
+
+  // 캠페인 봇: 카드 음성을 끝까지 들은 시점에 응모 안내를 이어 보낸다. 안내를
+  // 먼저 읽고 음성을 건너뛰는 동선을 막는 순서 장치. fire-and-forget (응답은
+  // 이미 보냈고, 실패해도 청취 마킹 자체는 유효하다). 안내 메시지 id 가 matchId
+  // 파생이라 여러 기기에서 중복 호출돼도 row 는 하나.
+  if (isCampaignBot(msg.sender_id)) {
+    sendCampaignEntryGuide(matchId as string, req.userId!).catch((err) =>
+      console.error('[sendCampaignEntryGuide]', err),
+    );
+  }
 });
 
 // chat-audio-async-insert sprint: retry 라우트 제거.

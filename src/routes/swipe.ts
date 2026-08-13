@@ -10,6 +10,7 @@ import { env } from '../config/env';
 import { createSignedUrlFromStored } from '../services/storage';
 import { VOICE_INTRO_BUCKET } from '../services/voiceIntro';
 import { fetchReadyPhotosByUser } from '../services/profilePhotos';
+import { buildCampaignBotCard, isCampaignBot, sendCampaignBotMessages } from '../services/campaignBot';
 
 // 시청자 언어 → 보이스 인트로 슬롯 매핑 (mig 011).
 // ko/ja/en 활성. th/hi/그 외/null 은 'en' 폴백 (FE 의 영문 강제 정책과 일관).
@@ -29,6 +30,12 @@ const router = Router();
 // 트레이드오프: 최신 N 개를 모두 이미 응답(스와이프)한 사용자는 그보다 오래된
 // 미응답 좋아요가 있어도 노출 안 됨 (A1 과 동일한 freshness 편향, 후속 페이지네이션 대상).
 export const LIKES_RECEIVED_MAX = 300;
+
+// 캠페인 봇(하치와레)이 디스커버에 등장하기 시작하는 누적 스와이프 수.
+// 이 값 미만이면 봇 카드를 주입하지 않아 첫 배치(기본 10장)에는 절대 안 나온다 —
+// 사용자가 일반 프로필을 먼저 보게 하려는 장치. 너무 크면 스와이프를 적게 하는
+// 사용자가 캠페인을 아예 못 만나므로 한 배치 남짓으로 잡는다.
+export const CAMPAIGN_BOT_MIN_SWIPES = 8;
 
 router.use(authMiddleware);
 
@@ -199,7 +206,14 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     ...(swipedResult.data?.map((s: any) => s.swiped_id) || []),
     ...blockedIds,
   ];
-  const uniqueExcludeIds = [...new Set(excludeIds)];
+  // 캠페인 봇은 선호 성별·나이 필터와 "viewer 와 같은 언어 하드 제외" 를 전부
+  // 우회해야 하므로 메인 쿼리에서 빼고 아래에서 직접 주입한다. 단 이미 스와이프
+  // 했거나 차단한 경우엔 주입도 하지 않는다 (일반 후보와 동일한 소진 규칙).
+  const botAlreadyHandled =
+    !env.campaign.botUserId || excludeIds.includes(env.campaign.botUserId);
+  const uniqueExcludeIds = [
+    ...new Set(env.campaign.botUserId ? [...excludeIds, env.campaign.botUserId] : excludeIds),
+  ];
 
   const prefs = prefsResult.data;
 
@@ -332,10 +346,35 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
         // like = 예산 면제). FE 는 좋아요 소진 시 이 값으로 사전 게이트를 분기한다:
         // false 면 카드 안 넘기고 즉시 한도 모달, true 면 통과시켜 즉시 매치.
         // 카드에 시각 표시는 하지 않음(피드 통합 정책 유지) — 게이팅 로직 전용.
-        liked_you: reciprocalLikerIds.has(rest.id as string),
+        // 캠페인 봇은 항상 즉시 매치되므로 true — 일일 좋아요를 다 쓴 사용자도
+        // 하치와레는 잡을 수 있어야 한다.
+        liked_you: reciprocalLikerIds.has(rest.id as string) || isCampaignBot(rest.id as string),
       };
     }),
   );
+
+  // 캠페인 봇 주입. 스코어링을 안 타므로 위치를 직접 정한다. 덱 앞쪽에 나오면
+  // (a) 숨어 있는 걸 찾는다는 컨셉이 깨지고 (b) 사용자가 다른 프로필을 보기도
+  // 전에 캠페인으로 빠져나간다. 그래서 두 겹으로 뒤로 민다:
+  //   1) 누적 스와이프가 CAMPAIGN_BOT_MIN_SWIPES 미만이면 주입 자체를 안 함
+  //      (첫 배치에는 절대 안 나옴). swipes 행 수가 곧 "지금까지 본 카드 수".
+  //   2) 주입할 때도 배치의 뒤쪽 절반에만 넣음 (viewer 시드로 결정적).
+  // 단, 후보 풀이 8명보다 작으면 1)의 조건이 영원히 충족되지 않아 봇을 아예 못
+  // 만나게 된다 (전체를 다 넘겨도 누적 스와이프가 8 미만인 채로 덱이 빈다).
+  // 그래서 "더 보여줄 후보가 없음" 이면 스와이프 수와 무관하게 주입한다 —
+  // 봇이 마지막 한 장으로 반드시 도달 가능해진다.
+  // 결과가 limit+1 장이 되지만 FE 는 배열 길이에 의존하지 않는다.
+  const deckExhausted = results.length === 0;
+  if (!botAlreadyHandled && ((swipedResult.data?.length ?? 0) >= CAMPAIGN_BOT_MIN_SWIPES || deckExhausted)) {
+    const botCard = await buildCampaignBotCard(slot);
+    if (botCard) {
+      let seed = 0;
+      for (const ch of req.userId!) seed += ch.charCodeAt(0);
+      const half = Math.floor(results.length / 2);
+      const index = half + (seed % (results.length - half + 1));
+      results.splice(index, 0, botCard as (typeof results)[number]);
+    }
+  }
 
   res.json(results);
 });
@@ -754,6 +793,15 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
       return;
     }
     reciprocal = data ?? null;
+
+    // 캠페인 봇은 스와이프를 하지 않으므로 reciprocal 행이 존재할 수 없다. 봇을
+    // like 하면 항상 매치가 성사되도록 여기서 강제한다. reciprocal 이 아래의
+    // (a) 예산 소모 판정 (b) 매치 생성 두 곳을 모두 좌우하므로, 이 한 줄로
+    // "즉시 매치 + like 예산 면제"가 동시에 성립한다 — 매치를 완성하는 like 는
+    // 원래 예산에서 빠지는 기존 규칙과 정합.
+    if (!reciprocal && isCampaignBot(swiped_id)) {
+      reciprocal = { id: 'campaign-bot' };
+    }
   }
 
   // 2) 예산 소모 여부 = like AND non-reciprocal(매치 미완성). 이 값이 캡 검사·INSERT
@@ -840,6 +888,15 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
       } else {
         res.status(500).json({ error: matchError.message });
         return;
+      }
+
+      // 캠페인 봇 매치 — 자동 안내 메시지 2건. fire-and-forget (TTS 합성이
+      // 5~10초 걸리므로 스와이프 응답을 붙잡지 않는다). FE 는 그동안 채팅방에
+      // "작성 중" 인디케이터를 띄운다.
+      if (match && isCampaignBot(swiped_id)) {
+        sendCampaignBotMessages(match.id, req.userId!).catch((err) =>
+          console.error('[sendCampaignBotMessages]', err),
+        );
       }
 
       // push-notifications sprint: 매치 성사 시 양쪽 사용자에게 푸시 발송.

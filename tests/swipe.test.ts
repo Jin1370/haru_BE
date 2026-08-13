@@ -51,6 +51,8 @@ vi.mock('../src/config/env', () => ({
         return envState.unlimitedLikeUserIds;
       },
     },
+    // 캠페인 봇 비활성 — isCampaignBot() 이 항상 false 라 스와이프 경로는 무영향.
+    campaign: { botUserId: null, postUrls: { ko: '', ja: '', en: '' } },
     admin: { dashboardEnabled: false, secret: '' },
     moderation: { autoFreezeReportThreshold: 3 },
     voice: { recloneMonthlyCap: 2, recloneWindowDays: 30 },

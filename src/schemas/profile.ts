@@ -71,7 +71,15 @@ export const acquisitionSchema = z.object({
 });
 
 export const profileUpsertSchema = z.object({
-  display_name: z.string().min(1).max(50),
+  // 줄바꿈·제어문자 금지. 닉네임은 한 줄로만 렌더되는 걸 전제하는 표면이 많고
+  // (채팅 헤더 / 매치 목록 / 캠페인 카드), 특히 캠페인 카드는 닉네임을 여러 줄
+  // 템플릿 안에 끼워넣어서 줄바꿈이 들어오면 "▼ 자격" 같은 가짜 줄을 만들 수 있다.
+  display_name: z
+    .string()
+    .trim()
+    .min(1)
+    .max(50)
+    .refine((v) => !/[\r\n\t\p{Cc}]/u.test(v), { message: 'must be a single line' }),
   birth_date: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)

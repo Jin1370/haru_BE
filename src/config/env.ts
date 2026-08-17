@@ -136,9 +136,12 @@ export const env = {
   // 매치/메시지 이력은 그대로 남는다.
   campaign: {
     botUserId: process.env.CAMPAIGN_BOT_USER_ID?.trim() || null,
-    // 응모 안내 말풍선 끝의 "자세히 보기" 링크 (로케일별 X 공지 게시물).
-    // 미설정이면 그 줄 자체가 빠진다 — 게시물 URL 은 캠페인 시작 전엔 모르므로
-    // 코드에 박지 않고 시크릿으로 넣는다.
+    // 응모 안내 말풍선의 X 공지 게시물 링크 (로케일별).
+    //
+    // **이 값이 설정된 언어 = 캠페인 대상 언어** — 봇 카드는 그 언어 사용자의
+    // 디스커버에만 주입된다 (swipe.ts). 일본 한정이면 JA 만 설정하면 되고,
+    // 한국·영어권으로 확장할 때도 시크릿만 추가하면 된다 (재배포 불필요).
+    // 게시물 URL 은 캠페인 시작 전엔 모르므로 코드에 박지 않고 시크릿으로 넣는다.
     postUrls: {
       ko: process.env.CAMPAIGN_POST_URL_KO?.trim() || '',
       ja: process.env.CAMPAIGN_POST_URL_JA?.trim() || '',

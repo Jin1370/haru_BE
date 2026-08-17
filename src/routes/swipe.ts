@@ -31,12 +31,6 @@ const router = Router();
 // 미응답 좋아요가 있어도 노출 안 됨 (A1 과 동일한 freshness 편향, 후속 페이지네이션 대상).
 export const LIKES_RECEIVED_MAX = 300;
 
-// 캠페인 봇(하치와레)이 디스커버에 등장하기 시작하는 누적 스와이프 수.
-// 이 값 미만이면 봇 카드를 주입하지 않아 첫 배치(기본 10장)에는 절대 안 나온다 —
-// 사용자가 일반 프로필을 먼저 보게 하려는 장치. 너무 크면 스와이프를 적게 하는
-// 사용자가 캠페인을 아예 못 만나므로 한 배치 남짓으로 잡는다.
-export const CAMPAIGN_BOT_MIN_SWIPES = 8;
-
 router.use(authMiddleware);
 
 type Candidate = {
@@ -353,27 +347,20 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     }),
   );
 
-  // 캠페인 봇 주입. 스코어링을 안 타므로 위치를 직접 정한다. 덱 앞쪽에 나오면
-  // (a) 숨어 있는 걸 찾는다는 컨셉이 깨지고 (b) 사용자가 다른 프로필을 보기도
-  // 전에 캠페인으로 빠져나간다. 그래서 두 겹으로 뒤로 민다:
-  //   1) 누적 스와이프가 CAMPAIGN_BOT_MIN_SWIPES 미만이면 주입 자체를 안 함
-  //      (첫 배치에는 절대 안 나옴). swipes 행 수가 곧 "지금까지 본 카드 수".
-  //   2) 주입할 때도 배치의 뒤쪽 절반에만 넣음 (viewer 시드로 결정적).
-  // 단, 후보 풀이 8명보다 작으면 1)의 조건이 영원히 충족되지 않아 봇을 아예 못
-  // 만나게 된다 (전체를 다 넘겨도 누적 스와이프가 8 미만인 채로 덱이 빈다).
-  // 그래서 "더 보여줄 후보가 없음" 이면 스와이프 수와 무관하게 주입한다 —
-  // 봇이 마지막 한 장으로 반드시 도달 가능해진다.
-  // 결과가 limit+1 장이 되지만 FE 는 배열 길이에 의존하지 않는다.
-  const deckExhausted = results.length === 0;
-  if (!botAlreadyHandled && ((swipedResult.data?.length ?? 0) >= CAMPAIGN_BOT_MIN_SWIPES || deckExhausted)) {
+  // 캠페인 봇 주입. 스코어링(선호 성별·나이 필터 + 같은 언어 하드 제외)을 태울 수
+  // 없어 메인 쿼리 밖에서 따로 만들기 때문에 위치를 직접 정해야 한다. 규칙은 하나 —
+  // **항상 배치의 맨 뒤**. 사용자가 일반 프로필을 먼저 보고 나서 만나게 되고, 후보
+  // 수가 몇 명이든 자리가 "맨 뒤" 로 같아 카드가 나타났다 사라지지 않는다.
+  // (옛 구현은 "누적 스와이프 8회 이상 OR 덱이 텅 빔" 을 조건으로 삼고 뒤쪽 절반에
+  //  무작위 삽입했는데, "덱이 텅 빔" 이 호출마다 뒤집혀 봇이 맨 위에 떴다 사라졌다.)
+  // 후보가 0명이면 봇이 유일한 카드가 된다. 결과가 limit+1 장이 되지만 FE 는 배열
+  // 길이에 의존하지 않는다.
+  // 캠페인 대상 언어에만 노출한다 — 응모 링크(CAMPAIGN_POST_URL_*)가 설정된
+  // 언어가 곧 대상. 일본 한정 운영이면 JA 만 설정하면 되고, 확장도 시크릿 추가로
+  // 끝난다 (재배포 불필요). slot 은 viewer 언어 → ko/ja/en 매핑 (th/hi/null = en).
+  if (!botAlreadyHandled && env.campaign.postUrls[slot]) {
     const botCard = await buildCampaignBotCard(slot);
-    if (botCard) {
-      let seed = 0;
-      for (const ch of req.userId!) seed += ch.charCodeAt(0);
-      const half = Math.floor(results.length / 2);
-      const index = half + (seed % (results.length - half + 1));
-      results.splice(index, 0, botCard as (typeof results)[number]);
-    }
+    if (botCard) results.push(botCard as (typeof results)[number]);
   }
 
   res.json(results);

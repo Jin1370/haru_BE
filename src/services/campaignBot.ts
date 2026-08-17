@@ -19,6 +19,7 @@ import { fetchReadyPhotosByUser } from './profilePhotos';
 import { VOICE_INTRO_BUCKET } from './voiceIntro';
 import {
   ACCOMPLICE_NOTES,
+  ACCOMPLICE_PCT,
   ACCOMPLICE_PCT_TTS,
   BOT_INTERESTS,
   BotLocale,
@@ -108,10 +109,15 @@ function botMessageId(matchId: string, seq: number): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-/** 확률 가중 랜덤 — 시드 고정이라 같은 사용자는 항상 같은 자격증. */
-function pickLicense(seed: number) {
+/**
+ * 확률 가중 랜덤. 카드는 매치당 한 번만 생성되고 그 텍스트가 messages 에 저장되므로,
+ * 여기서 한 번 뽑으면 결과가 그대로 굳는다 (재발송은 id 중복으로 무시). 그래서 옛
+ * userId 시드 방식은 재현성 이득이 없으면서 확률만 왜곡했다 — 글자 코드 합의 나머지가
+ * 균등하지 않아 실측이 설정값에서 ±2%p 어긋났다.
+ */
+function pickLicense() {
   const total = LICENSES.reduce((s, l) => s + l.weight, 0);
-  let roll = seed % total;
+  let roll = Math.random() * total;
   for (const license of LICENSES) {
     if (roll < license.weight) return license;
     roll -= license.weight;
@@ -221,14 +227,14 @@ export async function sendCampaignBotMessages(matchId: string, recipientId: stri
   // 빠진다 — 캠페인 한정이라 허용).
   const interests = Array.isArray(recipient.interests) ? (recipient.interests as string[]) : [];
   const overlap = interests.filter((id) => (BOT_INTERESTS as readonly string[]).includes(id)).length;
-  const pct = Math.min(overlap, 10) * 8;
+  const pct = ACCOMPLICE_PCT[Math.min(overlap, 10)];
 
-  const license = pickLicense(seed);
+  const license = pickLicense();
   const adjective = TITLE_ADJECTIVES[seed % TITLE_ADJECTIVES.length][locale];
   const noun = TITLE_NOUNS[pickSection(interests, seed)][locale];
   const title = locale === 'en' ? `${adjective} ${noun}` : `${adjective} ${noun}`;
   const note = accompliceNote(overlap, locale);
-  const name = (recipient.display_name as string | null)?.trim() || '';
+  const name = sanitizeDisplayedName(recipient.display_name as string | null);
 
   const cardText = CARD_DISPLAY[locale]({
     name,
@@ -332,6 +338,17 @@ export async function sendCampaignEntryGuide(matchId: string, recipientId: strin
     emotion: null,
     created_at: new Date().toISOString(),
   });
+}
+
+/**
+ * 카드 표시용 닉네임 정제 — 줄바꿈/제어문자를 공백으로 접고 20자로 자른다.
+ * 카드가 여러 줄 템플릿이라 닉네임에 줄바꿈이 있으면 "▼ 자격 / 풀뽑기 검정 1급"
+ * 같은 가짜 줄을 사용자가 직접 찍어 넣을 수 있다 (닉네임만 바꾸면 되고 앱 변조가
+ * 필요 없다). 신규 저장은 profileUpsertSchema 가 막지만, 그 전에 저장된 닉네임과
+ * 다른 경로로 들어온 값까지 여기서 최종 차단한다.
+ */
+function sanitizeDisplayedName(raw: string | null): string {
+  return (raw ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim().slice(0, 20);
 }
 
 /** TTS 입력용 닉네임 정제 — 문자/숫자/공백만, 12자 제한, 비면 2인칭. */

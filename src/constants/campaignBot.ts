@@ -14,7 +14,7 @@ export function toBotLocale(language: string | null | undefined): BotLocale {
 }
 
 // ── 하치와레 관심사 ────────────────────────────────────────────────
-// 공범 가능성 = 유저 관심사와의 겹침 개수 × 8 (0~10개 → 0~80%).
+// 공범 가능성 = 유저 관심사와의 겹침 개수로 ACCOMPLICE_PCT 조회 (0~10개 → 0~95%).
 // 봇 프로필의 실제 profiles.interests 와 같은 값이어야 한다. DB 를 매번 읽지 않는
 // 이유: 봇 프로필이 손상돼도 캠페인 판정이 흔들리지 않게 하기 위함.
 export const BOT_INTERESTS = [
@@ -31,34 +31,34 @@ export const BOT_INTERESTS = [
 ] as const;
 
 // ── 자격증 (확률 가중, 합계 100) ────────────────────────────────────
-// 난이도가 높을수록 희귀. 유저에게는 확률표를 노출하지 않는다.
+// 유저에게는 확률표를 노출하지 않는다.
 export const LICENSES: {
   weight: number;
   display: Record<BotLocale, string>;
   tts: Record<BotLocale, string>;
 }[] = [
   {
-    weight: 7,
-    display: { ko: '조주 자격증', ja: 'お酒の資格', en: 'Liquor License' },
-    tts: { ko: '조주 자격증', ja: 'おさけの資格', en: 'the Liquor License' },
+    weight: 15,
+    display: { ko: '술 자격증', ja: 'お酒の資格', en: 'Drinking License' },
+    tts: { ko: '술 자격증', ja: 'おさけの資格', en: 'the Drinking License' },
   },
   {
-    weight: 7,
-    display: { ko: '슈퍼 알바이터', ja: 'スーパーアルバイター', en: 'Super Part-Timer' },
-    tts: { ko: '슈퍼 알바이터', ja: 'スーパーアルバイター', en: 'Super Part-Timer' },
+    weight: 15,
+    display: { ko: '슈퍼 아르바이터', ja: 'スーパーアルバイター', en: 'Super Part-Timer License' },
+    tts: { ko: '슈퍼 아르바이터', ja: 'スーパーアルバイター', en: 'the Super Part-Timer License' },
   },
   {
-    weight: 10,
+    weight: 2,
     display: { ko: '풀뽑기 검정 1급', ja: '草むしり検定 1級', en: 'Weed-Pulling Exam, Grade 1' },
     tts: { ko: '풀뽑기 검정 일급', ja: '草むしり検定いっきゅう', en: 'Weed-Pulling Exam Grade One' },
   },
   {
-    weight: 20,
+    weight: 15,
     display: { ko: '풀뽑기 검정 2급', ja: '草むしり検定 2級', en: 'Weed-Pulling Exam, Grade 2' },
     tts: { ko: '풀뽑기 검정 이급', ja: '草むしり検定にきゅう', en: 'Weed-Pulling Exam Grade Two' },
   },
   {
-    weight: 26,
+    weight: 28,
     display: { ko: '풀뽑기 검정 3급', ja: '草むしり検定 3級', en: 'Weed-Pulling Exam, Grade 3' },
     tts: { ko: '풀뽑기 검정 삼급', ja: '草むしり検定さんきゅう', en: 'Weed-Pulling Exam Grade Three' },
   },
@@ -68,7 +68,7 @@ export const LICENSES: {
     tts: { ko: '풀뽑기 검정 사급', ja: '草むしり検定よんきゅう', en: 'Weed-Pulling Exam Grade Four' },
   },
   {
-    weight: 20,
+    weight: 15,
     display: { ko: '풀뽑기 검정 5급', ja: '草むしり検定 5級', en: 'Weed-Pulling Exam, Grade 5' },
     tts: { ko: '풀뽑기 검정 오급', ja: '草むしり検定ごきゅう', en: 'Weed-Pulling Exam Grade Five' },
   },
@@ -76,8 +76,10 @@ export const LICENSES: {
 
 // ── 칭호 = 형용사(해시) + 명사(관심사가 가장 많이 몰린 섹션) ──────────
 export const TITLE_ADJECTIVES: Record<BotLocale, string>[] = [
-  { ko: '낙천적인', ja: 'なんとかなれ系の', en: 'Happy-Go-Lucky' },
-  { ko: '뭔가 작고 귀여운', ja: 'なんか小さくてかわいい', en: 'Somehow Small and Cute' },
+  // 하치와레의 시그니처 대사 「なんとかなれ！」 파생 — 일반 형용사로 옮기면
+  // 원작 고증이 날아간다.
+  { ko: '어떻게든 돼라 식의', ja: 'なんとかなれ系の', en: 'Happy-Go-Lucky' },
+  { ko: '뭔가 작고 귀여운', ja: 'なんか小さくてかわいい', en: 'Something Small and Cute' },
   { ko: '멋진', ja: 'カッコイイ', en: 'Cool' },
   { ko: '잘 웃는', ja: 'よく笑う', en: 'Always-Laughing' },
   { ko: '노력파인', ja: 'がんばりやの', en: 'Hardworking' },
@@ -122,28 +124,39 @@ export const SECTION_INTEREST_IDS: Record<InterestSection, string[]> = {
 };
 
 // ── 공범 가능성 ────────────────────────────────────────────────────
-/** 겹침 0~10개 → 0~80%. 8% 씩. */
+/** 겹침 0~10개 → 공범 가능성. 인덱스 = 겹침 개수. */
+export const ACCOMPLICE_PCT = [0, 10, 20, 28, 38, 48, 57, 67, 76, 86, 95];
+
+/** ACCOMPLICE_PCT 와 인덱스 1:1. 숫자를 TTS 가 틀리게 읽지 않도록 풀어쓴다. */
 export const ACCOMPLICE_PCT_TTS: Record<BotLocale, string>[] = [
   { ko: '영 퍼센트', ja: 'ゼロパーセント', en: 'zero percent' },
-  { ko: '팔 퍼센트', ja: 'はちパーセント', en: 'eight percent' },
-  { ko: '십육 퍼센트', ja: 'じゅうろくパーセント', en: 'sixteen percent' },
-  { ko: '이십사 퍼센트', ja: 'にじゅうよんパーセント', en: 'twenty-four percent' },
-  { ko: '삼십이 퍼센트', ja: 'さんじゅうにパーセント', en: 'thirty-two percent' },
-  { ko: '사십 퍼센트', ja: 'よんじゅうパーセント', en: 'forty percent' },
+  { ko: '십 퍼센트', ja: 'じゅっパーセント', en: 'ten percent' },
+  { ko: '이십 퍼센트', ja: 'にじゅっパーセント', en: 'twenty percent' },
+  { ko: '이십팔 퍼센트', ja: 'にじゅうはちパーセント', en: 'twenty-eight percent' },
+  { ko: '삼십팔 퍼센트', ja: 'さんじゅうはちパーセント', en: 'thirty-eight percent' },
   { ko: '사십팔 퍼센트', ja: 'よんじゅうはちパーセント', en: 'forty-eight percent' },
-  { ko: '오십육 퍼센트', ja: 'ごじゅうろくパーセント', en: 'fifty-six percent' },
-  { ko: '육십사 퍼센트', ja: 'ろくじゅうよんパーセント', en: 'sixty-four percent' },
-  { ko: '칠십이 퍼센트', ja: 'ななじゅうにパーセント', en: 'seventy-two percent' },
-  { ko: '팔십 퍼센트', ja: 'はちじゅうパーセント', en: 'eighty percent' },
+  { ko: '오십칠 퍼센트', ja: 'ごじゅうななパーセント', en: 'fifty-seven percent' },
+  { ko: '육십칠 퍼센트', ja: 'ろくじゅうななパーセント', en: 'sixty-seven percent' },
+  { ko: '칠십육 퍼센트', ja: 'ななじゅうろくパーセント', en: 'seventy-six percent' },
+  { ko: '팔십육 퍼센트', ja: 'はちじゅうろくパーセント', en: 'eighty-six percent' },
+  { ko: '구십오 퍼센트', ja: 'きゅうじゅうごパーセント', en: 'ninety-five percent' },
 ];
 
-/** 겹침 0 / 1~4 / 5~10 세 구간. */
+/** 겹침 0 / 1~3 / 4~7 / 8~10 네 구간. 위에서부터 먼저 맞는 구간이 선택된다. */
 export const ACCOMPLICE_NOTES: {
   minOverlap: number;
   text: Record<BotLocale, string>;
 }[] = [
   {
-    minOverlap: 5,
+    minOverlap: 8,
+    text: {
+      ko: '우리 영혼의 단짝인가봐!',
+      ja: 'ボクたち、ソウルメイトなのかも！',
+      en: 'I think we might be soulmates!',
+    },
+  },
+  {
+    minOverlap: 4,
     text: {
       ko: '관심사가 이렇게 비슷하다니…!',
       ja: 'こんなに趣味が似てるなんて…！',
@@ -218,7 +231,7 @@ ${v.pct}％（${v.note}）
 キミも haru で、ホンモノの誰かを見つけて。`,
 
   en: (v) => `Wah! You found me...!
-I'm Hachiware. I've been wanted for Unauthorized Street Performance...
+I'm Hachiware. I'm wanted for Unauthorized Busking...
 
 Whoever catches me has to file a report with Armor-san.
 I'll fill it out for you!
@@ -256,7 +269,7 @@ export const CARD_TTS: Record<
 はい、完了！ 提出はおねがい。ごめん、ボクはまた逃げるね！
 キミも ハル で、ホンモノの誰かを見つけて。`,
 
-  en: (v) => `Wah! You found me! I'm Hachiware. I've been wanted for Unauthorized Street Performance.
+  en: (v) => `Wah! You found me! I'm Hachiware. I'm wanted for Unauthorized Busking.
 Whoever catches me has to file a report with Armor-san. I'll fill it out for you!
 Finder, ${v.name}. Qualification, ${v.licenseTts}. Title, ${v.title}.
 Accomplice probability, ${v.pctTts}. ${v.note}
@@ -265,43 +278,23 @@ Now go find someone real on haru.`,
 };
 
 // ── 메시지 2: 응모 안내 (TTS 안 함) ─────────────────────────────────
-// 해시태그와 계정 핸들은 세 로케일 모두 원문 고정 — 번역하면 집계가 갈라진다.
-//
-// 두 토큰은 반드시 각자의 줄에 단독으로 둔다. 문장 안에 섞으면 말풍선 폭에 따라
-// 토큰 중간에서 줄바꿈이 일어나 읽기도 복사하기도 어려워진다. 보이지 않는
-// word-joiner(U+2060) 를 끼워 넣는 방법은 쓰지 않는다 — 사용자가 복사할 때 그
-// 문자까지 함께 붙여넣어져 X 에서 해시태그/멘션이 인식되지 않을 수 있다.
-export const HASHTAG = '#ハチワレ見つけた';
-export const X_HANDLE = '@haru_voice_app';
-
+// 참여 방법(팔로우·해시태그·멘션)은 여기 적지 않고 X 이벤트 게시글에만 둔다 —
+// 규칙이 바뀔 때마다 앱 배포가 필요해지는 걸 피하고, 말풍선은 링크 하나로 짧게.
+// 링크는 마지막 줄에 단독으로 둔다 (FE 가 URL 만 잘라 탭 가능하게 렌더한다).
+// 링크 env(CAMPAIGN_POST_URL_*)가 비어 있으면 안내 줄 자체를 생략한다.
 export const ENTRY_GUIDE: Record<BotLocale, (link: string) => string> = {
-  ko: (link) => `① X에서 아래 계정 팔로우하기
-${X_HANDLE}
+  ko: (link) =>
+    `이 화면을 캡처해서 X에 올리면 선물이 있대!${
+      link ? `\n참여 방법은 여기서 확인해줘\n${link}` : ''
+    }`,
 
-② 이 화면 스크린샷을 X에 올리기
-글에 아래 두 개를 꼭 넣어줘!
-${HASHTAG}
-${X_HANDLE}
+  ja: (link) =>
+    `この画面のスクショをXに投稿するとプレゼントがあるんだって！${
+      link ? `\n参加方法はこちらでチェックしてね\n${link}` : ''
+    }`,
 
-추첨으로 선물 있어~${link ? `\n\n자세히 보기 → ${link}` : ''}`,
-
-  ja: (link) => `① Xで下のアカウントをフォロー
-${X_HANDLE}
-
-② この画面のスクショをXに投稿
-投稿に下の2つを必ず入れてね！
-${HASHTAG}
-${X_HANDLE}
-
-抽選でプレゼントあるよ〜${link ? `\n\nくわしくはこちら → ${link}` : ''}`,
-
-  en: (link) => `① Follow this account on X
-${X_HANDLE}
-
-② Post a screenshot of this screen on X
-Include both of these in your post!
-${HASHTAG}
-${X_HANDLE}
-
-Prizes by lottery~${link ? `\n\nDetails → ${link}` : ''}`,
+  en: (link) =>
+    `Post a screenshot of this screen on X and there are prizes!${
+      link ? `\nCheck how to join here\n${link}` : ''
+    }`,
 };

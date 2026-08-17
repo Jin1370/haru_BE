@@ -87,6 +87,31 @@ async function loadPhotoSnapshot(
 // 호환성 유지: photos 배열 (Profile.photos) 은 status='ready' 인 converted_url
 // 만 position ASC 순으로 노출. 변환 미완료 사진은 photos 배열에 미포함 → 디스커버
 // 노출 조건 (photos.length > 0) 자연 정합.
+// 닉네임 사용 가능 여부. 가입 wizard 1단계는 BE 프로필 INSERT 를 사진 단계까지
+// 미루므로(setup/photos.tsx), 이 조회가 없으면 중복 닉네임은 사진을 다 고른 뒤에야
+// 409 로 드러난다. 최종 판정은 어디까지나 mig 053 의 UNIQUE 인덱스(→ PUT /me 409).
+router.get('/name-check', async (req: AuthRequest, res: Response) => {
+  const name = String(req.query.name ?? '').trim();
+  if (!name || name.length > 50) {
+    res.json({ available: false });
+    return;
+  }
+  // ilike 는 패턴이므로 사용자 입력의 % _ \ 를 이스케이프해 와일드카드화를 막는다.
+  const pattern = name.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id')
+    .ilike('display_name', pattern)
+    .neq('id', req.userId!)
+    .limit(1);
+  if (error) {
+    console.error('[profile.name_check_failed]', error.message);
+    res.status(500).json({ error: error.message });
+    return;
+  }
+  res.json({ available: (data ?? []).length === 0 });
+});
+
 router.get('/me', async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabase
     .from('profiles')
@@ -294,6 +319,13 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
     .single();
 
   if (error) {
+    // mig 053: lower(display_name) UNIQUE. 닉네임 중복은 well-formed 이지만 정책상
+    // 거부되는 케이스이므로 400 이 아니라 409 + code 로 응답 (FE 가 해당 필드에
+    // 인라인 에러를 붙일 수 있게).
+    if (error.code === '23505') {
+      res.status(409).json({ error: 'Nickname already taken', code: 'display_name_taken' });
+      return;
+    }
     res.status(400).json({ error: error.message });
     return;
   }

@@ -456,6 +456,25 @@ export const swaggerDocument = {
     },
 
     // ── Profile ──
+    '/api/profile/name-check': {
+      get: {
+        tags: ['Profile'],
+        summary: '닉네임 사용 가능 여부 (대소문자 무시, 본인 제외)',
+        parameters: [
+          { name: 'name', in: 'query', required: true, schema: { type: 'string', maxLength: 50 } },
+        ],
+        responses: {
+          200: {
+            description: '결과',
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { available: { type: 'boolean' } } },
+              },
+            },
+          },
+        },
+      },
+    },
     '/api/profile/me': {
       get: {
         tags: ['Profile'],
@@ -492,6 +511,20 @@ export const swaggerDocument = {
           200: { description: '성공', content: { 'application/json': { schema: { $ref: '#/components/schemas/Profile' } } } },
           400: { description: '유효성 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
+          409: {
+            description: '닉네임 중복 (mig 053, code=display_name_taken)',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', example: 'Nickname already taken' },
+                    code: { type: 'string', enum: ['display_name_taken'] },
+                  },
+                },
+              },
+            },
+          },
           // 422 케이스 2종 (well-formed 이나 정책상 거부):
           //  - code=underage: 만 18세 미만 (LAUNCH_CHECKLIST #2)
           //  - code=message_blocked: voice_intro 모더레이션 차단

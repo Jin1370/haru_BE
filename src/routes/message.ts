@@ -670,12 +670,27 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
     return;
   }
 
-  // 3) 재생성 가능 상태 검증 — audio_purged_at IS NOT NULL 인 경우만 허용.
-  // 텍스트 전용 메시지 / no-speakable-content / failed 메시지에 대한 부정 호출
-  // 차단. audio_status='ready' 도 함께 체크해 sweep 이 잘못된 상태에 마킹한
-  // 행이 있어도 안전.
-  if (msg.audio_status !== 'ready' || !msg.audio_purged_at) {
+  // 3) 재생성 가능 상태 검증 — 두 경로만 허용한다.
+  //   (a) 30 일 폐기 (audio_status='ready' AND audio_purged_at NOT NULL)
+  //       — audio-expiry sprint 의 본래 목적. 매치 참여자 누구나 호출 가능
+  //         (수신자가 옛 메시지를 다시 듣는 동선).
+  //   (b) 파이프라인 실패 (audio_status='failed') — **송신자 본인만**.
+  //       수신자에겐 GET/Realtime 필터에서 아예 안 보이는 메시지라, 열어두면
+  //       남의 실패 row 를 찔러 남의 ElevenLabs 비용을 태우는 경로가 생긴다.
+  //
+  // 텍스트 전용 정상 메시지 (audio_url=null + 'ready' + 폐기 아님 — TTS 스킵
+  // 정당 경로, 캠페인봇 응모 안내 메시지) 는 양쪽 다 해당 없어 409 유지.
+  // ⚠️ 조건을 "audio_url 이 null 이면 허용" 으로 넓히면 안 된다 — 봇 안내문은
+  // 읽을 내용이 멀쩡해서 아래 hasSpeakableContent 검사도 통과, 안내 URL 이
+  // 그대로 음성 합성된다. ready 쪽 조건은 건드리지 말고 failed 만 OR 로 붙일 것.
+  const isPurged = msg.audio_status === 'ready' && !!msg.audio_purged_at;
+  const isFailed = msg.audio_status === 'failed';
+  if (!isPurged && !isFailed) {
     res.status(409).json({ error: 'Message audio is not in a regeneratable state' });
+    return;
+  }
+  if (isFailed && msg.sender_id !== req.userId) {
+    res.status(403).json({ error: 'Only the sender can retry a failed message' });
     return;
   }
 
@@ -686,7 +701,7 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
   // '언니'/'누나'가 뒤바뀌어 표시 텍스트와 어긋난다.
   const recipientId = msg.sender_id === match.user1_id ? match.user2_id : match.user1_id;
   const [senderResult, recipientResult] = await Promise.all([
-    supabase.from('profiles').select('elevenlabs_voice_id, gender, birth_date').eq('id', msg.sender_id).single(),
+    supabase.from('profiles').select('elevenlabs_voice_id, gender, birth_date, display_name').eq('id', msg.sender_id).single(),
     supabase.from('profiles').select('gender, birth_date').eq('id', recipientId).single(),
   ]);
   const sender = senderResult.data;
@@ -730,29 +745,43 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
       ),
     });
 
+    // 실패 복구 경로에서 채울 번역문 — 최초 파이프라인이 번역 단계에서 죽었으면
+    // translated_text 가 null 로 남아 있다. 판정 규칙은 최초 INSERT 와 동일
+    // (identity 면 null 이라 FE 번역 인디케이터가 안 뜬다).
+    const displayText = replaceTagsForDisplay(translation, recipientLang);
+    const recoveredTranslatedText =
+      senderLang === recipientLang && displayText === originalText.trim() ? null : displayText;
+
     // [laughs] 만 audible — [sad] 등은 TTS 에서 제거 (사용자 정책).
     const ttsText = stripNonAudibleTags(translation);
+    let audioUrl: string | null = null;
     if (!hasSpeakableContent(ttsText)) {
-      // 원래도 TTS 가 스킵됐어야 할 케이스 — 재합성 불가. 일반적으로 도달 안 함
-      // (sweep 이 audio_url NOT NULL 인 row 만 노렸기 때문). 방어적 분기.
-      res.status(409).json({ error: 'Message has no speakable content' });
-      return;
+      if (!isPurged) {
+        // 실패 복구 경로 — 번역 단계에서 죽은 'ㅠㅠ' 류. 음성은 원래도 안 나오는
+        // 게 맞으므로 audio_url=null 인 채 'ready' 로 살려 수신자에게 노출시킨다.
+        // 여기서 409 로 끝내면 그 메시지는 영영 아무에게도 안 보인다.
+      } else {
+        // 폐기 재합성 경로 — 원래도 TTS 가 스킵됐어야 할 케이스라 재합성 불가.
+        // 일반적으로 도달 안 함 (sweep 이 audio_url NOT NULL 인 row 만 노림).
+        res.status(409).json({ error: 'Message has no speakable content' });
+        return;
+      }
+    } else {
+      const textToSynthesize = ensureSpeakableForTTS(ttsText);
+      const audio = await synthesizeSpeech(
+        textToSynthesize,
+        voiceId,
+        emotion,
+        senderGender,
+        recipientLang,
+      );
+
+      // CDN 캐시 회피용 versioned path. 원본 `{messageId}.mp3` 는 sweep 이 이미
+      // 삭제했고, 같은 path 에 upsert 하면 일부 클라이언트가 옛 404 응답을
+      // 캐시한 경우 새 파일을 못 가져온다.
+      const versionedPath = `${messageId}_v${Date.now()}.mp3`;
+      audioUrl = await uploadFile('voice-messages', versionedPath, audio, 'audio/mpeg');
     }
-
-    const textToSynthesize = ensureSpeakableForTTS(ttsText);
-    const audio = await synthesizeSpeech(
-      textToSynthesize,
-      voiceId,
-      emotion,
-      senderGender,
-      recipientLang,
-    );
-
-    // CDN 캐시 회피용 versioned path. 원본 `{messageId}.mp3` 는 sweep 이 이미
-    // 삭제했고, 같은 path 에 upsert 하면 일부 클라이언트가 옛 404 응답을
-    // 캐시한 경우 새 파일을 못 가져온다.
-    const versionedPath = `${messageId}_v${Date.now()}.mp3`;
-    const audioUrl = await uploadFile('voice-messages', versionedPath, audio, 'audio/mpeg');
 
     // 6) DB UPDATE — audio_url 새 값 + audio_purged_at NULL + audio_refreshed_at
     // now(). audio_status 는 'ready' 유지 (재합성 자체가 ready 상태에서만 가능).
@@ -762,6 +791,10 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
         audio_url: audioUrl,
         audio_purged_at: null,
         audio_refreshed_at: new Date().toISOString(),
+        // 실패 복구 경로만 — 'failed' → 'ready' 로 올려야 수신자 GET/Realtime
+        // 필터(sender_id=viewer OR audio_status='ready')를 통과한다. 최초
+        // 파이프라인이 못 채운 번역문도 여기서 채운다.
+        ...(isFailed ? { audio_status: 'ready', translated_text: recoveredTranslatedText } : {}),
       })
       .eq('id', messageId)
       .select()
@@ -771,9 +804,21 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
       // Storage 에는 객체가 올라갔는데 DB 만 실패 — 다음 sweep 사이클에서 orphan
       // 정리 (Storage 객체는 audio_url 컬럼에 매핑되지 않은 상태로 잔존하므로
       // sweep 이 못 잡음). 운영 신호로 노출.
-      console.error(`[regenAudio] DB update failed messageId=${messageId} path=${versionedPath}:`, updateError?.message);
+      console.error(`[regenAudio] DB update failed messageId=${messageId} url=${audioUrl}:`, updateError?.message);
       res.status(500).json({ error: updateError?.message ?? 'Audio regenerate update failed' });
       return;
+    }
+
+    if (isFailed) {
+      // 이 UPDATE 로 메시지가 수신자에게 **처음** 보이게 된다. 최초 파이프라인은
+      // 'failed' 라 푸시를 안 보냈으므로(거짓 신호 차단) 여기서 보낸다. 안 보내면
+      // 조용히 배달돼 수신자가 영영 못 볼 수 있다.
+      sendPushToUser(recipientId, {
+        type: 'message',
+        match_id: matchId as string,
+        sender_id: msg.sender_id as string,
+        sender_name: (sender?.display_name as string | null) ?? '',
+      }).catch((err) => console.error('[sendPushToUser regen]', err));
     }
 
     res.json(updated);
@@ -909,10 +954,12 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
       tags: { pipeline: 'message', stage: 'translate_tts' },
       extra: { messageId, matchId, senderLang, recipientLang },
     });
-    // 파이프라인 실패 → 텍스트만 전송 (audio_url=null, audio_status='failed').
-    // 송신자는 본인 메시지가 'failed' 인디케이터로 뜨고, 같은 텍스트를 다시
-    // 입력해 재송신할 수 있다. mid-session UPDATE 가 없으므로 expo-audio
-    // resource 회수 트리거도 발생 안 함.
+    // 파이프라인 실패 → 텍스트만 저장 (audio_url=null, audio_status='failed').
+    // 이 상태의 메시지는 수신자에게 아예 안 보인다 (GET/Realtime 필터).
+    // 송신자 화면에는 ChatBubble 이 'failed' 인디케이터 + 재시도를 띄우고, 탭하면
+    // 재합성 라우트(POST .../messages/:id/audio)가 파이프라인을 다시 돌려
+    // 'ready' 로 올린다. (옛 주석은 "같은 텍스트를 다시 입력해 재송신" 이라고
+    // 적혀 있었으나 그 인디케이터 자체가 구현돼 있지 않았다 — 2026-08-21 수정.)
     //
     // idempotent-send: 실패 INSERT 도 ON CONFLICT (id) DO NOTHING. 크로스-인스턴스
     // 경쟁으로 이미 'ready' 로 들어간 row 를 'failed' 로 덮어쓰지 않도록 —

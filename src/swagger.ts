@@ -1006,11 +1006,16 @@ export const swaggerDocument = {
     '/api/matches/{matchId}/messages/{messageId}/audio': {
       post: {
         tags: ['Message'],
-        summary: '폐기된 음성 메시지 재합성 (on-demand)',
+        summary: '음성 메시지 재합성 (폐기 재청취 / 실패 복구)',
         description:
-          'audio-expiry sprint: sweep 이 청취 + 30일 경과 후 폐기한 음성을 ElevenLabs 로 재합성. ' +
-          '매치 멤버 누구나 호출 가능 (송신자/수신자 본인 화면에서 재청취 가능해야 함). ' +
-          'audio_purged_at IS NOT NULL 인 ready 메시지만 대상 — 그 외 상태는 409. ' +
+          '두 경로만 허용한다. (a) **폐기 재청취** — sweep 이 청취 + 30일 경과 후 폐기한 음성 ' +
+          '(audio_status=ready AND audio_purged_at NOT NULL). 매치 멤버 누구나 호출 가능. ' +
+          '(b) **실패 복구** — 번역/TTS 파이프라인이 실패한 메시지 (audio_status=failed). ' +
+          '**송신자 본인만** 호출 가능 (수신자에겐 보이지도 않는 row 라, 열어두면 남의 ' +
+          'ElevenLabs 비용을 태우는 경로가 된다 → 403). 성공 시 audio_status 를 ready 로 올리고 ' +
+          '파이프라인이 못 채운 translated_text 를 채운 뒤 수신자에게 푸시를 보낸다. ' +
+          '텍스트 전용 정상 메시지 (ready + audio_url null + 폐기 아님 — TTS 스킵 정당 경로, ' +
+          '캠페인봇 안내 메시지) 는 양쪽 다 해당 없어 409. ' +
           '재합성된 audio 는 versioned path (`{messageId}_v{ts}.mp3`) 로 업로드해 CDN 캐시 회피. ' +
           'audio_purged_at 은 NULL 로 reset, audio_refreshed_at 은 now() 로 set.',
         parameters: [
@@ -1019,9 +1024,9 @@ export const swaggerDocument = {
         ],
         responses: {
           200: { description: '재합성된 Message row (audio_url 갱신)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
-          403: { description: '매치 비참여자 또는 freeze 된 사용자', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '매치 비참여자 / freeze 된 사용자 / failed 메시지를 송신자 아닌 사람이 호출', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           404: { description: '메시지 없음 또는 매치 불일치', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          409: { description: '재합성 불가 상태 (이미 활성 / 텍스트 전용 / no-speakable-content)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          409: { description: '재합성 불가 상태 (이미 활성 / 텍스트 전용 / 폐기분의 no-speakable-content)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           410: { description: '송신자 voice clone 소실 (탈퇴 anonymize / 미보유)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           502: { description: 'ElevenLabs / Gemini / Storage 외부 호출 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },

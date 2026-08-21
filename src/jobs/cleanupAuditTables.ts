@@ -31,6 +31,7 @@ import { supabase } from '../config/supabase';
 
 const RETENTION_DAYS = 365;
 const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 시간
+const RETRY_DELAY_MS = 3000; // 일시적 네트워크 실패 재시도 간격
 const BOOT_DELAY_MS = 90 * 1000; // 부팅 후 90 초 — audio-expiry sweep (60 초) 과 어긋나게 배치
 
 function cutoffIso(daysAgo: number): string {
@@ -59,15 +60,24 @@ async function sweepAuditTable(
   // silent-success 룰 (CLAUDE.md): 외부 의존성 호출 결과의 error 를
   // destructure 후 console.error 로 가시화. PGRST205 같은 테이블 부재
   // 에러도 동일 경로 — silent skip 금지.
-  const result = await supabase
-    .from(table)
-    .delete({ count: 'exact' })
-    .lt(timeColumn, cutoff);
-  if (result.error) {
-    console.error(`[audit-cleanup] ${table} delete failed`, result.error.message);
-    return { deleted: 0, error: true };
+  //
+  // 단, cutoff 기준 DELETE 는 멱등이라 일시적 네트워크 실패 (`TypeError: fetch
+  // failed` — Fly ↔ Supabase 순간 끊김) 는 1 회 재시도한다. 첫 실패부터 Sentry
+  // 이벤트로 승격시키면 하루 한 번 도는 sweep 의 네트워크 딸꾹질이 그대로
+  // 알림이 된다 (2026-08-20 HARU-BACKEND-H). 두 번째도 실패하면 그때 가시화.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = await supabase
+      .from(table)
+      .delete({ count: 'exact' })
+      .lt(timeColumn, cutoff);
+    if (!result.error) return { deleted: result.count ?? 0, error: false };
+    if (attempt === 1) {
+      console.error(`[audit-cleanup] ${table} delete failed`, result.error.message);
+      return { deleted: 0, error: true };
+    }
+    await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
   }
-  return { deleted: result.count ?? 0, error: false };
+  return { deleted: 0, error: true }; // 도달 불가 (루프가 항상 return)
 }
 
 export async function sweepAuditTables(): Promise<{

@@ -5,6 +5,7 @@ import {
 } from "@google-cloud/vertexai";
 import { env } from "../config/env";
 import { sanitizeAudioTags } from "../utils/textNormalization";
+import { retryOnce } from "../utils/retry";
 import type { VoiceIntroSlotLanguage } from "../types";
 
 // Shared STEP 1 instruction block (emotion marker → audio tag). Both the message
@@ -215,9 +216,15 @@ ${describeParty("Speaker (who wrote this message)", params.speaker)}
 ${describeParty("Addressee (who reads it)", params.addressee)}
 ${describeContext(params.context)}Text to translate: ${JSON.stringify(params.text)}`;
 
-    const result = await model.generateContent({
-        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-    });
+    // 순단성 실패만 1회 재시도. 아래 safety-block / JSON 파싱 실패는 다시 해도
+    // 같은 결과라 재시도 대상에서 제외 (호출 자체가 throw 한 경우만 감싼다).
+    const result = await retryOnce(
+        () =>
+            model.generateContent({
+                contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+            }),
+        "translateMessage",
+    );
 
     const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!raw) {

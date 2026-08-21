@@ -4,6 +4,7 @@ import { SILENCE_TAIL } from "../assets/silenceTail";
 import { env } from "../config/env";
 import { Emotion } from "../types";
 import { readKoreanNumbersForTTS } from "../utils/textNormalization";
+import { retryOnce } from "../utils/retry";
 
 const client = new ElevenLabsClient({ apiKey: env.elevenlabs.apiKey });
 
@@ -92,22 +93,26 @@ export async function synthesizeSpeech(
     const hasTerminalPunctuation = /[.!?…。！？]$/.test(trimmedText);
     const paddedText = hasTerminalPunctuation ? trimmedText : `${trimmedText}…`;
     const prefixed = `${personaTag}${accentTag}${emotionTag}${paddedText}`;
-    const audioStream = await client.textToSpeech.convert(voiceId, {
-        text: prefixed,
-        modelId: "eleven_v3",
-        // v3 최선 프리셋 (데이팅 클론 TTS, 차별점 2):
-        // v3 는 실질적으로 stability 만 honor (대시보드 UI / Smartbox·Scenario
-        // 가이드 / 실증 테스트로 확인). similarityBoost / style / speed /
-        // useSpeakerBoost 는 API 가 받지만 모델이 무시. expressiveness 와 정체성
-        // 제어는 voiceSettings 가 아닌 (1) stability 프리셋 (2) audio tag
-        // (persona/emotion) (3) 텍스트 punctuation 으로 한다.
-        // - stability 1.0: Robust 프리셋. take 간 prosody 변동 최소화, 최대 안정.
-        //   참고: 일부 커뮤니티 글이 "Robust 는 audio tag 무시" 라고 주장하지만
-        //   실증 테스트상 tag 가 honor 됨 (효과가 Natural 0.5 보다 약할 수는
-        //   있음). 대안: 0.5 Natural (균형), 0.0 Creative (최대 expressiveness).
-        voiceSettings: { stability: 1.0 },
-    });
-    const speech = await buffer(audioStream);
+    // 순단성 실패 1회 재시도. convert 와 stream 소비를 한 덩어리로 감싼다 —
+    // stream 이 중간에 끊기면 새 convert 부터 다시 해야 하기 때문.
+    const speech = await retryOnce(async () => {
+        const audioStream = await client.textToSpeech.convert(voiceId, {
+            text: prefixed,
+            modelId: "eleven_v3",
+            // v3 최선 프리셋 (데이팅 클론 TTS, 차별점 2):
+            // v3 는 실질적으로 stability 만 honor (대시보드 UI / Smartbox·Scenario
+            // 가이드 / 실증 테스트로 확인). similarityBoost / style / speed /
+            // useSpeakerBoost 는 API 가 받지만 모델이 무시. expressiveness 와 정체성
+            // 제어는 voiceSettings 가 아닌 (1) stability 프리셋 (2) audio tag
+            // (persona/emotion) (3) 텍스트 punctuation 으로 한다.
+            // - stability 1.0: Robust 프리셋. take 간 prosody 변동 최소화, 최대 안정.
+            //   참고: 일부 커뮤니티 글이 "Robust 는 audio tag 무시" 라고 주장하지만
+            //   실증 테스트상 tag 가 honor 됨 (효과가 Natural 0.5 보다 약할 수는
+            //   있음). 대안: 0.5 Natural (균형), 0.0 Creative (최대 expressiveness).
+            voiceSettings: { stability: 1.0 },
+        });
+        return buffer(audioStream);
+    }, "synthesizeSpeech");
     // eleven_v3 는 합성 stream 마지막 ~0.2초 trailing silence 없이 잘라내는
     // 경향이 있음 (모델 동작, stability 프리셋 무관). 텍스트 종결 punctuation
     // padding (paddedText) 으로도 완전히 해결되지 않아 출력 buffer 뒤에

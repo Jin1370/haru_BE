@@ -30,6 +30,17 @@ async function loadDevSeedInfo(
   return info;
 }
 
+// Supabase Auth 에 **도달 자체를 못한** 실패인지 판정. auth-js 는 이 경우
+// AuthRetryableFetchError (status 0) 를 돌려준다 — 토큰이 무효한 401/403 과는
+// 성격이 정반대라 응답 코드를 갈라야 한다. isAuthRetryableFetchError 는 런타임에
+// 존재하지만 supabase-js 타입 선언에 없어 형태로 판정한다.
+export function isTransientAuthError(
+  error: { name?: string; status?: number } | null | undefined,
+): boolean {
+  if (!error) return false;
+  return error.name === 'AuthRetryableFetchError' || error.status === 0;
+}
+
 export async function authMiddleware(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   // ===== 어드민 임퍼소네이션 경로 (dev/QA 전용) =====
   //
@@ -79,6 +90,23 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
   const token = authHeader.slice(7);
 
   const { data, error } = await supabase.auth.getUser(token);
+
+  // "토큰이 무효하다" 와 "지금 확인을 못 했다" 를 구분한다.
+  //
+  // supabase-js 는 Supabase Auth 에 도달조차 못한 경우(네트워크 순단, DNS,
+  // HeadersTimeoutError)도 error 로 돌려주는데, 이걸 401 로 뭉뚱그리면 FE 가
+  // "세션 만료" 로 해석해 refresh → (같은 순단이라 refresh 도 실패) →
+  // onSessionExpired → **실유저 로그아웃** 까지 간다. 몇 초짜리 네트워크
+  // 딸꾹질이 로그아웃 사고가 되는 셈 (2026-08-21 HARU-BACKEND-K:
+  // GET /api/discover 의 auth.getUser 가 HeadersTimeoutError).
+  //
+  // 도달 실패는 503 — FE 의 401 분기를 안 타므로 세션이 유지되고, 사용자는
+  // 화면을 다시 당기면 된다.
+  if (isTransientAuthError(error)) {
+    console.error('[Auth] Auth service unreachable:', error?.message);
+    res.status(503).json({ error: 'Auth service temporarily unavailable' });
+    return;
+  }
 
   if (error || !data.user) {
     // 만료/무효 토큰은 클라이언트 정상 상태 (FE 가 401 → refresh → 재시도) —

@@ -280,21 +280,27 @@ Now go find someone real on haru.`,
 // ── 메시지 2: 응모 안내 (TTS 안 함) ─────────────────────────────────
 // 참여 방법(팔로우·해시태그·멘션)은 여기 적지 않고 X 이벤트 게시글에만 둔다 —
 // 규칙이 바뀔 때마다 앱 배포가 필요해지는 걸 피하고, 말풍선은 링크 하나로 짧게.
-// 링크는 마지막 줄에 단독으로 둔다 (FE 가 URL 만 잘라 탭 가능하게 렌더한다).
-// 링크 env(CAMPAIGN_POST_URL_*)가 비어 있으면 안내 줄 자체를 생략한다.
+// FE(ChatBubble.renderWithLinks)가 본문 어디에 있든 http URL 을 잘라 탭 가능하게
+// 렌더하므로 `X - <url>` 처럼 앞에 라벨을 붙여도 된다.
+// X 링크 env(CAMPAIGN_POST_URL_*)가 비어 있으면 그 줄만 생략한다.
+
+/** 인스타 이벤트 게시물 — 로케일 공통 1개라 env 로 빼지 않는다 (변경 시 재배포). */
+export const CAMPAIGN_IG_URL =
+  'https://www.instagram.com/p/DcdSXjBEZnT/?utm_source=ig_web_copy_link&igsi=MzRlODBiNWFlZA==';
+
 export const ENTRY_GUIDE: Record<BotLocale, (link: string) => string> = {
   ko: (link) =>
-    `이 화면을 캡처해서 X에 올리면 선물이 있대!${
-      link ? `\n참여 방법은 여기서 확인해줘\n${link}` : ''
-    }`,
+    `하치와레를 발견한 사람에겐 선물이 있어!
+참여 방법은 여기서 확인해줘${link ? `\nX - ${link}` : ''}
+인스타 - ${CAMPAIGN_IG_URL}`,
 
   ja: (link) =>
-    `この画面のスクショをXに投稿するとプレゼントがあるんだって！${
-      link ? `\n参加方法はこちらでチェックしてね\n${link}` : ''
-    }`,
+    `ハチワレを見つけた人にはプレゼントがあるんだって！
+参加方法はこちらでチェックしてね${link ? `\nX - ${link}` : ''}
+インスタ - ${CAMPAIGN_IG_URL}`,
 
   en: (link) =>
-    `Post a screenshot of this screen on X and there are prizes!${
-      link ? `\nCheck how to join here\n${link}` : ''
-    }`,
+    `Whoever finds Hachiware gets a prize!
+Check how to join here${link ? `\nX - ${link}` : ''}
+Instagram - ${CAMPAIGN_IG_URL}`,
 };

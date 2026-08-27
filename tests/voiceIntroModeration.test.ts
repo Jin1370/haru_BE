@@ -4,7 +4,7 @@
 //   A. PUT /api/profile/me 의 voice_intro 변경 분기에 메시지와 동일한 모더레이션 게이트
 //      (사전 키워드 차단 + OpenAI Moderation 2차 검수) 적용. preset 경로는 우회 안전.
 //   B. services/voiceIntro.ts 의 generateVoiceIntroAudios 가 audio tag pipeline 적용 —
-//      작성자 입력 원문을 raw 로 Gemini 에 넘겨 STEP 1(감정 마커 → [laughs]/[sad]) +
+//      작성자 입력 원문을 raw 로 Gemini 에 넘겨 STEP 1(감정 마커 → [soft laugh]/[sad]) +
 //      STEP 2(각 언어 렌더, 작성자 슬롯 포함) 를 1회 호출로 처리. Gemini 반환값이
 //      (a) ElevenLabs TTS 입력 (b) replaceTagsForDisplay 거친 display 텍스트로 저장.
 //
@@ -130,55 +130,55 @@ describe('voiceIntro service — audio tag pipeline (non-preset, Gemini 단독 �
     });
   });
 
-  it('작성자 슬롯 DB 저장 = display 텍스트 (Gemini 태깅 → 슬랭 복원, raw [laughs] 미저장)', async () => {
-    // 원문 "안녕 ㅋㅋㅋ" → Gemini(ko 슬롯) "안녕 [laughs]" → display(ko) → "안녕 ㅋㅋㅋ"
+  it('작성자 슬롯 DB 저장 = display 텍스트 (Gemini 태깅 → 슬랭 복원, raw [soft laugh] 미저장)', async () => {
+    // 원문 "안녕 ㅋㅋㅋ" → Gemini(ko 슬롯) "안녕 [soft laugh]" → display(ko) → "안녕 ㅋㅋㅋ"
     hoisted.translateVoiceIntroMock.mockResolvedValue({
       translations: {
-        ko: '안녕 [laughs]',
-        ja: 'こんにちは [laughs]',
-        en: 'hello [laughs]',
+        ko: '안녕 [soft laugh]',
+        ja: 'こんにちは [soft laugh]',
+        en: 'hello [soft laugh]',
       },
       detectedSourceLanguage: 'ko',
     });
     await generateVoiceIntroAudios(USER_ID, '안녕 ㅋㅋㅋ', VOICE_ID, 'ko');
     const profile = hoisted.supabaseState.profile;
     expect(profile.voice_intro_translations.ko).toBe('안녕 ㅋㅋㅋ');
-    expect(profile.voice_intro_translations.ko).not.toContain('[laughs]');
+    expect(profile.voice_intro_translations.ko).not.toContain('[soft laugh]');
   });
 
-  it('번역 슬롯 DB 저장 = replaceTagsForDisplay 거친 텍스트 (raw [laughs] 미저장)', async () => {
+  it('번역 슬롯 DB 저장 = replaceTagsForDisplay 거친 텍스트 (raw [soft laugh] 미저장)', async () => {
     hoisted.translateVoiceIntroMock.mockResolvedValue({
       translations: {
-        ko: '안녕 [laughs]',
-        ja: 'こんにちは [laughs]',
-        en: 'hello [laughs]',
+        ko: '안녕 [soft laugh]',
+        ja: 'こんにちは [soft laugh]',
+        en: 'hello [soft laugh]',
       },
       detectedSourceLanguage: 'ko',
     });
     await generateVoiceIntroAudios(USER_ID, '안녕 ㅋㅋㅋ', VOICE_ID, 'ko');
     const profile = hoisted.supabaseState.profile;
-    // ja 슬롯: [laughs] → www, en 슬롯: [laughs] → lol
+    // ja 슬롯: [soft laugh] → www, en 슬롯: [soft laugh] → lol
     expect(profile.voice_intro_translations.ja).toBe('こんにちは www');
     expect(profile.voice_intro_translations.en).toBe('hello lol');
-    expect(profile.voice_intro_translations.ja).not.toContain('[laughs]');
-    expect(profile.voice_intro_translations.en).not.toContain('[laughs]');
+    expect(profile.voice_intro_translations.ja).not.toContain('[soft laugh]');
+    expect(profile.voice_intro_translations.en).not.toContain('[soft laugh]');
   });
 
   it('TTS 입력은 audio tag 포함 (eleven_v3 효과음 합성용)', async () => {
     hoisted.translateVoiceIntroMock.mockResolvedValue({
       translations: {
-        ko: '안녕 [laughs]',
-        ja: 'こんにちは [laughs]',
-        en: 'hello [laughs]',
+        ko: '안녕 [soft laugh]',
+        ja: 'こんにちは [soft laugh]',
+        en: 'hello [soft laugh]',
       },
       detectedSourceLanguage: 'ko',
     });
     await generateVoiceIntroAudios(USER_ID, '안녕 ㅋㅋㅋ', VOICE_ID, 'ko');
     const ttsTexts = hoisted.synthesizeSpeechMock.mock.calls.map((c: any[]) => c[0]);
     // 모든 슬롯의 TTS 입력에 audio tag 가 보존되어야 함 (Gemini 반환값 그대로).
-    expect(ttsTexts).toContain('안녕 [laughs]'); // ko 작성자 슬롯
-    expect(ttsTexts).toContain('こんにちは [laughs]'); // ja 번역 슬롯
-    expect(ttsTexts).toContain('hello [laughs]'); // en 번역 슬롯
+    expect(ttsTexts).toContain('안녕 [soft laugh]'); // ko 작성자 슬롯
+    expect(ttsTexts).toContain('こんにちは [soft laugh]'); // ja 번역 슬롯
+    expect(ttsTexts).toContain('hello [soft laugh]'); // en 번역 슬롯
   });
 
   it('emotion marker 없는 텍스트는 audio tag 도입 안 됨 (회귀)', async () => {
@@ -204,9 +204,9 @@ describe('voiceIntro service — audio tag pipeline (non-preset, Gemini 단독 �
   it('emotion marker (ㅋ + ㅠ) 동시 포함 — Gemini 가 각각 audio tag 로 치환', async () => {
     hoisted.translateVoiceIntroMock.mockResolvedValue({
       translations: {
-        ko: '안녕[laughs] 그래도 슬프네[sad]',
-        ja: 'JA [laughs] [sad]',
-        en: 'EN [laughs] [sad]',
+        ko: '안녕[soft laugh] 그래도 슬프네[sad]',
+        ja: 'JA [soft laugh] [sad]',
+        en: 'EN [soft laugh] [sad]',
       },
       detectedSourceLanguage: 'ko',
     });
@@ -221,18 +221,18 @@ describe('voiceIntro service — audio tag pipeline (non-preset, Gemini 단독 �
   });
 
   it('audio tag 단독 (ㅋㅋㅋㅋㅋ) — ensureSpeakableForTTS 가 ElevenLabs input_text_empty 회귀 방지', async () => {
-    // 사용자가 `ㅋㅋㅋㅋㅋ` 만 입력 → Gemini 가 3슬롯 모두 `[laughs]` 단독 반환.
+    // 사용자가 `ㅋㅋㅋㅋㅋ` 만 입력 → Gemini 가 3슬롯 모두 `[soft laugh]` 단독 반환.
     // ensureSpeakableForTTS 가 마침표를 덧붙이지 않으면 ElevenLabs 가
     // `Input at position 0 has empty text ...` 로 reject.
     hoisted.translateVoiceIntroMock.mockResolvedValue({
-      translations: { ko: '[laughs]', ja: '[laughs]', en: '[laughs]' },
+      translations: { ko: '[soft laugh]', ja: '[soft laugh]', en: '[soft laugh]' },
       detectedSourceLanguage: 'ko',
     });
     await generateVoiceIntroAudios(USER_ID, 'ㅋㅋㅋㅋㅋ', VOICE_ID, 'ko');
     const ttsTexts = hoisted.synthesizeSpeechMock.mock.calls.map((c: any[]) => c[0]);
     // 3 슬롯 모두 마침표가 덧붙은 형태로 ElevenLabs 호출.
-    expect(ttsTexts).toEqual(expect.arrayContaining(['[laughs].', '[laughs].', '[laughs].']));
-    expect(ttsTexts).not.toContain('[laughs]'); // 마침표 없는 raw 태그 단독은 호출되지 않아야 함
+    expect(ttsTexts).toEqual(expect.arrayContaining(['[soft laugh].', '[soft laugh].', '[soft laugh].']));
+    expect(ttsTexts).not.toContain('[soft laugh]'); // 마침표 없는 raw 태그 단독은 호출되지 않아야 함
   });
 
   it('[sad] 는 display-only — TTS 입력에서 제거, display 슬랭은 유지', async () => {
@@ -284,7 +284,7 @@ describe('voiceIntro service — preset bypass (audio tag pipeline 우회)', () 
     // 사용자가 audio tag 비슷한 텍스트를 보내도 preset 경로는 무시.
     await generateVoiceIntroAudios(
       USER_ID,
-      '악의 텍스트 [laughs]',
+      '악의 텍스트 [soft laugh]',
       VOICE_ID,
       'ko',
       presetTranslations,
@@ -303,7 +303,7 @@ describe('voiceIntro service — preset bypass (audio tag pipeline 우회)', () 
     };
     await generateVoiceIntroAudios(
       USER_ID,
-      '이상한 [laughs] 텍스트',
+      '이상한 [soft laugh] 텍스트',
       VOICE_ID,
       'ko',
       presetTranslations,
@@ -313,7 +313,7 @@ describe('voiceIntro service — preset bypass (audio tag pipeline 우회)', () 
     expect(ttsTexts).toContain('preset ja');
     expect(ttsTexts).toContain('preset en');
     // 작성자 페이로드는 절대 TTS 안 거침.
-    expect(ttsTexts.some((t: string) => t.includes('[laughs]'))).toBe(false);
+    expect(ttsTexts.some((t: string) => t.includes('[soft laugh]'))).toBe(false);
   });
 
   it('preset + 작성자 ja 언어 → 카탈로그 ja 텍스트 그대로 (회귀)', async () => {

@@ -146,7 +146,7 @@ async function synthesizeSlot(args: {
   const { userId, voiceId, lang, text, gender } = args;
   try {
     await setSlotStatus(userId, lang, 'processing');
-    // TTS 입력: [laughs] 만 audible, [sad] 등 display-only 태그는 제거 (사용자 정책).
+    // TTS 입력: [soft laugh] 만 audible, [sad] 등 display-only 태그는 제거 (사용자 정책).
     const ttsText = stripNonAudibleTags(text);
     // strip 후 audible 콘텐츠가 없으면 (순수 sad 슬롯 등) 소리 없이 'ready'.
     // display 텍스트(voice_intro_translations 슬롯)는 이미 commit 되어 유지된다.
@@ -156,7 +156,7 @@ async function synthesizeSlot(args: {
     }
     // ElevenLabs eleven_v3 는 audio tag + 이모지 strip 후 빈 텍스트면 input_text_empty
     // 에러로 reject — 사용자가 `ㅋㅋㅋㅋㅋ` 등 웃음 마커만 보내 Gemini 출력이
-    // `[laughs]` 단독이 된 경우 이 케이스에 해당.
+    // `[soft laugh]` 단독이 된 경우 이 케이스에 해당.
     // ensureSpeakableForTTS 가 마침표를 덧붙여 validation 통과 + 효과음은 정상 합성.
     const audio = await synthesizeSpeech(ensureSpeakableForTTS(ttsText), voiceId, null, gender, lang);
     const path = `${userId}/voice-intro-${lang}-${Date.now()}.mp3`;
@@ -198,11 +198,11 @@ export async function generateVoiceIntroAudios(
   //     없는 텍스트 (운영 검증된 화이트리스트). Gemini / replaceTagsForDisplay
   //     모두 우회 — 카탈로그 텍스트 그대로 display + TTS.
   //   * non-preset 경로: raw 작성자 원문을 Gemini 에 넘겨 STEP 1(실제 나타난
-  //     감정 마커 → [laughs]/[sad]) + STEP 2(각 언어 렌더) 를 1회 호출로 처리.
+  //     감정 마커 → [soft laugh]/[sad]) + STEP 2(각 언어 렌더) 를 1회 호출로 처리.
   //     작성자 슬롯도 targetLanguages 에 포함시켜 Gemini 경유 (identity slot =
   //     태그만 적용된 원문). translateVoiceIntro 출력은 sanitizeAudioTags 로
   //     화이트리스트 검증됨. slotTexts 는 TTS 입력(태그 포함), voice_intro_translations
-  //     슬롯엔 replaceTagsForDisplay 거친 display 텍스트 저장(raw `[laughs]` 미노출).
+  //     슬롯엔 replaceTagsForDisplay 거친 display 텍스트 저장(raw `[soft laugh]` 미노출).
 
   // (2) 상태 초기화. non-preset 은 번역 후 슬롯 텍스트를 채우므로 초기 translations 는 빈다.
   const initialTranslations: VoiceIntroTranslations = presetTranslations ?? {};

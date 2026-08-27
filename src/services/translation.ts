@@ -11,24 +11,31 @@ import type { VoiceIntroSlotLanguage } from "../types";
 // Shared STEP 1 instruction block (emotion marker → audio tag). Both the message
 // and voice-intro prompts embed this before their translation rules so tagging and
 // translation happen in a single Gemini call (regex prepareTextForTTS 폐지).
-const AUDIO_TAG_STEP = `STEP 1 — Emotion audio tags (do this FIRST, before translating):
+const audioTagStep = (n: number) => `STEP ${n} — Emotion audio tags (tag markers BEFORE any repair or translation):
 Some chat text contains typed "emotion markers": laughter or crying rendered as repeated jamo / letters / kaomoji rather than as words. Replace ONLY these literally-present markers with an inline audio tag, and delete the marker characters from the text.
-  - laughter marker  → [laughs]
+  - laughter marker  → [soft laugh]
   - crying / sadness marker → [sad]
 Markers to detect, across every language:
-  - Korean: ㅋ or ㅎ (single or repeated), INCLUDING a trailing ㅋ/ㅎ fused into a syllable's final consonant — e.g. 욬 = 요 + ㅋ, 큨 = 큐 + ㅋ, 릌 = 리 + ㅋ. Restore the base syllable and move the laughter into [laughs] (e.g. 웃기네욬ㅋㅋ → 웃기네요[laughs]). Same for ㅠ or ㅜ (single or repeated, incl. fused) → [sad].
+  - Korean: ㅋ or ㅎ (single or repeated), INCLUDING a trailing ㅋ/ㅎ fused into a syllable's final consonant — e.g. 욬 = 요 + ㅋ, 큨 = 큐 + ㅋ, 릌 = 리 + ㅋ. Restore the base syllable and move the laughter into [soft laugh] (e.g. 웃기네욬ㅋㅋ → 웃기네요[soft laugh]). Same for ㅠ or ㅜ (single or repeated, incl. fused) → [sad].
   - Japanese: ｗ / ww / www, 笑 or （笑）, 草 (but NOT 笑顔 or 微笑 which mean "smile" — leave those untouched).
-  - English: hahaha / hehe / lol / lmao / rofl; kaomoji xD / :D / =D → [laughs]; :( / :'( / T_T / ;_; / Q_Q → [sad].
-  - Thai: 555, ฮ่าๆ → [laughs].
-  - Hindi: हाहा, हीही → [laughs].
+  - English: hahaha / hehe / lol / lmao / rofl; kaomoji xD / :D / =D → [soft laugh]; :( / :'( / T_T / ;_; / Q_Q → [sad].
+  - Thai: 555, ฮ่าๆ → [soft laugh].
+  - Hindi: हाहा, हीही → [soft laugh].
 CRITICAL — literal only: insert a tag ONLY when such a marker literally appears. NEVER infer emotion from meaning. "아 오늘 너무 슬프다" (sad in meaning, NO marker) stays "아 오늘 너무 슬프다" with no tag. "아 오늘 너무 슬프다ㅠㅠ" becomes "아 오늘 너무 슬프다[sad]".
-CRITICAL — which tag a crying marker takes is decided by the SAME line only:
-  - Laughter markers (ㅋ / ㅎ / ｗ / ww / www / 笑 / 草 / haha / hehe / lol / lmao / rofl / xD / :D / =D / 555 / ฮ่าๆ / हाहा / हीही) are ALWAYS [laughs]. Never [sad].
-  - Crying markers (ㅠ / ㅜ / T_T / ;_; / Q_Q / :( / :'( ) default to [sad]. They become [laughs] ONLY when the very same "Text to translate" line also says, in words, that something is funny — 웃겨/웃김/웃기다/재밌, 面白い/ウケる, funny/hilarious, or a laughter marker sitting in that same line. Example: "아 진짜 웃겨요ㅠㅠ" → "아 진짜 웃겨요[laughs]" (the line says 웃겨). "시험 망했어ㅠㅠ" → "시험 망했어[sad]".
-  - A crying marker on its own ("ㅠㅠ", "T_T"), or on a line with no such words, is ALWAYS [sad] — even if the conversation before it was funny. NEVER let the preceding messages flip it: the sender typed ㅠㅠ on THIS line, and rendering that as ㅋㅋㅋ plus a laughing voice inverts what they expressed. That inversion is the worst failure in this step. When in doubt, [sad].
-CRITICAL — precise removal: remove the marker characters completely, leaving no residue. "진짜 웃기네욬ㅋㅋㅋ" → "진짜 웃기네요[laughs]" (the fused 욬 is restored to 요; leaving "욬[laughs]" is WRONG).
-Use EXACTLY [laughs] and [sad]. No other tag names, no variants like [laugh].
+CRITICAL — precise removal: remove the marker characters completely, leaving no residue. "진짜 웃기네욬ㅋㅋㅋ" → "진짜 웃기네요[soft laugh]" (the fused 욬 is restored to 요; leaving "욬[soft laugh]" is WRONG).
+Use EXACTLY [soft laugh] and [sad]. No other tag names, no variants like [laughs] or [laugh].
 If the text has no such marker, insert no tag.`;
+
+// TTS 입력 직전 교정 단계. 메시지와 보이스 한마디 둘 다 합성 대상이라 규칙이 같다
+// — 오타·초성체가 그대로 합성되면 깨지거나 뜻 없는 소리가 난다. 태그 삽입 스텝
+// 번호가 프롬프트마다 달라(메시지 2 / 보이스 인트로 1) 본문은 번호를 참조하지 않는다.
+const repairStep = (n: number) => `STEP ${n} — Repair (never touch the audio tags):
+The result of this step is what the TTS engine reads aloud, so a typo or a letters-only abbreviation comes out as broken or meaningless sound. Fix ONLY what is unambiguous:
+- Obvious typos and dropped/duplicated letters: 고맙급니다 → 고맙습니다 | 고맙습다 → 고맙습니다 | "that me smile" → "that made me smile".
+- Chat abbreviations written as bare letters, expanded to the word they stand for: ㄷㄱㄷㄱ → 두근두근 | ㄱㄱ → 고고 | ㅇㅈ → 인정 | thx → thanks.
+- Do NOT change spacing. Spacing does not affect how the text is read aloud, and re-spacing makes an otherwise unchanged message look edited.
+- Do NOT change word choice, sentence endings, politeness level, dialect, emoji, or the audio tags. This step repairs, it does not rewrite.
+- When in doubt, leave the text exactly as it is. A confident wrong "correction" is worse than an uncorrected typo — it changes what the sender said.`;
 
 // 호칭(kinship-style address term) 규칙.
 //
@@ -127,18 +134,30 @@ const SAFETY_SETTINGS = [
 ];
 
 // ─── Message domain (existing) ────────────────────────────────────────────
-const SYSTEM_PROMPT = `You process chat messages between strangers on a dating app in two steps: first tag emotion markers as audio tags, then translate.
+const SYSTEM_PROMPT = `You process chat messages between strangers on a dating app in four steps: decide whether it is already in the target language, tag emotion markers, repair what a TTS engine would mispronounce, then render.
 
-${AUDIO_TAG_STEP}
+STEP 1 — Language check (do this FIRST; the result drives STEP 4):
+Decide whether the "Text to translate" is ALREADY written in the target language, and report it as "already_target_language".
+- true ONLY when the whole text is written in the target language. Any other case is false.
+- BIAS TOWARD false. If the text mixes languages, is too short to judge, or you are anything less than certain, answer false. A wrong false only costs a redundant re-rendering; a wrong true ships an untranslated message the reader cannot understand.
+- Judge by the script and wording actually used, NOT by the profile lines, NOT by the conversation context, and NOT by what the message is about. The sender often types in a language other than their own.
+- Ignore language-neutral content when deciding: emotion markers (ㅋㅋ, www, 555, lol), emoji, punctuation, digits, and Latin-script names of people, places, or brands.
+- A message that merely MENTIONS the target language or country ("Are you Korean?") is not itself written in it.
 
-STEP 2 — Translate the tagged text into the target language:
-- Always render the text as a native speaker of the target language would naturally write it — regardless of what language the source appears to be in. Do not skip this step or return the input unchanged just because it looks short, simple, or superficially similar to the target language.
+${audioTagStep(2)}
+
+${repairStep(3)}
+
+STEP 4 — Render (never touch the audio tags):
+- If already_target_language is false, translate the STEP 3 text into the target language following every rule below.
+- If already_target_language is true, return the STEP 3 text unchanged. Do NOT translate it, rephrase it, restyle it, or "improve" it — the reader already speaks this language, and any rewriting shows up as a duplicate line next to the original.
+The rules below apply to the false branch (translating). They never license rewriting a true-branch text.
+- Render the text as a native speaker of the target language would naturally write it. Do not return the input unchanged just because it looks short, simple, or superficially similar to the target language — that call was already made in STEP 1.
 - The "target language" refers only to what language the OUTPUT must be written in. It has nothing to do with what the message is about. A message that mentions a country, nationality, or language by name (e.g. asking "Are you Korean?" or "Do you speak Japanese?") must still be fully translated into the target language — do not treat topical references to the target language/country as if the text were already written in it.
 - Sound like a real person texting someone they're interested in — warm, natural, and conversational. NEVER translate word-for-word. Render what a native speaker would actually type in this situation, not a literal gloss.
 - Translate interjections and emotional expressions to their natural target-language equivalent, NOT their dictionary form. Examples (en→ko): "Aww" → "아유~"/"아~" (affection, NOT "아이고~" which sounds like dismay); "Haha" → "ㅋㅋ"; "Oh no" → "헐"/"이런". Pick the equivalent that carries the same warmth.
-- The source may be broken, abbreviated, or grammatically off (typos, dropped words like "that me smile" meaning "that made me smile"). Infer the intended meaning and translate that naturally — do NOT reproduce the brokenness.
 - Preserve meaning and emotional intent fully. Do NOT abbreviate or shorten.
-- CRITICAL: Inline ElevenLabs audio tags written as [laughs], [sad], or similar [single_word] forms in square brackets, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
+- CRITICAL: Inline ElevenLabs audio tags written as [soft laugh], [sad], or similar bracketed forms, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
 - Match the source register — MIRROR it, never normalize toward polite:
   - Korean: if the source is 반말, the output MUST be 반말 (e.g. "일찍 일어나는 이유가 있어?" must NOT become "...있어요?"). If the source is polite, use 해요체; avoid stiff 습니다체 unless the source is clearly formal. Only when the source language marks no politeness (e.g. English) default to 해요체.
   - Japanese: mirror likewise — casual source MUST stay casual (だ/だよ/だし), polite source → です/ます. Only when the source marks no politeness default to です/ます.
@@ -156,8 +175,7 @@ Use the context to:
   - resolve what a short or elliptical message refers to (dropped subjects, pronouns, one-word replies such as "응", "그거", "ううん", "same") so the translation carries the right referent instead of a vague literal one;
   - keep the register and the way the two people address each other consistent with how the conversation has been going (do not switch a settled 반말 thread into 존댓말 mid-conversation, and vice versa);
   - disambiguate a word with several readings by what is actually being discussed.
-NEVER use the context to choose an audio tag. Tags follow the fixed per-marker mapping in STEP 1 and do not change with the surrounding conversation — a ㅠㅠ after a funny exchange is still [sad].
-The context lines are shown exactly as they were originally typed, so they may be in a different language from the target, and may already contain [laughs]/[sad] tags — that is normal and is not something to fix.
+The context lines are shown exactly as they were originally typed, so they may be in a different language from the target, and may already contain [soft laugh]/[sad] tags — that is normal and is not something to fix.
 CRITICAL — context is advisory, never authoritative. Chat messages interleave: the line immediately before this one is often NOT what this message replies to. The other person may have sent something unrelated in between, or the Speaker may be continuing their OWN earlier line from two turns back. So:
   - Translate what the text actually says. Never bend its meaning to fit the context, never pull a topic, noun, or referent out of the context that the text does not itself point to, and never "fix" the text because it changes the subject.
   - When the text reads as a continuation of an earlier Speaker line, treat THAT line as the antecedent even if an Addressee line sits between them. Example: Speaker "오늘 저녁 진짜 맛있었어" / Addressee "혹시 영화 뭐 좋아해?" / text "라멘을 먹었거든" — this continues the dinner, not the film.
@@ -168,8 +186,8 @@ ${ADDRESS_TERM_RULES}
 
 ${LOCALIZED_NAME_RULES}
 
-Output schema:
-{ "translation": string }`;
+Output schema — emit the fields in this exact order, deciding the language check before writing any text:
+{ "already_target_language": boolean, "translation": string }`;
 
 const model = vertexAi.getGenerativeModel({
     model: "gemini-2.5-flash",
@@ -210,7 +228,7 @@ export async function translateMessage(params: {
     speaker?: AddressParty;
     addressee?: AddressParty;
     context?: MessageContextEntry[];
-}): Promise<{ translation: string }> {
+}): Promise<{ translation: string; alreadyTargetLanguage: boolean }> {
     const userPrompt = `Target language: ${params.targetLanguage}
 ${describeParty("Speaker (who wrote this message)", params.speaker)}
 ${describeParty("Addressee (who reads it)", params.addressee)}
@@ -230,27 +248,35 @@ ${describeContext(params.context)}Text to translate: ${JSON.stringify(params.tex
     if (!raw) {
         throw new Error("Vertex AI returned no text (possibly safety-blocked)");
     }
-    const parsed = JSON.parse(raw) as { translation: string };
+    const parsed = JSON.parse(raw) as {
+        translation: string;
+        already_target_language?: boolean;
+    };
 
     // 화이트리스트 검증 — Gemini 가 규율 이탈 태그를 emit 해도 TTS/UI 오염 차단.
-    return { translation: sanitizeAudioTags(parsed.translation) };
+    // alreadyTargetLanguage: 누락/비-boolean 이면 false — 번역을 한 번 더 보여주는
+    // 쪽이 안 보여주는 쪽보다 안전하다 (프롬프트의 bias-toward-false 와 같은 방향).
+    return {
+        translation: sanitizeAudioTags(parsed.translation),
+        alreadyTargetLanguage: parsed.already_target_language === true,
+    };
 }
 
 // ─── Voice intro domain (mig 011) ─────────────────────────────────────────
 // translateMessage 와 분리 사유 (03_voice_i18n_plan.md 1.1):
-//   * register 정책 차이 — 메시지는 register-preserving(소스가 캐주얼이면 캐주얼), voice intro 는 더 적극적으로 캐주얼/playful 톤 유지 + ±20% 길이 보존.
+//   * register 정책 차이 — 메시지는 register-preserving(소스가 캐주얼이면 캐주얼), voice intro 는 더 적극적으로 캐주얼/playful 톤 유지.
 //   * 1회 호출에 N개 언어 동시 번역 → 응답 shape 가 다름.
-//   * 길이 균등 보존 (TTS 길이 일관성) 강조.
-const VOICE_INTRO_SYSTEM_PROMPT = `You process dating-app voice intro texts (a short, first-person self-introduction line the speaker records with their cloned voice) in two steps: first tag emotion markers as audio tags, then render each requested language. Output will be spoken aloud by a TTS engine using the speaker's cloned voice.
+const VOICE_INTRO_SYSTEM_PROMPT = `You process dating-app voice intro texts (a short, first-person self-introduction line the speaker records with their cloned voice) in three steps: tag emotion markers as audio tags, repair what a TTS engine would mispronounce, then render each requested language. Output will be spoken aloud by a TTS engine using the speaker's cloned voice.
 
-${AUDIO_TAG_STEP}
+${audioTagStep(1)}
 
-STEP 2 — Produce the tagged text in every requested language:
-- Apply STEP 1 tagging to the source text, then translate the tagged text into each requested language. A requested language equal to the source language must be returned with the STEP 1 tags applied but otherwise unchanged (do NOT re-translate it).
-- CRITICAL: Inline ElevenLabs audio tags written as [laughs], [sad], or similar [single_word] forms in square brackets, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
+${repairStep(2)}
+
+STEP 3 — Produce the text in every requested language:
+- Translate the STEP 2 text into each requested language. A requested language equal to the source language must be returned exactly as STEP 2 left it — tags and repairs applied, nothing else changed (do NOT re-translate it).
+- CRITICAL: Inline ElevenLabs audio tags written as [soft laugh], [sad], or similar bracketed forms, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
 - Preserve the speaker's intent, mood, and playful tone. Voice intros are typically 80-160 characters and aim to invite a stranger to swipe right.
 - "Playful/friendly" describes TONE and word choice — it is NOT a licence to lower the politeness level. A 해요체 or です・ます intro can be every bit as warm and inviting. Never drop to 반말 / plain form just to sound friendlier; follow the register rules below instead.
-- Match natural spoken length within ±20% of the source character count. Do NOT pad or truncate to extremes.
 - Register — MIRROR the source, never normalize in either direction:
   - Korean: if the source is 반말, the output MUST be 반말. If the source is polite, use 해요체; avoid stiff 습니다체 unless the source is clearly formal. Only when the source language marks no politeness (e.g. English) default to 해요체.
   - Japanese: mirror likewise — casual source MUST stay casual (だ/だよ/だし), polite source → です/ます. Only when the source marks no politeness default to です/ます.

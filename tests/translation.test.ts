@@ -34,7 +34,7 @@ function mockGenerateText(text: string) {
   });
 }
 
-// ── translateMessage — Gemini 1회 호출 = STEP 1(태깅) + STEP 2(번역) ─────────
+// ── translateMessage — Gemini 1회 호출 = STEP 1(언어판별) ~ STEP 4(렌더) ─────
 // prepareTextForTTS regex 폐지 후: raw 텍스트를 그대로 Gemini 에 넘기고, 응답을
 // sanitizeAudioTags 로 화이트리스트 검증한다. Gemini 실호출은 모킹 — 태깅 정확도
 // (융합 자모 제거·문맥추론 억제)는 Gemini 책임이라 유닛으로 실검증 불가, 아래는
@@ -50,15 +50,15 @@ describe('translateMessage', () => {
     const prompt =
       generateContentMock.mock.calls[0]?.[0]?.contents?.[0]?.parts?.[0]?.text ?? '';
     expect(prompt).toContain('Target language: en');
-    // 원문 그대로 (regex 로 [laughs] 치환 안 됨).
+    // 원문 그대로 (regex 로 [soft laugh] 치환 안 됨).
     expect(prompt).toContain('"안녕 ㅋㅋㅋ"');
-    expect(prompt).not.toContain('[laughs]');
+    expect(prompt).not.toContain('[soft laugh]');
   });
 
   it('화이트리스트 태그는 보존', async () => {
-    mockGenerateText(JSON.stringify({ translation: 'so funny [laughs]' }));
+    mockGenerateText(JSON.stringify({ translation: 'so funny [soft laugh]' }));
     const { translation } = await translateMessage({ text: 'x', targetLanguage: 'en' });
-    expect(translation).toBe('so funny [laughs]');
+    expect(translation).toBe('so funny [soft laugh]');
   });
 
   it('화이트리스트 외/변형 태그는 sanitize 로 제거 (Gemini 규율 이탈 방어)', async () => {
@@ -71,6 +71,25 @@ describe('translateMessage', () => {
     mockGenerateText(JSON.stringify({ translation: 'hello [laughs 오늘 [sad' }));
     const { translation } = await translateMessage({ text: 'x', targetLanguage: 'ko' });
     expect(translation).toBe('hello 오늘');
+  });
+
+  it('already_target_language 를 그대로 노출', async () => {
+    mockGenerateText(
+      JSON.stringify({ already_target_language: true, translation: '안녕하세요' }),
+    );
+    const r = await translateMessage({ text: '안녕하세요', targetLanguage: 'ko' });
+    expect(r.alreadyTargetLanguage).toBe(true);
+  });
+
+  it('키 누락/비-boolean 이면 false — 번역을 한 번 더 보여주는 쪽이 안전', async () => {
+    mockGenerateText(JSON.stringify({ translation: 'hello' }));
+    expect(
+      (await translateMessage({ text: 'x', targetLanguage: 'en' })).alreadyTargetLanguage,
+    ).toBe(false);
+    mockGenerateText(JSON.stringify({ already_target_language: 'true', translation: 'hello' }));
+    expect(
+      (await translateMessage({ text: 'x', targetLanguage: 'en' })).alreadyTargetLanguage,
+    ).toBe(false);
   });
 });
 
@@ -243,7 +262,7 @@ describe('translateVoiceIntro', () => {
   it('각 슬롯 출력을 sanitizeAudioTags 로 검증 (변형/malformed 태그 제거)', async () => {
     mockGenerateText(
       JSON.stringify({
-        translations: { ja: 'こんにちは [laugh]', en: 'hello [laughs]' },
+        translations: { ja: 'こんにちは [laugh]', en: 'hello [soft laugh]' },
         detected_source_language: 'ko',
       }),
     );
@@ -252,8 +271,8 @@ describe('translateVoiceIntro', () => {
       sourceLanguage: 'ko',
       targetLanguages: ['ja', 'en'],
     });
-    // ja 의 [laugh] 변형은 제거, en 의 [laughs] 화이트리스트는 보존.
-    expect(result.translations).toEqual({ ja: 'こんにちは', en: 'hello [laughs]' });
+    // ja 의 [laugh] 변형은 제거, en 의 [soft laugh] 화이트리스트는 보존.
+    expect(result.translations).toEqual({ ja: 'こんにちは', en: 'hello [soft laugh]' });
   });
 
   it('sanitize 후 빈 문자열이 되는 슬롯은 missing 으로 throw', async () => {

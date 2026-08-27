@@ -12,6 +12,7 @@ import {
   replaceTagsForDisplay,
   ensureSpeakableForTTS,
   hasSpeakableContent,
+  isTranslationIdentity,
   stripNonAudibleTags,
 } from '../utils/textNormalization';
 import { authMiddleware } from '../middleware/auth';
@@ -73,7 +74,7 @@ type MessageRow = Record<string, unknown>;
 // 번역 맥락용 직전 2턴 조회.
 //
 // 한 문장만 보면 지시어("그거")·생략 주어·짧은 응답("응")의 지시 대상이 없어서
-// 번역이 밋밋한 직역으로 떨어지고, ㅠㅠ 가 [laughs] 인지 [sad] 인지도 그 메시지
+// 번역이 밋밋한 직역으로 떨어지고, ㅠㅠ 가 [soft laugh] 인지 [sad] 인지도 그 메시지
 // 안에서만 판단하게 된다. 직전 대화를 같이 넘겨 Gemini 가 지시 대상·말투·태그를
 // 대화 흐름에 맞춰 고르게 한다.
 //
@@ -725,7 +726,7 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
   // 5) 파이프라인 — 본 라우트는 동기 응답이 필요 (FE 가 받은 URL 로 즉시 재생)
   // 이라 async stub 패턴 적용 안 함. 일반적으로 < 5초.
   try {
-    const { translation } = await translateMessage({
+    const { translation, alreadyTargetLanguage } = await translateMessage({
       text: originalText,
       targetLanguage: recipientLang,
       speaker: {
@@ -750,9 +751,11 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
     // (identity 면 null 이라 FE 번역 인디케이터가 안 뜬다).
     const displayText = replaceTagsForDisplay(translation, recipientLang);
     const recoveredTranslatedText =
-      senderLang === recipientLang && displayText === originalText.trim() ? null : displayText;
+      alreadyTargetLanguage || isTranslationIdentity(translation, originalText)
+        ? null
+        : displayText;
 
-    // [laughs] 만 audible — [sad] 등은 TTS 에서 제거 (사용자 정책).
+    // [soft laugh] 만 audible — [sad] 등은 TTS 에서 제거 (사용자 정책).
     const ttsText = stripNonAudibleTags(translation);
     let audioUrl: string | null = null;
     if (!hasSpeakableContent(ttsText)) {
@@ -865,7 +868,7 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
 
   // 파이프라인 (voice clone 보유 발신자 전용 — voiceId 없는 경로는 route 안에서
   // 동기 INSERT 됨):
-  //   1. Gemini 1회 호출 = STEP 1(실제 나타난 감정 마커 → [laughs]/[sad]) +
+  //   1. Gemini 1회 호출 = STEP 1(실제 나타난 감정 마커 → [soft laugh]/[sad]) +
   //      STEP 2(번역). 출력은 sanitizeAudioTags 화이트리스트 검증됨.
   //   2. TTS — 태그 보존된 translation 으로 eleven_v3 합성.
   //   3. DB INSERT 시 translated_text 는 replaceTagsForDisplay 로 태그→슬랭 복원
@@ -874,23 +877,24 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
   // 본 함수가 **마지막에 한 번만** INSERT 한다 — mid-session UPDATE 패턴 제거.
   try {
     // Gemini 가 STEP 1(감정 마커 → audio tag) + STEP 2(번역) 를 한 호출에서 처리.
-    // translation 은 sanitizeAudioTags 로 화이트리스트 검증된 [laughs]/[sad] 포함.
-    const { translation } = await translateMessage({
+    // translation 은 sanitizeAudioTags 로 화이트리스트 검증된 [soft laugh]/[sad] 포함.
+    const { translation, alreadyTargetLanguage } = await translateMessage({
       text,
       targetLanguage: recipientLang,
       speaker,
       addressee,
       context: await fetchConversationContext(matchId, queuedAt, senderId),
     });
-    // identity: 같은 언어이고 display(태그→슬랭 복원) 텍스트가 원문과 동일 →
-    // 번역 인디케이터 숨김(translated_text=null). 코드스위칭(프로필=ko인데 영어로
-    // 타이핑)이면 display 가 원문과 달라 not-identity → 번역 노출.
+    // identity: 원문이 이미 수신자 언어면 번역 인디케이터를 숨긴다(translated_text=null).
+    // 판정은 프로필 언어가 아니라 Gemini STEP 1 이 실제 텍스트를 보고 내린 결과 —
+    // 코드스위칭(프로필=ja인데 한국어로 타이핑)도 여기서 걸린다. STEP 1 이 false 로
+    // 오판했는데 출력이 원문과 다를 게 없으면 isTranslationIdentity 가 2차로 잡는다.
     const displayText = replaceTagsForDisplay(translation, recipientLang);
     const isIdentity =
-      senderLang === recipientLang && displayText === text.trim();
+      alreadyTargetLanguage || isTranslationIdentity(translation, text);
     const translatedText = isIdentity ? null : displayText;
 
-    // TTS 입력: [laughs] 만 남기고 [sad] 등 display-only 태그 제거 (사용자 정책).
+    // TTS 입력: [soft laugh] 만 남기고 [sad] 등 display-only 태그 제거 (사용자 정책).
     // 순수 sad 메시지(ㅠㅠ)는 strip 후 빈 텍스트 → TTS 스킵(audio_url=null),
     // display 슬랭은 translatedText 에 그대로 유지.
     const ttsText = stripNonAudibleTags(translation);

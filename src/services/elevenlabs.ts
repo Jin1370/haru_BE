@@ -66,7 +66,7 @@ export async function synthesizeSpeech(
     targetLanguage?: string | null,
 ): Promise<Buffer> {
     // v3 (eleven_v3) 는 audio tag / persona tag 네이티브 지원 — bracket 안의
-    // 단어를 효과음·톤 modifier 로 해석. text 의 [laughs]/[sad] 인라인 태그와
+    // 단어를 효과음·톤 modifier 로 해석. text 의 [soft laugh]/[sad] 인라인 태그와
     // buildPersonaTag/buildAccentTag/emotionTag prefix 모두 그대로 전달.
     // tag 적용 순서: persona (성별 baseline) → accent (언어별 발음 교정) →
     // emotion (이 발화의 modifier). 모두 별도 bracket — v3 가 각 instruction
@@ -75,15 +75,13 @@ export async function synthesizeSpeech(
     const personaTag = buildPersonaTag(gender);
     const accentTag = buildAccentTag(targetLanguage);
     const emotionTag = emotion ? `[${emotion}] ` : "";
-    // 제네릭 `[laughs]` 는 take 마다 웃음의 결이 크게 튀어(설레는 웃음 ↔ 바보 같은
-    // "흐흐흐") 데이팅 톤에 불안정. ElevenLabs 경계면인 여기서 `[soft laugh]` 로
-    // 좁혀 goofy 편차를 줄인다. 이 변환은 TTS 입력 전용 — Gemini 태깅 /
-    // sanitizeAudioTags / stripAudioTags / replaceTagsForDisplay 는 canonical
-    // `[laughs]` 리터럴 기준으로 그대로 동작(DB·UI 슬랭 복원 무영향).
-    const laughAdjusted = text.replace(/\[laughs\]/g, "[soft laugh]");
-    // 숫자 오독 교정 — "1번째" 가 "일번째" 로 합성되는 문제. 위 laugh 변환과 같이
-    // TTS 입력 전용이라 DB/UI 텍스트는 숫자 그대로 유지된다.
-    const numeralAdjusted = readKoreanNumbersForTTS(laughAdjusted);
+    // 웃음 태그는 Gemini 가 처음부터 `[soft laugh]` 로 emit 한다 (제네릭 `[laughs]` 는
+    // take 마다 웃음의 결이 크게 튀어 — 설레는 웃음 ↔ 바보 같은 "흐흐흐" — 데이팅
+    // 톤에 불안정). 프롬프트 · 화이트리스트 · 슬랭 테이블이 모두 같은 이름을 쓰므로
+    // 여기서 재치환하지 않는다.
+    // 숫자 오독 교정 — "1번째" 가 "일번째" 로 합성되는 문제. TTS 입력 전용이라
+    // DB/UI 텍스트는 숫자 그대로 유지된다.
+    const numeralAdjusted = readKoreanNumbersForTTS(text);
     // eleven_v3 는 종결 prosody 를 빠르게 마무리해 마지막 음절이 잘려 들리는
     // 경향이 있음 (특히 stability=1.0 Robust + 종결 punctuation 부재 시).
     // 텍스트 끝에 종결 punctuation 이 없으면 ellipsis 를 부착해 모델이 학습한

@@ -897,7 +897,9 @@ export const swaggerDocument = {
           'idempotent-send: `client_message_id`(옵셔널 uuid)를 제공하면 그 값을 messages.id 로 사용해 ' +
           'ON CONFLICT (id) DO NOTHING 멱등 전송을 보장한다. 응답 유실 후 같은 키로 재전송 시 이미 저장된 ' +
           '메시지면 200(동일 row 재반환), 다른 사용자 소유의 id 이거나 위조 id 이면 409(code: duplicate_message, ' +
-          '내용 미노출). 미제공 시 서버가 UUID 를 폴백 생성한다(옛 FE 하위호환).',
+          '내용 미노출). 미제공 시 서버가 UUID 를 폴백 생성한다(옛 FE 하위호환). ' +
+          '발신자에게 voice clone 이 없으면 409(code: voice_clone_required) — 그런 메시지는 audio_status=pending 으로 ' +
+          '굳어 수신자 GET/Realtime 필터에 걸려 영원히 안 보이기 때문에 발신 시점에 막는다.',
         parameters: [{ name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
         requestBody: {
           required: true,
@@ -928,7 +930,9 @@ export const swaggerDocument = {
           202: { description: '큐잉 성공 — INSERT 는 realtime 으로 도착', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
           400: { description: 'text 누락/초과 / client_message_id 비-uuid', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           409: {
-            description: 'idempotent-send: client_message_id 가 다른 사용자 소유이거나 위조된 id — code: duplicate_message (내용 미노출)',
+            description:
+              'idempotent-send: client_message_id 가 다른 사용자 소유이거나 위조된 id — code: duplicate_message (내용 미노출) / ' +
+              '발신자에게 voice clone 이 없음 — code: voice_clone_required (그렇게 저장된 메시지는 수신자에게 영원히 안 보임)',
             content: {
               'application/json': {
                 schema: {

@@ -389,50 +389,20 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   const queuedAt = new Date().toISOString();
   const voiceId = sender.elevenlabs_voice_id ?? null;
 
-  // voice clone 없는 발신자는 mid-session UPDATE 가 발생할 수 없는 경로
-  // (audio_status 전이가 일어나지 않음). 동기 INSERT 후 응답 — UX 가 가장
-  // 단순하고 회귀 위험 최소.
+  // voice clone 없이 보낸 메시지는 audio_status='pending' 으로 굳고, 수신자 GET/
+  // Realtime 필터(sender_id=viewer OR audio_status='ready')에 걸려 영원히 안 보인다.
+  // 발신자 화면에는 멀쩡히 남아 "보냈다" 고 믿게 되는 조용한 실패라, 여기서 막는다.
+  // 지금은 도달 경로가 없다 (회원가입이 클론을 요구하고 단독 삭제 라우트는 폐기됨).
+  // 캠페인봇은 이 라우트를 쓰지 않고 supabase 로 직접 INSERT 하므로 영향 없음.
   if (!voiceId) {
-    // idempotent-send: 동기 경로도 ON CONFLICT (id) DO NOTHING + scoped 재반환.
-    // 응답 유실 후 같은 client_message_id 로 재전송 시 신규는 201, 재전송은 200
-    // (동일 row), 위조/타인 id 는 409 (내용 미노출). row=null 은 500.
-    const { row, inserted, conflict } = await idempotentInsertMessage(
-      {
-        id: messageId,
-        match_id: matchId,
-        sender_id: req.userId!,
-        original_text: text,
-        original_language: senderLang,
-        translated_text: null,
-        translated_language: recipientLang,
-        audio_url: null,
-        audio_status: 'pending',
-        emotion: storedEmotion,
-        created_at: queuedAt,
-      },
-      matchId,
-      req.userId!,
-    );
-    if (conflict) {
-      res.status(409).json({ error: 'Message id already used', code: 'duplicate_message' });
-      return;
-    }
-    if (!row) {
-      res.status(500).json({ error: 'Message insert failed' });
-      return;
-    }
-    res.status(inserted ? 201 : 200).json(row);
-
-    // push-notifications sprint: 동기 INSERT 경로 (voice-clone 미보유 발신자) 의
-    // 푸시 발송. INSERT 가 'pending' 상태로 저장되지만 voice-first-message-gate
-    // 정책상 수신자 GET 에서 필터링되어 안 보이는 메시지 — 푸시도 보내지 않는다.
-    // (failed 메시지와 같은 정합성: "수신자에게 안 보이는 메시지 = 푸시 미발송")
-    // 사실상 voice clone 미보유 발신자의 메시지는 푸시 미발송 분기.
+    res
+      .status(409)
+      .json({ error: 'Voice clone required to send messages', code: 'voice_clone_required' });
     return;
   }
 
   // idempotent-send: async 경로 pre-check (voiceId 보유자만 통과 + 회피 비용(TTS
-  // 합성)이 커서 정당 — 동기 경로엔 이 pre-check 없음).
+  // 합성)이 커서 정당.
   //
   // 1) retry-after-commit 감지 — 이미 INSERT 된 (내 소유) row 면 재합성 없이 그대로
   //    반환. scoped(id+match+sender) 라 위조 id 는 여기서 안 걸리고 아래로 흘러 409.
@@ -866,10 +836,9 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
     queuedAt,
   } = job;
 
-  // 파이프라인 (voice clone 보유 발신자 전용 — voiceId 없는 경로는 route 안에서
-  // 동기 INSERT 됨):
-  //   1. Gemini 1회 호출 = STEP 1(실제 나타난 감정 마커 → [soft laugh]/[sad]) +
-  //      STEP 2(번역). 출력은 sanitizeAudioTags 화이트리스트 검증됨.
+  // 파이프라인 (voice clone 보유 발신자 전용 — 미보유는 route 에서 409 로 차단):
+  //   1. Gemini 1회 호출 = 언어 판별 + 감정 마커 태깅 + 교정 + 렌더.
+  //      출력은 sanitizeAudioTags 화이트리스트 검증됨.
   //   2. TTS — 태그 보존된 translation 으로 eleven_v3 합성.
   //   3. DB INSERT 시 translated_text 는 replaceTagsForDisplay 로 태그→슬랭 복원
   //      (UI 에 raw 태그 미노출). identity 면 null.

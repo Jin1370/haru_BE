@@ -232,82 +232,20 @@ beforeEach(() => {
   captured.upsertPayloads = [];
 });
 
-describe('POST messages — 동기 경로 (voice-clone 미보유)', () => {
-  it('(1) 새 id → 201 + row 삽입 + payload.id = client_message_id', async () => {
-    captured.upsertResult = {
-      data: [{ id: CLIENT_ID, match_id: MATCH_ID, sender_id: VIEWER, audio_status: 'pending', original_text: 'hi' }],
-      error: null,
-    };
-
+// voice clone 미보유 발신자의 동기 INSERT 경로는 폐기됐다 — 그렇게 들어간 메시지는
+// audio_status='pending' 으로 굳어 수신자 GET/Realtime 필터에 걸려 영원히 안 보이는데,
+// 발신자 화면에는 남아 조용한 실패가 된다. 멱등 동작(재전송 200 / 위조 id 409 /
+// upsert 에러 500) 검증은 아래 비동기 경로 describe 가 이어받는다.
+describe('POST messages — voice clone 미보유', () => {
+  it('(1) 409 voice_clone_required + INSERT 미도달', async () => {
     const res = await request(app)
       .post(`/api/matches/${MATCH_ID}/messages`)
       .set(authHeader())
       .send({ text: 'hi', client_message_id: CLIENT_ID });
-
-    expect(res.status).toBe(201);
-    expect(res.body.id).toBe(CLIENT_ID);
-    expect(captured.upsertPayloads).toHaveLength(1);
-    expect(captured.upsertPayloads[0].id).toBe(CLIENT_ID);
-    expect(captured.upsertPayloads[0].audio_status).toBe('pending');
-  });
-
-  it('(2) 같은 client_message_id 재전송 (0 rows) → 200 동일 row', async () => {
-    captured.upsertResult = { data: [], error: null }; // ON CONFLICT DO NOTHING
-    captured.scopedSelect = {
-      data: { id: CLIENT_ID, match_id: MATCH_ID, sender_id: VIEWER, audio_status: 'pending', original_text: 'hi' },
-      error: null,
-    };
-
-    const res = await request(app)
-      .post(`/api/matches/${MATCH_ID}/messages`)
-      .set(authHeader())
-      .send({ text: 'hi', client_message_id: CLIENT_ID });
-
-    expect(res.status).toBe(200);
-    expect(res.body.id).toBe(CLIENT_ID);
-  });
-
-  it('(3) IDOR probe — 타 사용자 소유 id (scoped 미스) → 409 + 내용 미노출', async () => {
-    captured.upsertResult = { data: [], error: null }; // 전역 id 충돌
-    captured.scopedSelect = { data: null, error: null }; // 내 (match+sender) 소유 아님
-
-    const res = await request(app)
-      .post(`/api/matches/${MATCH_ID}/messages`)
-      .set(authHeader())
-      .send({ text: 'probe', client_message_id: CLIENT_ID });
 
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('duplicate_message');
-    // 원문/타인 row 내용은 절대 노출되지 않는다.
-    expect(res.body.original_text).toBeUndefined();
-    expect(res.body.id).toBeUndefined();
-  });
-
-  it('(4) 옛 FE 하위호환 — client_message_id 미포함 → 서버 UUID 폴백 + 201', async () => {
-    captured.upsertResult = {
-      data: [{ id: 'srv', match_id: MATCH_ID, sender_id: VIEWER, audio_status: 'pending' }],
-      error: null,
-    };
-
-    const res = await request(app)
-      .post(`/api/matches/${MATCH_ID}/messages`)
-      .set(authHeader())
-      .send({ text: 'legacy' });
-
-    expect(res.status).toBe(201);
-    expect(captured.upsertPayloads).toHaveLength(1);
-    expect(captured.upsertPayloads[0].id).toMatch(UUID_RE);
-  });
-
-  it('(5) upsert supabase 에러 → 500 (silent-success 금지)', async () => {
-    captured.upsertResult = { data: null, error: { message: 'db down' } };
-
-    const res = await request(app)
-      .post(`/api/matches/${MATCH_ID}/messages`)
-      .set(authHeader())
-      .send({ text: 'hi', client_message_id: CLIENT_ID });
-
-    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('voice_clone_required');
+    expect(captured.upsertPayloads).toHaveLength(0);
   });
 });
 

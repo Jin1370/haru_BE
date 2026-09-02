@@ -28,8 +28,12 @@ export async function createVoiceClone(
     return voice.voiceId;
 }
 
+// ElevenLabs 는 같은 voice 에 대한 add/delete 가 겹치면 409 already_running 을
+// 돌려주고 "retry shortly" 를 안내한다 (Sentry HARU-BACKEND-W: 재녹음 시 옛 voice
+// 정리가 409). retryOnce 의 기본 3초 지연이 그 "shortly" 에 해당한다. 두 호출처
+// (재녹음 후 옛 voice 정리 / 탈퇴 시 정리) 모두 best-effort 라 여기서 한 번 흡수한다.
 export async function deleteVoiceClone(voiceId: string): Promise<void> {
-    await client.voices.delete(voiceId);
+    await retryOnce(() => client.voices.delete(voiceId), "voices.delete " + voiceId);
 }
 
 // 데이팅 톤 페르소나 — 발신자 성별 기반 vocal style tag.

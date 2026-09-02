@@ -1,5 +1,5 @@
 import { Response, NextFunction } from 'express';
-import { supabase } from '../config/supabase';
+import { supabase, supabaseAuth } from '../config/supabase';
 import { env } from '../config/env';
 import { resolveAdminOperator } from '../routes/admin';
 import { AuthRequest } from '../types';
@@ -89,7 +89,19 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
 
   const token = authHeader.slice(7);
 
-  const { data, error } = await supabase.auth.getUser(token);
+  // supabaseAuth 를 쓰는 이유: config/supabase.ts 의 15초 fetch 타임아웃이 걸린
+  // 클라이언트다. 인증 호출이 undici 기본 headersTimeout(300초)까지 매달리면
+  // FE 는 이미 타임아웃 → 로그아웃이다.
+  //
+  // 1회 재시도: undici 는 유휴 keep-alive 소켓이 끊긴 걸 다음 요청에서야 알아채고
+  // TypeError: fetch failed 로 던진다 (Fly 머신 suspend/wake 직후에 잦다 —
+  // Sentry HARU-BACKEND-V, GET /api/matches). 새 커넥션으로 한 번 더 보내면 그대로
+  // 성공하므로 503 을 내리기 전에 딱 한 번 다시 시도한다. auth-js 의 _getUser 는
+  // 자체 재시도가 없어 여기서 해야 한다. 지연 없이 즉시 — 소켓 문제라 기다릴 이유가 없다.
+  let { data, error } = await supabaseAuth.auth.getUser(token);
+  if (isTransientAuthError(error)) {
+    ({ data, error } = await supabaseAuth.auth.getUser(token));
+  }
 
   // "토큰이 무효하다" 와 "지금 확인을 못 했다" 를 구분한다.
   //

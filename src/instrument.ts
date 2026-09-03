@@ -18,7 +18,16 @@ if (process.env.NODE_ENV !== 'test' && process.env.SENTRY_DSN) {
     // 이벤트로 승격 — catch 마다 captureException 을 심는 대신 로그 한 곳만 계측.
     // warn 은 운영 신호(모더레이션 등)라 제외, error 만.
     integrations: [Sentry.captureConsoleIntegration({ levels: ['error'] })],
-    // 클라이언트 연결 끊김(multer upload abort)은 서버 버그가 아니라 정상 클라이언트 동작.
-    ignoreErrors: ['Request aborted'],
+    ignoreErrors: [
+      // 클라이언트 연결 끊김(multer upload abort)은 서버 버그가 아니라 정상 클라이언트 동작.
+      'Request aborted',
+      // auth-js 는 fetch 실패를 자기 catch 안에서 console.error(e) 로 그대로 찍고
+      // AuthRetryableFetchError 로 다시 던진다 (node_modules/@supabase/auth-js/lib/fetch.js).
+      // 그 원본이 captureConsole 에 걸려 undici 스택만 담긴 이슈로 올라오는데,
+      // AbortSignal.timeout 은 config/supabase.ts 의 authFetch 한 곳에서만 쓰므로 이
+      // 메시지는 항상 인증 호출 타임아웃이고, authMiddleware 가 1회 재시도 후
+      // 503('[Auth] Auth service unreachable') 으로 자기 신호를 남긴다. 중복 제거.
+      'The operation was aborted due to timeout',
+    ],
   });
 }

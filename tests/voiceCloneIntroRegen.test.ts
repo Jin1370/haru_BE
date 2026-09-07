@@ -106,7 +106,16 @@ vi.mock('../src/config/supabase', () => {
         },
       },
     },
-    supabaseAuth: { from: () => makeBuilder() },
+    supabaseAuth: {
+      from: () => makeBuilder(),
+      // authMiddleware 는 supabaseAuth.auth.getUser 로 검증한다 (539b5c9).
+      auth: {
+        async getUser(token: string) {
+          if (!token) return { data: { user: null }, error: { message: 'no token' } };
+          return { data: { user: { id: token } }, error: null };
+        },
+      },
+    },
   };
 });
 

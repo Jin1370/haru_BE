@@ -21,6 +21,7 @@ const envState = vi.hoisted(() => ({
   unlimitedLikeCodes: [] as string[],
   unlimitedLikeCodeDays: 30,
   unlimitedLikeUserIds: [] as string[],
+  hiddenUserIds: [] as string[],
 }));
 vi.mock('../src/config/env', () => ({
   env: {
@@ -49,6 +50,9 @@ vi.mock('../src/config/env', () => ({
       },
       get unlimitedLikeUserIds() {
         return envState.unlimitedLikeUserIds;
+      },
+      get hiddenUserIds() {
+        return envState.hiddenUserIds;
       },
     },
     // 캠페인 봇 비활성 — isCampaignBot() 이 항상 false 라 스와이프 경로는 무영향.
@@ -178,18 +182,21 @@ vi.mock('../src/config/supabase', () => {
     return b;
   }
 
+  // authMiddleware 가 Bearer 토큰을 supabaseAuth.auth.getUser 로 검증한다
+  // (539b5c9 에서 supabase → supabaseAuth 로 이동). 토큰 문자열을 그대로 userId 로
+  // 사용 (test 용 단순화).
+  async function getUser(token: string) {
+    if (!token) {
+      return { data: { user: null }, error: { message: 'no token' } };
+    }
+    return { data: { user: { id: token } }, error: null };
+  }
+
   return {
     supabase: {
       from: (table: string) => makeBuilder(table),
       auth: {
-        // authMiddleware 가 Bearer 토큰을 supabase.auth.getUser 로 검증.
-        // 토큰 문자열을 그대로 userId 로 사용 (test 용 단순화).
-        async getUser(token: string) {
-          if (!token) {
-            return { data: { user: null }, error: { message: 'no token' } };
-          }
-          return { data: { user: { id: token } }, error: null };
-        },
+        getUser,
         admin: {
           async getUserById() {
             return { data: { user: null }, error: { message: 'noop' } };
@@ -197,7 +204,7 @@ vi.mock('../src/config/supabase', () => {
         },
       },
     },
-    supabaseAuth: { from: () => makeBuilder('noop') },
+    supabaseAuth: { from: () => makeBuilder('noop'), auth: { getUser } },
   };
 });
 
@@ -218,6 +225,7 @@ beforeEach(() => {
   envState.unlimitedLikeCodes = [];
   envState.unlimitedLikeCodeDays = 30;
   envState.unlimitedLikeUserIds = [];
+  envState.hiddenUserIds = [];
   captured.frozen = { is_active: true, frozen_at: null };
   captured.referral = { data: null, error: null };
   captured.reciprocal = { data: null, error: null };

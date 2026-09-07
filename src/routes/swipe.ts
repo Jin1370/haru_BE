@@ -199,6 +199,9 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     req.userId!,
     ...(swipedResult.data?.map((s: any) => s.swiped_id) || []),
     ...blockedIds,
+    // 섀도우 숨김 (env.discover.hiddenUserIds) — 당사자에게는 아무 신호도 가지
+    // 않는다. 같은 목록을 GET /likes-received 와 isLikeVisibleToReceiver 에서도 적용.
+    ...env.discover.hiddenUserIds,
   ];
   // 캠페인 봇은 선호 성별·나이 필터와 "viewer 와 같은 언어 하드 제외" 를 전부
   // 우회해야 하므로 메인 쿼리에서 빼고 아래에서 직접 주입한다. 단 이미 스와이프
@@ -429,7 +432,9 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   const viewerLanguage = (viewerProfileResult.data?.language as string | null) ?? '';
   const prefs = prefsResult.data;
 
-  const eligibleIds = likerIds.filter((id) => !swipedSet.has(id) && !blockedSet.has(id));
+  const eligibleIds = likerIds.filter(
+    (id) => !swipedSet.has(id) && !blockedSet.has(id) && !env.discover.hiddenUserIds.includes(id),
+  );
   if (eligibleIds.length === 0) {
     res.json([]);
     return;
@@ -554,6 +559,9 @@ async function isLikeVisibleToReceiver(likerId: string, receiverId: string): Pro
   ]);
 
   if ((receiverSwipe.data ?? []).length > 0) return false;
+  // 섀도우 숨김 계정의 like 는 받은 좋아요 탭에 안 뜨므로 푸시도 보내지 않는다
+  // (열었는데 탭이 그대로인 거짓 신호 방지).
+  if (env.discover.hiddenUserIds.includes(likerId)) return false;
 
   const viewerLanguage = (receiverProfile.data?.language as string | null) ?? '';
 

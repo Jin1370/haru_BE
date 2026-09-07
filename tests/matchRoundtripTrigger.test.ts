@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 // match-roundtrip-realtime sprint: 사진 잠금 해제 임계치 (UNLOCK_MAIN_PHOTO_AT,
 // UNLOCK_ALL_PHOTOS_AT) 는 3 곳에 동일 값으로 존재해야 한다.
 //
 //   1) haru_BE/src/constants/chat.ts                       — BE TS 상수
-//   2) haru_BE/supabase/migrations/014_match_roundtrip.sql — AFTER INSERT 트리거 SQL 리터럴
+//   2) haru_BE/supabase/migrations/ 중 트리거를 마지막으로 정의한 파일 — SQL 리터럴
 //   3) haru_FE/src/constants/photoAccess.ts                — FE TS 상수
 //
 // 한 곳이라도 drift 하면 fail. PR 마다 CI 가 1차 방어선.
@@ -36,7 +36,7 @@ function parseSQLLiteralAfter(text: string, marker: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-describe('photo unlock threshold 3-way sync (BE constants / 014 SQL / FE constants)', () => {
+describe('photo unlock threshold 3-way sync (BE constants / trigger SQL / FE constants)', () => {
   const beConstantsPath = resolve(
     REPO_ROOT,
     'haru_BE',
@@ -44,12 +44,21 @@ describe('photo unlock threshold 3-way sync (BE constants / 014 SQL / FE constan
     'constants',
     'chat.ts',
   );
+  // 트리거 함수는 마이그레이션이 forward-only 로 재정의(028 이 014 를 교체)하므로
+  // "가장 마지막에 함수를 정의한 마이그" 가 현행 진실이다. 파일명을 박으면 다음
+  // 재정의 때 이 테스트가 옛 파일을 읽어 조용히 틀린 값을 비교한다.
+  const migrationsDir = resolve(REPO_ROOT, 'haru_BE', 'supabase', 'migrations');
   const sqlPath = resolve(
-    REPO_ROOT,
-    'haru_BE',
-    'supabase',
-    'migrations',
-    '014_match_roundtrip.sql',
+    migrationsDir,
+    readdirSync(migrationsDir)
+      .filter((f) => f.endsWith('.sql'))
+      .sort()
+      .reverse()
+      .find((f) =>
+        readText(resolve(migrationsDir, f)).includes(
+          'FUNCTION match_roundtrip_on_insert',
+        ),
+      )!,
   );
   const feConstantsPath = resolve(
     REPO_ROOT,
@@ -60,7 +69,9 @@ describe('photo unlock threshold 3-way sync (BE constants / 014 SQL / FE constan
   );
 
   const beText = readText(beConstantsPath);
-  const sqlText = readText(sqlPath);
+  // `--` 주석 제거 후 파싱 — 028 헤더가 옛 임계치(`new_count >= 5`)를 설명문으로
+  // 인용하고 있어, 주석을 남기면 실제 분기 대신 그 숫자를 읽는다.
+  const sqlText = readText(sqlPath).replace(/--[^\n]*/g, '');
   const feText = readText(feConstantsPath);
 
   const beMain = parseTSConstant(beText, 'UNLOCK_MAIN_PHOTO_AT');
@@ -68,7 +79,7 @@ describe('photo unlock threshold 3-way sync (BE constants / 014 SQL / FE constan
   const feMain = parseTSConstant(feText, 'UNLOCK_MAIN_PHOTO_AT');
   const feAll = parseTSConstant(feText, 'UNLOCK_ALL_PHOTOS_AT');
 
-  // 014 트리거 안의 두 `new_count >= N` 리터럴 (main, all 순서로 등장).
+  // 현행 트리거 안의 두 `new_count >= N` 리터럴 (main, all 순서로 등장).
   // 두 마커 사이 거리가 짧으므로 indexOf 두 번 + slice 로 분리 파싱.
   const firstMainIdx = sqlText.indexOf('new_count >= ');
   const sqlMain =
@@ -88,9 +99,9 @@ describe('photo unlock threshold 3-way sync (BE constants / 014 SQL / FE constan
     expect(feAll, 'UNLOCK_ALL_PHOTOS_AT not found in FE photoAccess.ts').not.toBeNull();
   });
 
-  it('014 트리거 SQL 이 두 개의 `new_count >= N` 리터럴을 보유한다', () => {
-    expect(sqlMain, 'first new_count >= N missing in 014').not.toBeNull();
-    expect(sqlAll, 'second new_count >= N missing in 014').not.toBeNull();
+  it('현행 트리거 SQL 이 두 개의 `new_count >= N` 리터럴을 보유한다', () => {
+    expect(sqlMain, 'first new_count >= N missing in trigger migration').not.toBeNull();
+    expect(sqlAll, 'second new_count >= N missing in trigger migration').not.toBeNull();
   });
 
   it('UNLOCK_MAIN_PHOTO_AT 가 BE / SQL / FE 3 곳에서 동일하다', () => {

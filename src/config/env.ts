@@ -125,6 +125,14 @@ export const env = {
       .split(',')
       .map((id) => id.trim())
       .filter(Boolean),
+    // 섀도우 숨김 (shadow hide). 이 목록의 profiles.id 는 디스커버/받은 좋아요에서
+    // 아무에게도 노출되지 않고, 이들이 보낸 like 는 "좋아요 왔다" 푸시도 발생시키지
+    // 않는다. 당사자 쪽은 완전히 평소와 동일 — freeze(403 모달)/is_active=false 와
+    // 달리 어떤 신호도 가지 않는다. 시크릿에서 빼면 즉시 원상복구.
+    hiddenUserIds: (process.env.HIDDEN_USER_IDS ?? '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean),
   },
 
   // 캠페인 봇 (하치와레 발견 이벤트). 이 UUID 를 가진 프로필은:

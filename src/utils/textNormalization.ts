@@ -104,7 +104,12 @@ export function isTranslationIdentity(translation: string, original: string): bo
 // 제거 후 hasSpeakableContent 가 false 가 되어 TTS 자체가 스킵된다.
 // ponytail: https?:// 와 www. 로 시작하는 형태만 잡는다. bare domain(youtu.be/x)은
 // 실제 공유 링크가 거의 항상 스킴을 달고 오므로 제외 — 필요해지면 TLD 목록 추가.
-const URL_PATTERN = /(?:https?:\/\/|www\.)\S+/gi;
+//
+// 문자 집합은 RFC 3986 이 URL 에 허용하는 ASCII 로 한정한다. `\S+`(공백 아닌 전부)로
+// 두면 URL 뒤에 공백 없이 붙은 한글까지 먹어치운다 — "링크보세요https://a.b/c대박이에요"
+// 가 "링크보세요" 만 남고 뒷문장이 통째로 사라졌다. 한글·일본어·이모지는 URL 문자가
+// 아니므로 이 집합이 곧 경계가 된다.
+const URL_PATTERN = /(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:\/?#\[\]@!$&'()*+,;=%]+/gi;
 
 export function stripNonAudibleTags(text: string): string {
   if (typeof text !== 'string' || text.length === 0) return text;

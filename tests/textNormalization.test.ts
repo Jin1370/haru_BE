@@ -178,6 +178,13 @@ describe('stripNonAudibleTags', () => {
     expect(stripNonAudibleTags('http://a.b/c?d=1&e=2')).toBe('');
   });
 
+  it('URL 뒤 공백 없이 붙은 문장을 먹지 않는다', () => {
+    // 회귀: `\S+` 로 잡던 시절 "링크보세요" 만 남고 뒷문장이 통째로 사라졌다.
+    expect(stripNonAudibleTags('링크보세요https://youtu.be/dQw4w9WgXcQ대박이에요'))
+      .toBe('링크보세요 대박이에요');
+    expect(stripNonAudibleTags('これ見てhttps://a.b/cすごい')).toBe('これ見て すごい');
+  });
+
   it('링크만 있는 메시지 → 빈 문자열 (호출처가 TTS 스킵 판단)', () => {
     expect(hasSpeakableContent(stripNonAudibleTags('https://open.spotify.com/track/xyz'))).toBe(false);
   });

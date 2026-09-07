@@ -98,9 +98,18 @@ export function isTranslationIdentity(translation: string, original: string): bo
 //
 // STEP 1 태깅은 sad 마커도 계속 감지해 [sad] 로 정규화 — raw ㅠㅠ 가 TTS 로 새서
 // 자모 괴음이 나는 것을 막기 위함. 정규화된 [sad] 를 여기서 TTS 직전에 제거한다.
+// URL 은 발화 대상이 아니다 — 그대로 합성하면 "에이치티티피에스 콜론 슬래시…" 로
+// 읽히고, 링크만 보낸 메시지는 통째로 소음이 된다. TTS 입력에서만 제거하고 display
+// (original_text / translated_text) 는 링크를 그대로 둔다. 링크만 있던 메시지는
+// 제거 후 hasSpeakableContent 가 false 가 되어 TTS 자체가 스킵된다.
+// ponytail: https?:// 와 www. 로 시작하는 형태만 잡는다. bare domain(youtu.be/x)은
+// 실제 공유 링크가 거의 항상 스킴을 달고 오므로 제외 — 필요해지면 TLD 목록 추가.
+const URL_PATTERN = /(?:https?:\/\/|www\.)\S+/gi;
+
 export function stripNonAudibleTags(text: string): string {
   if (typeof text !== 'string' || text.length === 0) return text;
   return text
+    .replace(URL_PATTERN, ' ')
     .replace(AUDIO_TAG_PATTERN, (m) => (m === '[soft laugh]' ? m : ''))
     // 남은 한글 호환 자모(ㄱ-ㅎ, ㅏ-ㅣ) 제거 — 단독 자모는 발화 불가라 합성하면
     // 자모 이름을 읽거나 괴음이 난다. Gemini 가 초성체(ㄷㄱㄷㄱ)를 못 펴서 그대로

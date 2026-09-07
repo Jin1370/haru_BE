@@ -171,6 +171,16 @@ describe('stripNonAudibleTags', () => {
   it('빈 문자열 안전', () => {
     expect(stripNonAudibleTags('')).toBe('');
   });
+
+  it('URL 제거 — TTS 가 링크를 읽지 않는다', () => {
+    expect(stripNonAudibleTags('이거 봐 https://youtu.be/dQw4w9WgXcQ 대박')).toBe('이거 봐 대박');
+    expect(stripNonAudibleTags('www.naver.com 여기')).toBe('여기');
+    expect(stripNonAudibleTags('http://a.b/c?d=1&e=2')).toBe('');
+  });
+
+  it('링크만 있는 메시지 → 빈 문자열 (호출처가 TTS 스킵 판단)', () => {
+    expect(hasSpeakableContent(stripNonAudibleTags('https://open.spotify.com/track/xyz'))).toBe(false);
+  });
 });
 
 // ── replaceTagsForDisplay — audio tag → 타깃 언어 슬랭 ────────────────────────

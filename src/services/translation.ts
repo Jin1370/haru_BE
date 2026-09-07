@@ -35,6 +35,7 @@ The result of this step is what the TTS engine reads aloud, so a typo or a lette
 - Chat abbreviations written as bare letters, expanded to the word they stand for: ㄷㄱㄷㄱ → 두근두근 | ㄱㄱ → 고고 | ㅇㅈ → 인정 | thx → thanks.
 - Do NOT change spacing. Spacing does not affect how the text is read aloud, and re-spacing makes an otherwise unchanged message look edited.
 - Do NOT change word choice, sentence endings, politeness level, dialect, emoji, or the audio tags. This step repairs, it does not rewrite.
+- URLs, email addresses and @handles: copy them character-for-character, here and in every later step including translation. Never "fix" a typo inside one, never translate or transliterate words inside a path, never re-space or shorten one. A changed link is a dead link.
 - When in doubt, leave the text exactly as it is. A confident wrong "correction" is worse than an uncorrected typo — it changes what the sender said.`;
 
 // 호칭(kinship-style address term) 규칙.

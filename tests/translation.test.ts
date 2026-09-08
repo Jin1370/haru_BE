@@ -333,3 +333,85 @@ describe('translateMessage — conversation context', () => {
     expect(lastUserPrompt()).not.toContain('Conversation so far');
   });
 });
+
+// ── already_target_language 오판 가드 (2026-09-08) ─────────────────────────
+// prod 사고: ja→ko / ko→ja 메시지가 STEP 1 boolean 뒤집힘으로 미번역 배달됨
+// (982건 중 3건). 타깃 언어의 문자가 원문에 하나도 없으면 "이미 타깃 언어" 는
+// 성립할 수 없다는 결정적 판정으로 잡고 Gemini 를 1회 재호출한다.
+describe('already_target_language 오판 가드', () => {
+  beforeEach(() => {
+    generateContentMock.mockReset();
+  });
+
+  it('한국어 원문 + target ja 오판 → 재호출해서 번역문 확보', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '라일락 자주 들어요' }));
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'ライラックよく聴きます' }));
+    const r = await translateMessage({ text: '라일락 자주 들어요', targetLanguage: 'ja' });
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(r.alreadyTargetLanguage).toBe(false);
+    expect(r.translation).toBe('ライラックよく聴きます');
+  });
+
+  it('일본어 원문 + target ko 오판 → 재호출', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '韓国でも流行ってるんですね' }));
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: '한국에서도 유행하는군요' }));
+    const r = await translateMessage({ text: '韓国でも流行ってるんですね', targetLanguage: 'ko' });
+    expect(r.translation).toBe('한국에서도 유행하는군요');
+  });
+
+  it('영어 원문 + target ko 오판 → 재호출 (라틴 발신도 커버)', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: 'Do you like K-pop?' }));
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'K팝 좋아해요?' }));
+    const r = await translateMessage({ text: 'Do you like K-pop?', targetLanguage: 'ko' });
+    expect(r.translation).toBe('K팝 좋아해요?');
+  });
+
+  it('재호출도 true 면 boolean 만 false 로 강제 (3번째 호출 없음)', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '라일락 자주 들어요' }));
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '라일락 자주 들어요' }));
+    const r = await translateMessage({ text: '라일락 자주 들어요', targetLanguage: 'ja' });
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(r.alreadyTargetLanguage).toBe(false);
+  });
+
+  it('정상 already=true (원문에 타깃 문자 있음) 는 재호출 안 함', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '안녕하세요' }));
+    const r = await translateMessage({ text: '안녕하세요', targetLanguage: 'ko' });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(r.alreadyTargetLanguage).toBe(true);
+  });
+
+  it('이모지·숫자만 있는 메시지는 판단 보류 — 재호출 안 함', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '😂😂 555' }));
+    const r = await translateMessage({ text: '😂😂 555', targetLanguage: 'ko' });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(r.alreadyTargetLanguage).toBe(true);
+  });
+
+  it('링크만 있는 메시지는 판단 보류 — URL 의 라틴 문자는 글자로 안 셈', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: 'https://youtu.be/abc123' }));
+    const r = await translateMessage({ text: 'https://youtu.be/abc123', targetLanguage: 'ko' });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(r.alreadyTargetLanguage).toBe(true);
+  });
+
+  it('이메일만 있는 메시지도 판단 보류', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: 'sejin@gmail.com' }));
+    await translateMessage({ text: 'sejin@gmail.com', targetLanguage: 'ja' });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('링크 + 한국어 본문 + target ja 는 여전히 재호출', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '이거 봐 https://youtu.be/abc' }));
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'これ見て https://youtu.be/abc' }));
+    const r = await translateMessage({ text: '이거 봐 https://youtu.be/abc', targetLanguage: 'ja' });
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(r.translation).toBe('これ見て https://youtu.be/abc');
+  });
+
+  it('already=false 면 스크립트와 무관하게 재호출 안 함', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'ライラック' }));
+    await translateMessage({ text: '라일락', targetLanguage: 'ja' });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+  });
+});

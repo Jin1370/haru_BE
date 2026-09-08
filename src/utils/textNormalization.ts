@@ -109,7 +109,9 @@ export function isTranslationIdentity(translation: string, original: string): bo
 // 두면 URL 뒤에 공백 없이 붙은 한글까지 먹어치운다 — "링크보세요https://a.b/c대박이에요"
 // 가 "링크보세요" 만 남고 뒷문장이 통째로 사라졌다. 한글·일본어·이모지는 URL 문자가
 // 아니므로 이 집합이 곧 경계가 된다.
-const URL_PATTERN = /(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:\/?#\[\]@!$&'()*+,;=%]+/gi;
+// export 사유: translation.ts 의 already_target_language 가드도 "URL 은 어느 언어도
+// 아니다" 라는 같은 전제를 쓴다 (링크만 보낸 메시지가 언어 판정에 끼면 안 됨).
+export const URL_PATTERN = /(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:\/?#\[\]@!$&'()*+,;=%]+/gi;
 
 export function stripNonAudibleTags(text: string): string {
   if (typeof text !== 'string' || text.length === 0) return text;

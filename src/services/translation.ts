@@ -4,7 +4,7 @@ import {
     HarmBlockThreshold,
 } from "@google-cloud/vertexai";
 import { env } from "../config/env";
-import { sanitizeAudioTags } from "../utils/textNormalization";
+import { sanitizeAudioTags, URL_PATTERN } from "../utils/textNormalization";
 import { retryOnce } from "../utils/retry";
 import type { VoiceIntroSlotLanguage } from "../types";
 
@@ -223,6 +223,48 @@ function describeContext(context?: MessageContextEntry[]): string {
     return `Conversation so far (context only — DO NOT translate these lines, oldest first):\n${lines}\n`;
 }
 
+// STEP 1 의 already_target_language 는 확률적이다 — temperature 0.4 에서 boolean 이
+// 가끔 뒤집힌다. 뒤집히면 STEP 4 가 원문을 그대로 돌려주므로 번역문이 사라지고
+// (translated_text=null) TTS 까지 원문 언어로 나간다. 실제로 prod 에서 크로스언어
+// 메시지 982건 중 3건(0.3%)이 이렇게 미번역으로 배달됐다.
+//
+// 프롬프트에 이미 bias-toward-false / "국가 이름 언급 ≠ 그 언어" 가드가 여러 줄
+// 들어있는데도 뚫린 케이스라, 문장을 더 넣는 걸로는 확률을 0 으로 못 만든다.
+// 대신 글자 종류로 결정적으로 판정한다: 타깃 언어의 문자가 원문에 하나도 없으면
+// 그 원문은 타깃 언어로 쓰인 것이 아니다 — 확률이 아니라 사실이다.
+const TARGET_SCRIPT: Record<string, RegExp> = {
+    ko: /[가-힣ᄀ-ᇿ㄰-㆏]/,
+    // 일본어는 한자 단독 문장(「了解」)도 정상이라 한자를 포함한다. 그래서 한자가
+    // 섞인 한국어 원문은 target=ja 에서 안 걸린다 — 드물어서 감수한다.
+    ja: /[぀-ヿ一-鿿ｦ-ﾟ]/,
+    en: /[A-Za-z]/,
+    th: /[฀-๿]/,
+    hi: /[ऀ-ॿ]/,
+};
+
+// URL·이메일은 어느 언어로도 읽히지 않는 중립 토큰인데 라틴 문자를 포함한다.
+// 빼지 않으면 링크 한 줄만 보낸 메시지가 "글자가 있다"로 잡혀 매번 재호출을 유발한다
+// (이모지·숫자만 있는 메시지는 판단 보류로 빠지는 것과 같은 취급이 되어야 한다).
+const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+
+/**
+ * 원문이 타깃 언어로 쓰였을 리 없는지 판정 (already_target_language=true 검증용).
+ *
+ * 글자가 하나도 없는 메시지(이모지·숫자·문장부호·링크만)는 언어를 단정할 수
+ * 없으므로 판단하지 않는다 — 괜히 걸면 "😂" 한 통에 Gemini 재호출이 붙는다.
+ * 오디오 태그([soft laugh])는 Gemini 출력에만 존재하고 여기 들어오는 원문에는
+ * 없으므로 고려 대상이 아니다.
+ */
+function cannotBeTargetLanguage(text: string, targetLanguage: string): boolean {
+    const script = TARGET_SCRIPT[targetLanguage];
+    if (!script) return false; // 미등록 언어 / null 타깃은 판단 보류
+    const stripped = text
+        .replace(URL_PATTERN, " ")
+        .replace(EMAIL_PATTERN, " ");
+    if (!/\p{L}/u.test(stripped)) return false; // 이모지·숫자·링크만 → 판단 보류
+    return !script.test(stripped);
+}
+
 export async function translateMessage(params: {
     text: string;
     targetLanguage: string;
@@ -235,32 +277,61 @@ ${describeParty("Speaker (who wrote this message)", params.speaker)}
 ${describeParty("Addressee (who reads it)", params.addressee)}
 ${describeContext(params.context)}Text to translate: ${JSON.stringify(params.text)}`;
 
-    // 순단성 실패만 1회 재시도. 아래 safety-block / JSON 파싱 실패는 다시 해도
-    // 같은 결과라 재시도 대상에서 제외 (호출 자체가 throw 한 경우만 감싼다).
-    const result = await retryOnce(
-        () =>
-            model.generateContent({
-                contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-            }),
-        "translateMessage",
-    );
+    const callGemini = async () => {
+        // 순단성 실패만 1회 재시도. 아래 safety-block / JSON 파싱 실패는 다시 해도
+        // 같은 결과라 재시도 대상에서 제외 (호출 자체가 throw 한 경우만 감싼다).
+        const result = await retryOnce(
+            () =>
+                model.generateContent({
+                    contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+                }),
+            "translateMessage",
+        );
 
-    const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!raw) {
-        throw new Error("Vertex AI returned no text (possibly safety-blocked)");
+        const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!raw) {
+            throw new Error(
+                "Vertex AI returned no text (possibly safety-blocked)",
+            );
+        }
+        const parsed = JSON.parse(raw) as {
+            translation: string;
+            already_target_language?: boolean;
+        };
+        // 화이트리스트 검증 — Gemini 가 규율 이탈 태그를 emit 해도 TTS/UI 오염 차단.
+        // alreadyTargetLanguage: 누락/비-boolean 이면 false — 번역을 한 번 더 보여주는
+        // 쪽이 안 보여주는 쪽보다 안전하다 (프롬프트의 bias-toward-false 와 같은 방향).
+        return {
+            translation: sanitizeAudioTags(parsed.translation),
+            alreadyTargetLanguage: parsed.already_target_language === true,
+        };
+    };
+
+    let out = await callGemini();
+
+    if (
+        out.alreadyTargetLanguage &&
+        cannotBeTargetLanguage(params.text, params.targetLanguage)
+    ) {
+        // 오판 확정. 이 응답의 translation 은 "번역 불필요" 판정을 따라 원문 그대로라
+        // 쓸 수 없다 — 진짜 번역문을 받으려면 다시 물어보는 수밖에 없다. 원인이
+        // 확률적 뒤집힘이라 재호출은 거의 항상 정상으로 온다.
+        console.warn(
+            `[translateMessage] already_target_language 오판 감지 (target=${params.targetLanguage}) — 재호출`,
+        );
+        out = await callGemini();
+        if (out.alreadyTargetLanguage) {
+            // 두 번 연속 오판. 번역문은 못 믿지만 "원문이 타깃 언어가 아니다" 는
+            // 확정 사실이므로 boolean 만 바로잡아 넘긴다. 재호출도 원문을 그대로
+            // 돌려줬다면 message.ts 의 isTranslationIdentity 가 2차로 걸러낸다.
+            console.error(
+                `[translateMessage] 재호출도 already_target_language=true (target=${params.targetLanguage}) — false 로 강제`,
+            );
+            out.alreadyTargetLanguage = false;
+        }
     }
-    const parsed = JSON.parse(raw) as {
-        translation: string;
-        already_target_language?: boolean;
-    };
 
-    // 화이트리스트 검증 — Gemini 가 규율 이탈 태그를 emit 해도 TTS/UI 오염 차단.
-    // alreadyTargetLanguage: 누락/비-boolean 이면 false — 번역을 한 번 더 보여주는
-    // 쪽이 안 보여주는 쪽보다 안전하다 (프롬프트의 bias-toward-false 와 같은 방향).
-    return {
-        translation: sanitizeAudioTags(parsed.translation),
-        alreadyTargetLanguage: parsed.already_target_language === true,
-    };
+    return out;
 }
 
 // ─── Voice intro domain (mig 011) ─────────────────────────────────────────

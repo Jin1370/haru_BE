@@ -20,6 +20,25 @@ primary_region = 'nrt'
   min_machines_running = 0
   processes = ['app']
 
+# 준비 완료 신호. 체크가 없으면 fly-proxy 는 머신이 `started` 가 되는 즉시
+# 트래픽을 보내는데, node 가 무거운 SDK(VertexAI/ElevenLabs/OpenAI) 를 다 올려
+# listen 하기까지 ~11초가 걸린다. 실제로 2026-09-09 배포에서 그 사이 요청이
+# `instance refused connection` 으로 떨어졌다 (01:40:01 refused → 01:40:12 listen).
+# 체크를 붙이면 (1) 프록시가 통과 전 머신으로 라우팅하지 않고 (2) 롤링 배포도
+# 다음 머신으로 넘어가기 전에 통과를 기다린다.
+#
+# 대상은 /api/config — 인증 불필요 + DB 미접촉이라 체크가 외부 의존성 장애로
+# 흔들리지 않는다 (DB 를 태우면 Supabase 순단에 전 머신이 unhealthy 가 된다).
+# interval 은 부팅(~11초) 안에 두어 준비 직후 빠르게 통과하도록 5초.
+# 체크는 프록시가 아니라 호스트(flyd)에서 오므로 auto_stop 판정 트래픽에 안 잡힌다
+# — scale-to-zero(무료 유지)는 그대로다.
+[[http_service.checks]]
+  grace_period = '3s'
+  interval = '5s'
+  timeout = '2s'
+  method = 'GET'
+  path = '/api/config'
+
 # SIGTERM 후 SIGKILL 까지 기다리는 시간. 기본값 5초로는 src/index.ts 의 그레이스풀
 # 드레인(최대 15초)이 5초 시점에 강제 종료돼 무의미해진다 — 202 비동기 경로의
 # 음성 메시지 파이프라인이 5~10초 걸리므로 그 위로 여유를 둔다.

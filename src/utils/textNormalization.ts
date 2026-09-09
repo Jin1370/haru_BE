@@ -113,10 +113,24 @@ export function isTranslationIdentity(translation: string, original: string): bo
 // 아니다" 라는 같은 전제를 쓴다 (링크만 보낸 메시지가 언어 판정에 끼면 안 됨).
 export const URL_PATTERN = /(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:\/?#\[\]@!$&'()*+,;=%]+/gi;
 
+// 이모지도 URL·자모와 같은 이유로 TTS 입력에서 제거한다 — 발화 대상이 아닌데
+// eleven_v3 가 무시해주지 않는다. 사고: 「はじめまして☺️」가 종결 부호 없는 텍스트라
+// elevenlabs.ts 의 `…` 패딩까지 붙어 "はじめまして☺️…" 로 합성됐고, v3 가 "읽을 수
+// 없는 심볼 + 문장 미완결" 조합에서 이어질 말을 지어내 「また」가 함께 발화됐다.
+// display 경로(translated_text / voice intro 슬롯)는 이모지를 그대로 둔다 — 화면의
+// 이모지는 톤 그 자체라 지우면 메시지가 밋밋해진다.
+//
+// \p{Emoji} 는 숫자 0-9 와 #·* 까지 잡으므로 절대 쓰지 않는다. Extended_Pictographic
+// (그림문자 본체) + Regional_Indicator (국기) + 변이 선택자/ZWJ/피부톤 결합 문자만
+// 지운다. 문장부호(。！？…、~)와 숫자는 prosody 에 필요하므로 건드리지 않는다.
+const EMOJI_PATTERN =
+  /[\p{Extended_Pictographic}\p{Regional_Indicator}\u{FE0E}\u{FE0F}\u{20E3}\u{200D}\u{1F3FB}-\u{1F3FF}]/gu;
+
 export function stripNonAudibleTags(text: string): string {
   if (typeof text !== 'string' || text.length === 0) return text;
   return text
     .replace(URL_PATTERN, ' ')
+    .replace(EMOJI_PATTERN, ' ')
     .replace(AUDIO_TAG_PATTERN, (m) => (m === '[soft laugh]' ? m : ''))
     // 남은 한글 호환 자모(ㄱ-ㅎ, ㅏ-ㅣ) 제거 — 단독 자모는 발화 불가라 합성하면
     // 자모 이름을 읽거나 괴음이 난다. Gemini 가 초성체(ㄷㄱㄷㄱ)를 못 펴서 그대로

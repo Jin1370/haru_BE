@@ -188,6 +188,24 @@ describe('stripNonAudibleTags', () => {
   it('링크만 있는 메시지 → 빈 문자열 (호출처가 TTS 스킵 판단)', () => {
     expect(hasSpeakableContent(stripNonAudibleTags('https://open.spotify.com/track/xyz'))).toBe(false);
   });
+
+  // 사고: 「はじめまして☺️」가 "はじめまして☺️…" 로 합성돼 「また」가 함께 발화됨.
+  it('이모지 제거 — TTS 가 이모지를 읽거나 뒷말을 지어내지 않는다', () => {
+    expect(stripNonAudibleTags('はじめまして☺️')).toBe('はじめまして');
+    expect(stripNonAudibleTags('반가워요😊😊')).toBe('반가워요');
+    expect(stripNonAudibleTags('오늘❤️ 좋았어')).toBe('오늘 좋았어');
+    // 국기(regional indicator) · 피부톤 · ZWJ 결합 이모지도 잔재 없이 제거
+    expect(stripNonAudibleTags('한국🇰🇷 좋아👍🏻 가족👨‍👩‍👧')).toBe('한국 좋아 가족');
+  });
+
+  it('문장부호·숫자는 보존 (\\p{Emoji} 오적용 방지)', () => {
+    // \p{Emoji} 는 0-9 와 #·* 까지 잡는다 — 숫자가 지워지면 "3시" 가 "시" 가 된다.
+    expect(stripNonAudibleTags('3시 어때요? 좋아요~ 그럼、그때！')).toBe('3시 어때요? 좋아요~ 그럼、그때！');
+  });
+
+  it('이모지만 있는 메시지 → 빈 문자열 (호출처가 TTS 스킵 판단)', () => {
+    expect(hasSpeakableContent(stripNonAudibleTags('😂😂😂'))).toBe(false);
+  });
 });
 
 // ── replaceTagsForDisplay — audio tag → 타깃 언어 슬랭 ────────────────────────

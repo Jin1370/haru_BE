@@ -288,7 +288,7 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   // 이 화자 성별 × 나이차로 결정되므로 Gemini 에 두 프로필을 모두 넘겨야 한다.
   const [senderResult, recipientResult] = await Promise.all([
     supabase.from('profiles').select('language, elevenlabs_voice_id, display_name, gender, birth_date').eq('id', req.userId!).single(),
-    supabase.from('profiles').select('language, gender, birth_date').eq('id', recipientId).single(),
+    supabase.from('profiles').select('language, gender, birth_date, display_name').eq('id', recipientId).single(),
   ]);
 
   const sender = senderResult.data;
@@ -303,13 +303,17 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   const senderGender: PersonaGender = rawGender === 'female' ? null : rawGender;
   // 주의: senderGender 는 persona 용으로 female 이 null 로 지워진 값이라
   // 호칭 판정에 쓰면 안 된다 — 반드시 raw 프로필 값을 넘긴다.
+  // name: 닉네임이 보통명사와 겹칠 때 Gemini 가 고유명사로 읽게 하는 근거
+  // (닉네임 '시부' → '시아버지' 오역 사고). translation.ts PARTICIPANT_NAME_RULES.
   const speaker: AddressParty = {
     gender: (sender?.gender as string | null) ?? null,
     birthDate: (sender?.birth_date as string | null) ?? null,
+    name: senderName || null,
   };
   const addressee: AddressParty = {
     gender: (recipient?.gender as string | null) ?? null,
     birthDate: (recipient?.birth_date as string | null) ?? null,
+    name: (recipient?.display_name as string | null) ?? null,
   };
 
   if (!sender || !recipient || !senderLang || !recipientLang) {
@@ -673,7 +677,7 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
   const recipientId = msg.sender_id === match.user1_id ? match.user2_id : match.user1_id;
   const [senderResult, recipientResult] = await Promise.all([
     supabase.from('profiles').select('elevenlabs_voice_id, gender, birth_date, display_name').eq('id', msg.sender_id).single(),
-    supabase.from('profiles').select('gender, birth_date').eq('id', recipientId).single(),
+    supabase.from('profiles').select('gender, birth_date, display_name').eq('id', recipientId).single(),
   ]);
   const sender = senderResult.data;
   const recipientProfile = recipientResult.data;
@@ -702,10 +706,12 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
       speaker: {
         gender: (sender?.gender as string | null) ?? null,
         birthDate: (sender?.birth_date as string | null) ?? null,
+        name: (sender?.display_name as string | null) ?? null,
       },
       addressee: {
         gender: (recipientProfile?.gender as string | null) ?? null,
         birthDate: (recipientProfile?.birth_date as string | null) ?? null,
+        name: (recipientProfile?.display_name as string | null) ?? null,
       },
       // 최초 합성과 같은 맥락을 넘겨야 재합성 음성만 다른 번역이 되지 않는다
       // (호칭 컨텍스트와 같은 이유 — 위 주석 참고).

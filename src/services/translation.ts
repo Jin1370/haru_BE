@@ -64,6 +64,24 @@ The Speaker / Addressee profile lines given in the user message are the ONLY sou
 - Hindi output: भैया (older male) / दीदी (older female); for a peer use the name. Keep आप/तुम consistent with the source register.
 These rules override any literal reading of the source. Producing a term the profile lines contradict is the single worst failure in this task.`;
 
+// 참가자 닉네임 규칙.
+//
+// 사고 사례: 닉네임이 '시부'인 일본인에게 보낸 '시부님은 어때요?' 가 ja 로
+// '義父さん(시아버지)'으로 번역됨. 원인은 Gemini 에 두 사람의 display_name 이
+// 전혀 안 넘어가서 — '시부'는 한국어 사전에 실제로 있는 단어(媤父)이고 '님'까지
+// 붙어 있으니 보통명사 읽기가 가장 그럴듯했다. STEP 4 의 "Keep personal names"
+// 규칙은 있었지만 무엇이 이름인지 알 데이터가 없어 발동 자체가 불가능했다.
+//
+// 반대 방향도 같은 구조로 뚫린다(ハル·사랑·가을 …). 그래서 프로필 라인에 이름을
+// 주입하고, 보통명사 읽기보다 이름 읽기를 우선하도록 강제한다. 단 이름이 진짜
+// 일반 단어로 쓰인 경우("하루 종일")까지 얼리면 그것도 오역이라 가드를 같이 둔다.
+const PARTICIPANT_NAME_RULES = `PARTICIPANT NAMES — the names in the profile lines are PROPER NOUNS:
+The Speaker / Addressee profile lines may carry that person's display name. In this conversation those strings are names, even when the same string is also an ordinary word or a kinship term in some language — Korean 시부 also means "father-in-law", 하루 also means "a day", 사랑 also means "love"; Japanese カレン, ハル likewise.
+- When the text refers to one of these two people by that name — typically with an honorific suffix (님 / 씨 / さん / くん / ちゃん) or standing in a vocative or subject position — keep it as a NAME. NEVER render it as the common noun. "시부님은 어때요?" addressed to the person named 시부 is "シブさんはどうですか？", NEVER "義父さんは…".
+- Keep the name in its original form; transliterate into the target script only when the original script would be unreadable there (시부 → シブ, しぶ → 시부). Never translate its literal meaning.
+- Guard against over-applying: if the same string is plainly used as an ordinary word and not as a reference to that person ("하루 종일" = "all day long"), translate it normally. Judge by how the text uses it.
+- These names are given for RECOGNITION ONLY. Never insert a name that the source text does not contain (see ADDRESS TERMS).`;
+
 // 작품명(영화·드라마·노래·책·만화·게임) + 음식명 규칙.
 //
 // 기존 프롬프트의 "Keep proper nouns in their original form" 은 인명·지명·브랜드엔
@@ -91,6 +109,7 @@ If a work or dish is known in the target market under its original or English na
 export interface AddressParty {
     gender?: string | null; // 'male' | 'female' | 'other'
     birthDate?: string | null; // profiles.birth_date (YYYY-MM-DD)
+    name?: string | null; // profiles.display_name — PARTICIPANT_NAME_RULES 참고
 }
 
 function ageFrom(birthDate?: string | null): number | null {
@@ -107,7 +126,12 @@ function ageFrom(birthDate?: string | null): number | null {
 function describeParty(label: string, party?: AddressParty): string {
     const gender = party?.gender ?? "unknown gender";
     const age = ageFrom(party?.birthDate);
-    return `${label}: ${gender}, ${age === null ? "unknown age" : `${age} years old`}`;
+    // 닉네임은 사용자 입력이라 JSON 인용부호로 감싼다 (zod 가 1~50자·단일행·제어문자
+    // 금지로 막고 있어 프롬프트 구조는 못 깨지만, 이름의 경계를 명시해야 모델이
+    // 어디까지가 이름인지 안다).
+    const name = party?.name?.trim();
+    const namePart = name ? `name ${JSON.stringify(name)}, ` : "";
+    return `${label}: ${namePart}${gender}, ${age === null ? "unknown age" : `${age} years old`}`;
 }
 
 const vertexAi = new VertexAI({
@@ -184,6 +208,8 @@ CRITICAL — context is advisory, never authoritative. Chat messages interleave:
 If no context block is present, translate the text on its own.
 
 ${ADDRESS_TERM_RULES}
+
+${PARTICIPANT_NAME_RULES}
 
 ${LOCALIZED_NAME_RULES}
 

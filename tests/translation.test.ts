@@ -123,6 +123,33 @@ describe('address term context', () => {
     expect(lastPrompt()).toContain('Addressee (who reads it): female, 32 years old');
   });
 
+  // 닉네임 '시부'(媤父=시아버지) 오역 사고 — 이름이 프롬프트에 실려야 Gemini 가
+  // 보통명사 대신 고유명사로 읽는다. 실제 판단은 모델 몫이라 여기선 주입만 검증.
+  it('display_name 을 프로필 라인에 싣는다', async () => {
+    mockGenerateText(JSON.stringify({ translation: 'シブさんはどうですか？' }));
+    await translateMessage({
+      text: '시부님은 어때요?',
+      targetLanguage: 'ja',
+      speaker: { gender: 'female', birthDate: '1996-03-02', name: '세진' },
+      addressee: { gender: 'male', birthDate: '1995-01-01', name: '시부' },
+    });
+    expect(lastPrompt()).toContain('Speaker (who wrote this message): name "세진", female,');
+    expect(lastPrompt()).toContain('Addressee (who reads it): name "시부", male,');
+  });
+
+  it('이름이 없거나 공백이면 name 조각을 넣지 않는다', async () => {
+    mockGenerateText(JSON.stringify({ translation: 'hi' }));
+    await translateMessage({
+      text: 'x',
+      targetLanguage: 'en',
+      speaker: { gender: 'male', birthDate: '2000-01-01', name: '   ' },
+      addressee: { gender: 'female', birthDate: '2000-01-01' },
+    });
+    expect(lastPrompt()).toContain('Speaker (who wrote this message): male,');
+    expect(lastPrompt()).toContain('Addressee (who reads it): female,');
+    expect(lastPrompt()).not.toContain('name "');
+  });
+
   it('생일 전이면 한 살 적게 계산 (만 나이 경계)', async () => {
     mockGenerateText(JSON.stringify({ translation: 'hi' }));
     await translateMessage({

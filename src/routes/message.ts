@@ -1,7 +1,8 @@
 import { Router, Response } from 'express';
 import * as Sentry from '@sentry/node';
 import { supabase } from '../config/supabase';
-import { uploadFile } from '../services/storage';
+import multer from 'multer';
+import { uploadFile, createSignedUrlForPath } from '../services/storage';
 import { synthesizeSpeech, type PersonaGender } from '../services/elevenlabs';
 import {
   translateMessage,
@@ -26,13 +27,38 @@ import {
 import { AuthRequest, Emotion } from '../types';
 import { sendPushToUser } from '../services/pushNotifications';
 import { isBlocked } from '../constants/moderationDictionary';
-import { checkOpenAiModeration } from '../services/openaiModeration';
+import { checkOpenAiModeration, checkOpenAiImageModeration } from '../services/openaiModeration';
 import { requireNotFrozen } from '../utils/freezeGuard';
 import { logModerationBlock } from '../utils/moderationAudit';
 import { isCampaignBot, sendCampaignEntryGuide } from '../services/campaignBot';
 import { randomUUID } from 'crypto';
 
 const router = Router();
+
+// chat-photos: 채팅 사진 업로드. 프로필 사진(5MB)과 같은 한도 — 클라이언트가
+// 장변 1280 / JPEG 0.7 로 줄여 보내므로 정상 경로는 ~300KB 다.
+const photoUpload = multer({ limits: { fileSize: 5 * 1024 * 1024 } });
+const ALLOWED_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+// multipart 라 zod validateBody 를 못 쓴다 — uuid 형식만 직접 검증해 임의 문자열
+// PK 주입 표면을 막는다 (텍스트 경로의 client_message_id 검증과 같은 목적).
+const PHOTO_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// 사진 메시지의 폴백 캡션. 사진 메시지는 번역/TTS 파이프라인을 안 타므로
+// (캡션을 TTS 가 읽으면 안 된다) 여기 정적 문자열을 넣는다.
+//
+// 이 캡션이 하는 일이 하나 더 있다: **사진을 모르는 옛 클라이언트에서 빈
+// 말풍선 대신 텍스트로 보인다.** photo_path 를 모르는 앱도 original_text /
+// translated_text 는 렌더하기 때문.
+const PHOTO_CAPTIONS: Record<string, string> = {
+  ko: '사진을 보냈어요',
+  ja: '写真を送りました',
+  en: 'Sent a photo',
+  th: 'ส่งรูปภาพแล้ว',
+  hi: 'एक फ़ोटो भेजी',
+};
+function photoCaption(lang: string): string {
+  return PHOTO_CAPTIONS[lang] ?? PHOTO_CAPTIONS.en;
+}
 
 router.use(authMiddleware);
 
@@ -200,6 +226,25 @@ function toReplyQuote(
 // 페이지 안에 원본이 있으면 그대로 쓰고, 페이지 밖(더 오래된 메시지)만 한 번에
 // 추가 조회한다. mig 055 미적용 환경에서는 reply_to_id 가 undefined 라 전체가
 // no-op — 응답 shape 이 예전 그대로 유지된다.
+// chat-photos: DB 에는 버킷 경로만 저장하고, 응답 시점에 짧은 TTL 서명 URL 을
+// 발급해 photo_url 로 미러한다. public 버킷이면 URL 이 한 번 새는 순간 영구히
+// 유효해지므로 채팅 사진에는 쓸 수 없다 (voice-intro-audio 와 같은 방식).
+async function attachPhotoUrls(
+  rows: Record<string, any>[],
+): Promise<Record<string, any>[]> {
+  const withPhoto = rows.filter((r) => r.photo_path);
+  if (withPhoto.length === 0) return rows;
+  const signed = new Map<string, string | null>();
+  await Promise.all(
+    withPhoto.map(async (r) => {
+      signed.set(r.id, await createSignedUrlForPath('chat-photos', r.photo_path));
+    }),
+  );
+  return rows.map((r) =>
+    r.photo_path ? { ...r, photo_url: signed.get(r.id) ?? null } : r,
+  );
+}
+
 async function attachReplyQuotes(
   rows: Record<string, any>[],
   matchId: string,
@@ -303,7 +348,7 @@ router.get('/:matchId/messages', validateQuery(messageQuerySchema), async (req: 
     }
     // 응답 계약은 항상 최신 우선(desc) — FE 가 경로마다 정렬을 분기하지 않게.
     const rows = [...(newer.data ?? [])].reverse().concat(older.data ?? []);
-    res.json(await attachReplyQuotes(rows, matchId as string, req.userId!));
+    res.json(await attachPhotoUrls(await attachReplyQuotes(rows, matchId as string, req.userId!)));
     return;
   }
 
@@ -318,7 +363,11 @@ router.get('/:matchId/messages', validateQuery(messageQuerySchema), async (req: 
       res.status(500).json({ error: error.message });
       return;
     }
-    res.json(await attachReplyQuotes([...(data ?? [])].reverse(), matchId as string, req.userId!));
+    res.json(
+      await attachPhotoUrls(
+        await attachReplyQuotes([...(data ?? [])].reverse(), matchId as string, req.userId!),
+      ),
+    );
     return;
   }
 
@@ -335,7 +384,7 @@ router.get('/:matchId/messages', validateQuery(messageQuerySchema), async (req: 
     return;
   }
 
-  res.json(await attachReplyQuotes(data ?? [], matchId as string, req.userId!));
+  res.json(await attachPhotoUrls(await attachReplyQuotes(data ?? [], matchId as string, req.userId!)));
 });
 
 // 메시지 전송 (번역 + 더빙 파이프라인)
@@ -635,6 +684,248 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
     }).catch((err) => console.error('[processAndInsertMessage unhandled]', err));
   }
 });
+
+// chat-photos: 사진 메시지 전송.
+//
+// 텍스트 전송(POST /messages)과 갈라지는 지점:
+//   * 번역/TTS 파이프라인을 **안 탄다**. 캡션이 없어 번역할 게 없고, 폴백
+//     캡션을 클론 보이스가 읽으면 안 된다. audio_status='ready' +
+//     audio_url=null 로 기존 "텍스트 전용" 경로를 그대로 타므로 수신자
+//     게이트도 자연 통과한다 (ChatBubble 이 자동 청취 마킹).
+//   * 동기 INSERT 다. 202 stub → 비동기 INSERT 패턴이 필요했던 이유가 TTS
+//     지연이었는데 여기엔 그게 없다.
+//   * 모더레이션이 **이미지** 로 돈다. 사전 키워드 layer 는 해당 없음.
+//
+// 나머지(매치 검증 / freeze / 차단 / 멱등 / 푸시)는 텍스트 경로와 동일.
+router.post(
+  '/:matchId/messages/photo',
+  requireNotFrozen,
+  photoUpload.single('photo'),
+  async (req: AuthRequest, res: Response) => {
+    const matchId = req.params.matchId as string;
+
+    if (!req.file) {
+      res.status(400).json({ error: 'No photo file provided' });
+      return;
+    }
+    if (!ALLOWED_PHOTO_TYPES.includes(req.file.mimetype)) {
+      res.status(400).json({ error: 'Only JPEG, PNG, WebP images are allowed' });
+      return;
+    }
+
+    // multipart 라 body 값은 전부 문자열로 온다.
+    const clientMessageId = (req.body?.client_message_id as string | undefined) || undefined;
+    const replyToId = (req.body?.reply_to_id as string | undefined) || undefined;
+    const width = Number(req.body?.width) || null;
+    const height = Number(req.body?.height) || null;
+
+    if (clientMessageId && !PHOTO_UUID_RE.test(clientMessageId)) {
+      res.status(400).json({ error: 'client_message_id must be a uuid' });
+      return;
+    }
+    if (replyToId && !PHOTO_UUID_RE.test(replyToId)) {
+      res.status(400).json({ error: 'reply_to_id must be a uuid' });
+      return;
+    }
+
+    // 1) 매치 참여자 + 언매치 검증
+    const { data: match } = await supabase
+      .from('matches')
+      .select('*')
+      .eq('id', matchId)
+      .or(`user1_id.eq.${req.userId!},user2_id.eq.${req.userId!}`)
+      .single();
+
+    if (!match) {
+      res.status(403).json({ error: 'Not a member of this match' });
+      return;
+    }
+    if (match.unmatched_at) {
+      res.status(403).json({ error: 'This match has ended' });
+      return;
+    }
+
+    const recipientId =
+      match.user1_id === req.userId! ? (match.user2_id as string) : (match.user1_id as string);
+
+    // 2) 차단 검증 (양방향)
+    const { data: blocks } = await supabase
+      .from('blocks')
+      .select('id')
+      .or(
+        `and(blocker_id.eq.${req.userId!},blocked_id.eq.${recipientId}),` +
+          `and(blocker_id.eq.${recipientId},blocked_id.eq.${req.userId!})`,
+      );
+    if (blocks && blocks.length > 0) {
+      res.status(403).json({ error: 'Cannot send to a blocked user' });
+      return;
+    }
+
+    // 3) 언어 — 폴백 캡션을 양쪽 언어로 채우기 위해 필요.
+    const { data: profiles } = await supabase
+      .from('profiles')
+      .select('id, language')
+      .in('id', [req.userId!, recipientId]);
+    const langOf = new Map<string, string>(
+      (profiles ?? []).map((p: any) => [p.id as string, (p.language as string) ?? 'en']),
+    );
+    const senderLang = langOf.get(req.userId!) ?? 'en';
+    const recipientLang = langOf.get(recipientId) ?? 'en';
+
+    // 4) 답장 대상 검증 (텍스트 경로와 동일 규칙)
+    if (replyToId) {
+      const { data: replyTarget, error: replyTargetError } = await supabase
+        .from('messages')
+        .select('id')
+        .eq('id', replyToId)
+        .eq('match_id', matchId)
+        .maybeSingle();
+      if (replyTargetError) {
+        console.error('[POST messages/photo] reply target lookup failed:', replyTargetError.message);
+      }
+      if (!replyTarget) {
+        res.status(404).json({ error: 'Reply target not found', code: 'reply_target_not_found' });
+        return;
+      }
+    }
+
+    // 5) 이미지 모더레이션. Storage 업로드 **전** 에 돈다 — 차단된 이미지가
+    //    잠깐이라도 버킷에 존재하지 않게.
+    //
+    //    ⚠️ 이 레이어는 CSAM(sexual/minors)을 못 잡는다 — omni-moderation 의
+    //    이미지 입력이 지원하지 않는 카테고리다. 그 공백은 신고 + auto-freeze
+    //    가 메운다 (사용자 결정 2026-09-10).
+    const dataUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+    const moderation = await checkOpenAiImageModeration(dataUrl);
+    if (moderation.blocked) {
+      logModerationBlock({
+        senderId: req.userId!,
+        category: moderation.category ?? 'other',
+        language: senderLang,
+        layer: 'openai',
+        surface: 'chat_photo',
+        rawCategory: moderation.rawCategory,
+      });
+      // 카테고리는 응답에 노출하지 않는다 (우회 패턴 학습 차단).
+      res.status(422).json({ error: 'Photo blocked', code: 'photo_blocked' });
+      return;
+    }
+
+    // 6) Storage 업로드 → INSERT. 경로는 매치 폴더 아래 messageId 기준이라
+    //    sweep 이 경로만으로 삭제할 수 있다.
+    const messageId = clientMessageId ?? randomUUID();
+    const ext = req.file.mimetype === 'image/png' ? 'png' : req.file.mimetype === 'image/webp' ? 'webp' : 'jpg';
+    const photoPath = `${matchId}/${messageId}.${ext}`;
+
+    try {
+      await uploadFile('chat-photos', photoPath, req.file.buffer, req.file.mimetype);
+    } catch (e) {
+      console.error('[POST messages/photo] upload failed:', (e as Error).message);
+      res.status(500).json({ error: 'Photo upload failed' });
+      return;
+    }
+
+    const { row, inserted, conflict } = await idempotentInsertMessage(
+      {
+        id: messageId,
+        match_id: matchId,
+        sender_id: req.userId!,
+        original_text: photoCaption(senderLang),
+        original_language: senderLang,
+        translated_text: photoCaption(recipientLang),
+        translated_language: recipientLang,
+        audio_url: null,
+        audio_status: 'ready',
+        emotion: null,
+        reply_to_id: replyToId ?? null,
+        photo_path: photoPath,
+        photo_width: width,
+        photo_height: height,
+        created_at: new Date().toISOString(),
+      },
+      matchId,
+      req.userId!,
+    );
+
+    if (conflict) {
+      res.status(409).json({ error: 'Message id already used', code: 'duplicate_message' });
+      return;
+    }
+    if (!row) {
+      res.status(500).json({ error: 'Photo message insert failed' });
+      return;
+    }
+
+    const [withUrl] = await attachPhotoUrls([row as Record<string, any>]);
+    res.status(inserted ? 201 : 200).json(withUrl);
+
+    // 실제로 INSERT 한 경우에만 푸시 — 멱등 재전송의 이중 푸시 방지.
+    if (inserted) {
+      const { data: sender } = await supabase
+        .from('profiles')
+        .select('display_name')
+        .eq('id', req.userId!)
+        .maybeSingle();
+      sendPushToUser(recipientId, {
+        type: 'message',
+        match_id: matchId,
+        sender_id: req.userId!,
+        sender_name: (sender?.display_name as string | null) ?? '',
+      }).catch((e) => console.error('[POST messages/photo] push failed:', e));
+    }
+  },
+);
+
+// chat-photos: 사진 한 장의 서명 URL 발급.
+//
+// Realtime INSERT 페이로드는 **DB 원본 행**이라 photo_path 만 있고 photo_url 이
+// 없다 (서명은 HTTP 응답을 만들 때 붙인다). 그래서 수신자 화면은 사진 메시지가
+// 실시간으로 도착해도 이미지를 못 그리고, 채팅방을 다시 들어가 GET 을 태워야
+// 보였다. 그 한 칸을 메우는 라우트 — FE 가 realtime 으로 받은 사진 메시지에
+// 대해서만 호출한다.
+//
+// 서명 URL 을 행에 저장하지 않는 이유는 만료(1시간) 때문이다. 저장하면 하루
+// 뒤에 죽은 URL 이 DB 에 남는다.
+router.get(
+  '/:matchId/messages/:messageId/photo-url',
+  async (req: AuthRequest, res: Response) => {
+    const { matchId, messageId } = req.params;
+
+    const { data: match } = await supabase
+      .from('matches')
+      .select('id')
+      .eq('id', matchId)
+      .or(`user1_id.eq.${req.userId!},user2_id.eq.${req.userId!}`)
+      .single();
+    if (!match) {
+      res.status(403).json({ error: 'Not a member of this match' });
+      return;
+    }
+
+    // match_id 를 조건에 포함 — 다른 매치의 사진 URL 을 발급받는 경로 차단.
+    const { data: msg, error: selectError } = await supabase
+      .from('messages')
+      .select('photo_path')
+      .eq('id', messageId)
+      .eq('match_id', matchId)
+      .maybeSingle();
+    if (selectError) {
+      res.status(500).json({ error: selectError.message });
+      return;
+    }
+    if (!msg?.photo_path) {
+      res.status(404).json({ error: 'Photo not found' });
+      return;
+    }
+
+    const photoUrl = await createSignedUrlForPath('chat-photos', msg.photo_path as string);
+    if (!photoUrl) {
+      res.status(500).json({ error: 'Failed to sign photo url' });
+      return;
+    }
+    res.json({ photo_url: photoUrl });
+  },
+);
 
 // read-at-removal-list-mask sprint: PATCH /:matchId/messages/read 라우트 제거.
 //

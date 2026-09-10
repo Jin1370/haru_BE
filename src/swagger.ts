@@ -218,6 +218,31 @@ export const swaggerDocument = {
             description:
               'voice-first-message-gate (mig 015): 수신자가 음성을 1회 끝까지 재생한 시각. NULL = 미청취 → FE 가 텍스트를 숨기고 편지 UI 만 노출. 본인 발신 메시지는 항상 null.',
           },
+          photo_path: {
+            type: 'string',
+            nullable: true,
+            description:
+              'chat-photos (mig 056): 사진 메시지의 버킷 내 **경로**. URL 이 아니라 경로를 저장하고 읽기 시점에 서명 URL 을 발급한다 (버킷 private).',
+          },
+          photo_url: {
+            type: 'string',
+            nullable: true,
+            description:
+              'chat-photos: 응답에만 실리는 1시간 TTL 서명 URL (DB 미저장). photo_path 가 있는 메시지에만 채워진다.',
+          },
+          photo_purged_at: {
+            type: 'string',
+            format: 'date-time',
+            nullable: true,
+            description:
+              'chat-photos: 전송 30일 sweep 이 사진을 폐기한 시각. **복구 불가** — FE 는 "만료된 사진" 플레이스홀더로 렌더한다 (음성과 달리 재합성 경로가 없다).',
+          },
+          photo_width: { type: 'integer', nullable: true },
+          photo_height: {
+            type: 'integer',
+            nullable: true,
+            description: '이미지 로드 전 자리를 잡아 리스트가 튀는 것을 막는 용도.',
+          },
           reply_to_id: {
             type: 'string',
             format: 'uuid',
@@ -1031,6 +1056,46 @@ export const swaggerDocument = {
           200: { description: '업데이트된 (또는 이미 listened 상태인) Message row', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
           403: { description: '매치 비참여자 또는 송신자 본인 호출', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           404: { description: '메시지 없음 또는 매치 불일치', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/matches/{matchId}/messages/photo': {
+      post: {
+        tags: ['Message'],
+        summary: '사진 메시지 전송 (multipart)',
+        description:
+          'chat-photos: 텍스트 전송과 달리 번역/TTS 파이프라인을 타지 않는다 — 캡션이 없어 번역할 게 없고 폴백 캡션을 클론 보이스가 읽으면 안 되기 때문. ' +
+          "audio_status='ready' + audio_url=null 로 기존 텍스트 전용 경로를 그대로 타므로 수신자 청취 게이트도 자연 통과한다. " +
+          'original_text/translated_text 에는 양쪽 언어의 폴백 캡션이 들어가는데, 이는 **사진을 모르는 옛 클라이언트에서 빈 말풍선 대신 텍스트로 보이게** 하는 역할도 한다. ' +
+          '이미지 모더레이션은 Storage 업로드 **전** 에 돈다. ⚠️ omni-moderation 의 이미지 입력은 sexual/minors(CSAM)를 지원하지 않아 그 카테고리는 잡히지 않는다 — 신고 + auto-freeze 가 그 공백을 맡는다.',
+        parameters: [
+          { name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'multipart/form-data': {
+              schema: {
+                type: 'object',
+                required: ['photo'],
+                properties: {
+                  photo: { type: 'string', format: 'binary', description: 'JPEG/PNG/WebP, 최대 5MB. 클라이언트가 장변 1280 / JPEG 0.7 로 줄여 보낸다.' },
+                  client_message_id: { type: 'string', format: 'uuid', description: '멱등 키. 재전송 시 같은 값을 쓰면 row 가 단일로 유지된다.' },
+                  reply_to_id: { type: 'string', format: 'uuid' },
+                  width: { type: 'integer' },
+                  height: { type: 'integer' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: { description: '멱등 재반환 (같은 client_message_id)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
+          201: { description: '전송 성공', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
+          400: { description: '파일 없음 / 허용 안 되는 타입 / uuid 아닌 id', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '매치 비참여자 / 언매치 / 차단 / 동결 계정', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: 'reply_to_id 가 이 매치의 메시지가 아님', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          422: { description: '이미지 모더레이션 차단 — code: photo_blocked (카테고리 미노출)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },

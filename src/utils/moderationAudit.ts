@@ -27,7 +27,9 @@ export interface ModerationBlockEvent {
   category: string;
   language: string;
   layer: 'dictionary' | 'openai';
-  surface: 'message' | 'voice_intro' | 'photo';
+  // 'photo' = 프로필 사진 변환 거부(photo-watercolor-pipeline), 'chat_photo' =
+  // 채팅 사진 차단. 둘을 나눠야 운영 리뷰에서 표면별 빈도가 섞이지 않는다.
+  surface: 'message' | 'voice_intro' | 'photo' | 'chat_photo';
   // openai layer 만 채움 — `omni-moderation-latest` 의 매핑 전 raw 카테고리.
   // 사전 layer 는 카테고리가 그대로 raw 이므로 생략.
   rawCategory?: string;

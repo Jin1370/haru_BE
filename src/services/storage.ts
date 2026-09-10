@@ -118,6 +118,23 @@ export async function purgeUserVoiceMessages(userId: string): Promise<number> {
 // 들려주는 표면이라 per-listen 비밀이 아니다 — 막으려는 건 영구 URL 의 익명 대량 수집.
 export const SIGNED_URL_DEFAULT_TTL = 60 * 60;
 
+// 버킷 내 경로를 바로 서명. chat-photos 처럼 DB 에 URL 이 아니라 **경로**를
+// 저장하는 표면용 (URL 을 저장하면 버킷 public/private 전환 때 값이 통째로
+// 무의미해진다). 아래 createSignedUrlFromStored 도 이 함수로 수렴한다.
+export async function createSignedUrlForPath(
+  bucket: string,
+  path: string | null | undefined,
+  expiresIn: number = SIGNED_URL_DEFAULT_TTL,
+): Promise<string | null> {
+  if (!path) return null;
+  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, expiresIn);
+  if (error || !data) {
+    console.error(`[Signed URL failed] bucket=${bucket} path=${path}`, error?.message);
+    return null;
+  }
+  return data.signedUrl;
+}
+
 export async function createSignedUrlFromStored(
   bucket: string,
   storedUrl: string | null | undefined,
@@ -131,12 +148,7 @@ export async function createSignedUrlFromStored(
   } catch {
     return null;
   }
-  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, expiresIn);
-  if (error || !data) {
-    console.error(`[Signed URL failed] bucket=${bucket} path=${path}`, error?.message);
-    return null;
-  }
-  return data.signedUrl;
+  return createSignedUrlForPath(bucket, path, expiresIn);
 }
 
 // 슬롯 JSONB(예: voice_intro_audio_urls 의 {ko,ja,en}) 전체를 서명 URL 로 변환.

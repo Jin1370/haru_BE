@@ -57,6 +57,47 @@ const CATEGORY_MAP: Array<[string, ModerationCategory]> = [
   ['sexual', 'sexual'],
 ];
 
+// 이미지 모더레이션. omni-moderation-latest 는 멀티모달이라 같은 모델·같은
+// 카테고리 매핑을 그대로 쓴다.
+//
+// ⚠️ 이미지 입력이 실제로 판정하는 카테고리는 sexual / self-harm* / violence*
+// 뿐이다. **sexual/minors (CSAM) 와 illicit 은 텍스트 전용**이라 이미지로는
+// 절대 true 가 되지 않는다 — 즉 이 레이어로 CSAM 은 못 잡는다. 그 공백은
+// 신고 경로 + 누적 auto-freeze 가 메운다 (사용자 결정 2026-09-10).
+//
+// 매핑 배열을 공유하므로 텍스트 전용 카테고리가 섞여 있어도 무해하다 (이미지
+// 응답에선 그 키가 항상 false).
+export async function checkOpenAiImageModeration(
+  dataUrl: string,
+): Promise<OpenAiModerationResult> {
+  const c = getClient();
+  if (!c) return PASS; // 키 미설정 → fail-open
+
+  try {
+    const res = await c.moderations.create({
+      model: 'omni-moderation-latest',
+      input: [{ type: 'image_url', image_url: { url: dataUrl } }],
+    });
+    const result = res.results?.[0];
+    if (!result?.categories) return PASS;
+
+    const cats = result.categories as unknown as Record<string, boolean>;
+    for (const [openaiKey, ourCategory] of CATEGORY_MAP) {
+      if (cats[openaiKey] === true) {
+        return { blocked: true, category: ourCategory, rawCategory: openaiKey };
+      }
+    }
+    return PASS;
+  } catch (err) {
+    // 텍스트와 동일한 fail-open. 이미지 바이트는 절대 로그에 안 남긴다.
+    console.error('[openaiModeration.image.error]', {
+      message: (err as Error).message,
+      bytes: dataUrl.length,
+    });
+    return PASS;
+  }
+}
+
 export async function checkOpenAiModeration(text: string): Promise<OpenAiModerationResult> {
   const c = getClient();
   if (!c) return PASS; // 키 미설정 → fail-open

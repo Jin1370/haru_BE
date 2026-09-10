@@ -23,6 +23,7 @@ import preferenceRoutes from './routes/preference';
 import notificationsRoutes from './routes/notifications';
 import adminRoutes from './routes/admin';
 import { startAudioExpiryScheduler } from './jobs/purgeExpiredAudio';
+import { startPhotoExpiryScheduler } from './jobs/purgeExpiredPhotos';
 import { startAuditCleanupScheduler } from './jobs/cleanupAuditTables';
 import { startPhotoConversionRetryScheduler } from './jobs/retryFailedPhotoConversions';
 import { startVoiceReminderScheduler } from './jobs/remindVoiceSetup';
@@ -222,6 +223,7 @@ if (process.env.NODE_ENV !== 'test') {
   // NODE_ENV=test 분기는 scheduler 내부에서도 가드되지만, listen 과 함께 묶어
   // 부팅 sequence 를 단일 위치로 유지.
   startAudioExpiryScheduler();
+  startPhotoExpiryScheduler();
   // audit-cleanup sprint: moderation_blocks / freeze_events 365일 보관 정책
   // (PIPA §21 + GDPR Art.5(1)(e) data minimization). 같은 24h interval + unref 패턴.
   startAuditCleanupScheduler();

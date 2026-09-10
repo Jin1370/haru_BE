@@ -13,7 +13,8 @@
     "cleanup:dev": "tsx scripts/cleanup-dev-accounts.ts",
     "cleanup:dev:dry": "tsx scripts/cleanup-dev-accounts.ts --dry-run",
     "rename:dev": "tsx scripts/rename-dev-accounts.ts",
-    "rename:dev:dry": "tsx scripts/rename-dev-accounts.ts --dry-run"
+    "rename:dev:dry": "tsx scripts/rename-dev-accounts.ts --dry-run",
+    "seed:chat": "tsx scripts/seed-chat-messages.ts"
   },
   "keywords": [],
   "license": "ISC",

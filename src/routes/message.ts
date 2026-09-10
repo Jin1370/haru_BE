@@ -17,7 +17,12 @@ import {
 } from '../utils/textNormalization';
 import { authMiddleware } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
-import { sendMessageSchema, messageQuerySchema } from '../schemas/message';
+import {
+  sendMessageSchema,
+  messageQuerySchema,
+  messageReactionSchema,
+  type MessageReaction,
+} from '../schemas/message';
 import { AuthRequest, Emotion } from '../types';
 import { sendPushToUser } from '../services/pushNotifications';
 import { isBlocked } from '../constants/moderationDictionary';
@@ -161,11 +166,79 @@ async function idempotentInsertMessage(
   return { row: null, inserted: false, conflict: true };
 }
 
+// message-reply: 답장 인용 요약. 화면에 1줄로 뜰 최소 필드만 담는다.
+interface ReplyQuote {
+  id: string;
+  sender_id: string;
+  // null = 뷰어가 아직 볼 수 없는 메시지 (미청취 마스킹). FE 가 "새 메시지" 로 표시.
+  original_text: string | null;
+  translated_text: string | null;
+}
+
+// 인용은 본문을 한 번 더 보여주는 표면이라 본문과 **똑같은 두 규칙**을 통과해야
+// 한다. 안 그러면 상대가 자기 메시지를 인용하는 것만으로 게이트가 뚫린다.
+//   (1) 수신자에게 안 보이는 메시지(failed / voice-clone 미보유 pending)는
+//       인용으로도 안 보인다 → null 반환.
+//   (2) 아직 청취 안 한 상대 메시지의 텍스트는 인용에서도 가린다 → 텍스트만 null.
+//       마스킹을 FE 에 맡기지 않고 서버에서 지우는 이유는 raw 응답에도 원문이
+//       남지 않게 하기 위함 (read-at-removal 의 tombstone normalize 와 같은 사상).
+function toReplyQuote(
+  row: Record<string, any>,
+  viewerId: string,
+): ReplyQuote | null {
+  const mine = row.sender_id === viewerId;
+  if (!mine && row.audio_status !== 'ready') return null;
+  const hidden = !mine && !row.listened_at;
+  return {
+    id: row.id,
+    sender_id: row.sender_id,
+    original_text: hidden ? null : (row.original_text ?? null),
+    translated_text: hidden ? null : (row.translated_text ?? null),
+  };
+}
+
+// 페이지 안에 원본이 있으면 그대로 쓰고, 페이지 밖(더 오래된 메시지)만 한 번에
+// 추가 조회한다. mig 055 미적용 환경에서는 reply_to_id 가 undefined 라 전체가
+// no-op — 응답 shape 이 예전 그대로 유지된다.
+async function attachReplyQuotes(
+  rows: Record<string, any>[],
+  matchId: string,
+  viewerId: string,
+): Promise<Record<string, any>[]> {
+  const needed = new Set(
+    rows.map((r) => r.reply_to_id).filter((id): id is string => !!id),
+  );
+  if (needed.size === 0) return rows;
+
+  const byId = new Map<string, Record<string, any>>(rows.map((r) => [r.id, r]));
+  const missing = [...needed].filter((id) => !byId.has(id));
+  if (missing.length > 0) {
+    const { data, error } = await supabase
+      .from('messages')
+      .select('id, sender_id, original_text, translated_text, audio_status, listened_at')
+      // match_id 조건이 IDOR 경계 — 다른 매치의 메시지는 절대 안 딸려온다.
+      .eq('match_id', matchId)
+      .in('id', missing);
+    if (error) {
+      console.error('[attachReplyQuotes] quote fetch failed:', error.message);
+    }
+    for (const row of data ?? []) byId.set(row.id, row);
+  }
+
+  return rows.map((r) => {
+    if (!r.reply_to_id) return r;
+    const src = byId.get(r.reply_to_id);
+    return { ...r, reply_to: src ? toReplyQuote(src, viewerId) : null };
+  });
+}
+
 // 메시지 목록 (페이지네이션)
 router.get('/:matchId/messages', validateQuery(messageQuerySchema), async (req: AuthRequest, res: Response) => {
   const { matchId } = req.params;
   const limit = req.query.limit as unknown as number;
   const before = req.query.before as string | undefined;
+  const after = req.query.after as string | undefined;
+  const around = req.query.around as string | undefined;
 
   // 매치에 속한 유저인지 확인
   const { data: match } = await supabase
@@ -186,13 +259,70 @@ router.get('/:matchId/messages', validateQuery(messageQuerySchema), async (req: 
   // 신호로 굳어지는 거짓 신호 문제 해결. 본인 발신 메시지는 status 무관하게
   // 노출 — 본인은 본인 메시지를 알아야 재전송 등 대응 가능. 별도 송신자 측
   // 실패 인디케이터는 후속 카드로 분리.
-  let query = supabase
-    .from('messages')
-    .select('*')
-    .eq('match_id', matchId)
-    .or(`sender_id.eq.${req.userId!},audio_status.eq.ready`)
-    .order('created_at', { ascending: false })
-    .limit(limit);
+  // 세 경로(before / after / around)가 모두 같은 가시성 규칙을 통과해야 해서
+  // 필터를 한 곳에서 만든다.
+  const visible = () =>
+    supabase
+      .from('messages')
+      .select('*')
+      .eq('match_id', matchId)
+      .or(`sender_id.eq.${req.userId!},audio_status.eq.ready`);
+
+  // message-reply(점프): 인용 원본이 로드 범위 밖일 때, 그 메시지를 가운데 둔
+  // 구간을 한 번에 준다. FE 는 목록을 이 블록으로 **교체**하므로 대화가 항상
+  // 연속이다 — 기존 목록에 끼워 넣으면 시간이 건너뛴 두 덩어리가 맞붙는다.
+  if (around) {
+    // 대상 조회에도 같은 가시성 필터 — 못 보는 메시지의 시점을 probe 해
+    // 그 주변 구간을 끌어오는 경로를 막는다.
+    const { data: target, error: targetError } = await visible()
+      .eq('id', around)
+      .maybeSingle();
+    if (targetError) {
+      res.status(500).json({ error: targetError.message });
+      return;
+    }
+    if (!target) {
+      res.status(404).json({ error: 'Message not found', code: 'message_not_found' });
+      return;
+    }
+
+    const half = Math.floor(limit / 2);
+    const [older, newer] = await Promise.all([
+      visible()
+        .lt('created_at', target.created_at)
+        .order('created_at', { ascending: false })
+        .limit(half),
+      visible()
+        .gte('created_at', target.created_at)
+        .order('created_at', { ascending: true })
+        .limit(half + 1),
+    ]);
+    if (older.error || newer.error) {
+      res.status(500).json({ error: (older.error ?? newer.error)!.message });
+      return;
+    }
+    // 응답 계약은 항상 최신 우선(desc) — FE 가 경로마다 정렬을 분기하지 않게.
+    const rows = [...(newer.data ?? [])].reverse().concat(older.data ?? []);
+    res.json(await attachReplyQuotes(rows, matchId as string, req.userId!));
+    return;
+  }
+
+  // 아래로(더 최신) 페이지. 정방향으로 뽑은 뒤 뒤집는다 — desc + limit 으로
+  // 뽑으면 "바로 다음 50개" 가 아니라 "가장 최신 50개" 가 와서 구간이 건너뛴다.
+  if (after) {
+    const { data, error } = await visible()
+      .gt('created_at', after)
+      .order('created_at', { ascending: true })
+      .limit(limit);
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    res.json(await attachReplyQuotes([...(data ?? [])].reverse(), matchId as string, req.userId!));
+    return;
+  }
+
+  let query = visible().order('created_at', { ascending: false }).limit(limit);
 
   if (before) {
     query = query.lt('created_at', before);
@@ -205,7 +335,7 @@ router.get('/:matchId/messages', validateQuery(messageQuerySchema), async (req: 
     return;
   }
 
-  res.json(data);
+  res.json(await attachReplyQuotes(data ?? [], matchId as string, req.userId!));
 });
 
 // 메시지 전송 (번역 + 더빙 파이프라인)
@@ -232,8 +362,8 @@ router.get('/:matchId/messages', validateQuery(messageQuerySchema), async (req: 
 //      간섭이 없어 가장 안전.
 router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSchema), async (req: AuthRequest, res: Response) => {
   const matchId = req.params.matchId as string;
-  const { text, emotion, client_message_id } = req.body as
-    { text: string; emotion?: Emotion; client_message_id?: string };
+  const { text, emotion, client_message_id, reply_to_id } = req.body as
+    { text: string; emotion?: Emotion; client_message_id?: string; reply_to_id?: string };
   // neutral = "태그 없음" — DB에는 null로 저장 (CHECK constraint도 neutral 제외)
   const storedEmotion: Exclude<Emotion, 'neutral'> | null =
     emotion && emotion !== 'neutral' ? emotion : null;
@@ -389,6 +519,26 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   // DO NOTHING 을 걸어 응답 유실 후 재전송 시에도 row/TTS/전달이 단일이 되게 한다.
   // 멱등 키는 match/unmatch/block/profile/모더레이션 검증 뒤에서 사용되므로 매치
   // 없는 사용자의 정책 probe 방어는 그대로 유지된다 (검증 순서 불변).
+  // message-reply: 답장 대상은 반드시 같은 매치의 메시지여야 한다. 이 검증이
+  // 없으면 임의 메시지 id 를 넣어 GET 응답의 인용으로 남의 대화 본문을 끌어올
+  // 수 있다 (toReplyQuote 가 뷰어 기준으로 한 번 더 거르지만, 애초에 참조가
+  // 생기지 않게 하는 게 경계다).
+  if (reply_to_id) {
+    const { data: replyTarget, error: replyTargetError } = await supabase
+      .from('messages')
+      .select('id')
+      .eq('id', reply_to_id)
+      .eq('match_id', matchId)
+      .maybeSingle();
+    if (replyTargetError) {
+      console.error('[POST messages] reply target lookup failed:', replyTargetError.message);
+    }
+    if (!replyTarget) {
+      res.status(404).json({ error: 'Reply target not found', code: 'reply_target_not_found' });
+      return;
+    }
+  }
+
   const messageId = client_message_id ?? randomUUID();
   const queuedAt = new Date().toISOString();
   const voiceId = sender.elevenlabs_voice_id ?? null;
@@ -457,6 +607,7 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
     audio_url: null,
     audio_status: 'pending',
     emotion: storedEmotion,
+    reply_to_id: reply_to_id ?? null,
     created_at: queuedAt,
   });
 
@@ -478,6 +629,7 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
       speaker,
       addressee,
       emotion: storedEmotion,
+      replyToId: reply_to_id ?? null,
       voiceId,
       queuedAt,
     }).catch((err) => console.error('[processAndInsertMessage unhandled]', err));
@@ -583,6 +735,83 @@ router.post('/:matchId/messages/:messageId/listened', async (req: AuthRequest, r
     );
   }
 });
+
+// message-reactions: 상대 메시지에 리액션 1개를 남기거나(교체) 지운다.
+//
+// 1:1 대화라 리액션 주체는 항상 "발신자가 아닌 쪽" 한 명 → messages.reaction
+// 단일 컬럼으로 충분하다 (메시지당 0 또는 1개). 같은 값을 다시 누르면 FE 가
+// reaction: null 로 보내 해제한다.
+//
+// listened 라우트와 같은 이유로 "mid-session UPDATE 금지" 원칙의 예외지만,
+// reaction 한 컬럼만 건드리고 audio_status / audio_url 은 절대 손대지 않는다
+// → expo-audio native player 회수 트리거와 무관.
+//
+// "청취 전에는 리액션 금지" 는 FE 게이트로만 강제한다 (미청취 메시지는 롱프레스
+// 자체가 안 열린다). 서버가 listened_at 을 요구하면, 낙관적 청취 마킹이 네트워크
+// 실패로 커밋되지 않은 사용자가 "들었는데 리액션이 안 되는" 막다른 길에 빠진다 —
+// 보안 경계가 아니라 funnel 정책이라 FE 강제로 충분하다.
+router.put(
+  '/:matchId/messages/:messageId/reaction',
+  requireNotFrozen,
+  validateBody(messageReactionSchema),
+  async (req: AuthRequest, res: Response) => {
+    const { matchId, messageId } = req.params;
+    const { reaction } = req.body as { reaction: MessageReaction | null };
+
+    // 1) 매치 참여자 검증
+    const { data: match } = await supabase
+      .from('matches')
+      .select('id')
+      .eq('id', matchId)
+      .or(`user1_id.eq.${req.userId!},user2_id.eq.${req.userId!}`)
+      .single();
+
+    if (!match) {
+      res.status(403).json({ error: 'Not a member of this match' });
+      return;
+    }
+
+    // 2) 메시지 조회 + match_id 정합성 (다른 매치의 메시지 id 로 쓰기 차단)
+    const { data: msg, error: selectError } = await supabase
+      .from('messages')
+      .select('id, sender_id')
+      .eq('id', messageId)
+      .eq('match_id', matchId)
+      .single();
+
+    if (selectError || !msg) {
+      res.status(404).json({ error: 'Message not found' });
+      return;
+    }
+
+    // 3) 본인 메시지에는 리액션 불가 — 리액션은 상대의 반응이라는 의미이고,
+    //    이 규칙이 있어야 "reaction 컬럼의 주체 = 발신자의 반대편" 이 성립한다.
+    if (msg.sender_id === req.userId!) {
+      res.status(403).json({ error: 'Cannot react to your own message' });
+      return;
+    }
+
+    // 4) reaction 단일 컬럼 UPDATE. match_id 를 조건에 다시 포함해 (2) 이후의
+    //    경합에도 다른 매치 row 로 새지 않게 한다.
+    const { data: updated, error: updateError } = await supabase
+      .from('messages')
+      .update({ reaction })
+      .eq('id', messageId)
+      .eq('match_id', matchId)
+      .select()
+      .single();
+
+    // mig 054 미적용(컬럼 부재) 같은 schema drift 를 silent-success 로 가리지
+    // 않는다 — 200 을 주면 FE 낙관 업데이트가 그대로 굳어 실제 저장이 안 된
+    // 리액션이 화면에만 남는다.
+    if (updateError || !updated) {
+      res.status(500).json({ error: updateError?.message ?? 'Reaction update failed' });
+      return;
+    }
+
+    res.json(updated);
+  },
+);
 
 // chat-audio-async-insert sprint: retry 라우트 제거.
 //
@@ -820,6 +1049,7 @@ interface ProcessJob {
   speaker: AddressParty;
   addressee: AddressParty;
   emotion: Exclude<Emotion, 'neutral'> | null;
+  replyToId: string | null;
   voiceId: string;
   queuedAt: string;
 }
@@ -838,6 +1068,7 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
     speaker,
     addressee,
     emotion,
+    replyToId,
     voiceId,
     queuedAt,
   } = job;
@@ -900,6 +1131,7 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
         audio_url: audioUrl,
         audio_status: 'ready',
         emotion,
+        reply_to_id: replyToId,
         created_at: queuedAt,
       },
       matchId,
@@ -957,6 +1189,7 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
           audio_url: null,
           audio_status: 'failed',
           emotion,
+          reply_to_id: replyToId,
           created_at: queuedAt,
         },
         { onConflict: 'id', ignoreDuplicates: true },

@@ -218,6 +218,32 @@ export const swaggerDocument = {
             description:
               'voice-first-message-gate (mig 015): 수신자가 음성을 1회 끝까지 재생한 시각. NULL = 미청취 → FE 가 텍스트를 숨기고 편지 UI 만 노출. 본인 발신 메시지는 항상 null.',
           },
+          reply_to_id: {
+            type: 'string',
+            format: 'uuid',
+            nullable: true,
+            description:
+              'message-reply (mig 055): 이 메시지가 답장하는 원본 메시지 id. 인용문은 본문에 합성하지 않는다 (TTS 가 인용문을 읽는 사고 + 번역 재적용 방지).',
+          },
+          reply_to: {
+            type: 'object',
+            nullable: true,
+            description:
+              'message-reply: GET 목록 응답에만 실리는 인용 요약 (Realtime payload 에는 없다 — FE 가 로컬 목록에서 찾는다). 본문과 같은 두 규칙을 통과한 것만: 수신자에게 안 보이는 메시지는 null, 미청취 상대 메시지는 텍스트만 null 로 마스킹.',
+            properties: {
+              id: { type: 'string', format: 'uuid' },
+              sender_id: { type: 'string', format: 'uuid' },
+              original_text: { type: 'string', nullable: true },
+              translated_text: { type: 'string', nullable: true },
+            },
+          },
+          reaction: {
+            type: 'string',
+            enum: ['heart', 'thumbsup', 'laugh', 'wow', 'sad'],
+            nullable: true,
+            description:
+              'message-reactions (mig 054): 상대가 이 메시지에 남긴 리액션 슬러그. 1:1 대화라 주체는 항상 발신자의 반대편 한 명이며 메시지당 0 또는 1개. NULL = 리액션 없음.',
+          },
           audio_purged_at: {
             type: 'string',
             format: 'date-time',
@@ -880,6 +906,8 @@ export const swaggerDocument = {
           { name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
           { name: 'limit', in: 'query', schema: { type: 'integer', default: 50, maximum: 100 } },
           { name: 'before', in: 'query', schema: { type: 'string', format: 'date-time' }, description: '이 시각 이전 메시지만 (커서)' },
+          { name: 'after', in: 'query', schema: { type: 'string', format: 'date-time' }, description: 'message-reply(점프): 이 시각보다 최신인 메시지 (아래로 넘기는 커서). 응답 정렬은 before 와 동일한 desc.' },
+          { name: 'around', in: 'query', schema: { type: 'string', format: 'uuid' }, description: 'message-reply(점프): 이 메시지를 가운데 둔 구간(앞뒤 절반씩)을 한 번에. FE 는 목록을 이 블록으로 교체한다. 못 보는 메시지면 404 message_not_found.' },
         ],
         responses: {
           200: { description: '메시지 목록', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/Message' } } } } },
@@ -916,6 +944,11 @@ export const swaggerDocument = {
                     format: 'uuid',
                     description: 'idempotent-send: 클라이언트 생성 멱등 키. 재전송 시 같은 값을 재사용하면 row/TTS/전달이 단일로 유지된다.',
                   },
+                  reply_to_id: {
+                    type: 'string',
+                    format: 'uuid',
+                    description: 'message-reply: 답장 대상 메시지 id. 같은 매치의 메시지가 아니면 404 (code: reply_target_not_found).',
+                  },
                 },
               },
             },
@@ -929,6 +962,7 @@ export const swaggerDocument = {
           201: { description: '동기 저장 성공 (voice-clone 미보유 발신자)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
           202: { description: '큐잉 성공 — INSERT 는 realtime 으로 도착', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
           400: { description: 'text 누락/초과 / client_message_id 비-uuid', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: 'message-reply: reply_to_id 가 이 매치의 메시지가 아님 — code: reply_target_not_found', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           409: {
             description:
               'idempotent-send: client_message_id 가 다른 사용자 소유이거나 위조된 id — code: duplicate_message (내용 미노출) / ' +
@@ -996,6 +1030,46 @@ export const swaggerDocument = {
         responses: {
           200: { description: '업데이트된 (또는 이미 listened 상태인) Message row', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
           403: { description: '매치 비참여자 또는 송신자 본인 호출', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: '메시지 없음 또는 매치 불일치', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/matches/{matchId}/messages/{messageId}/reaction': {
+      put: {
+        tags: ['Message'],
+        summary: '상대 메시지에 리액션 남기기 / 해제',
+        description:
+          'message-reactions: messages.reaction 단일 컬럼을 set 하거나 null 로 해제. ' +
+          '1:1 대화라 리액션 주체는 항상 발신자의 반대편 한 명 → 메시지당 0 또는 1개. ' +
+          '본인 발신 메시지에는 남길 수 없다(403). Realtime UPDATE 로 양쪽 기기에 전파된다. ' +
+          '"음성 청취 전 리액션 금지" 는 FE 게이트(롱프레스 차단)로만 강제하며 서버는 listened_at 을 요구하지 않는다.',
+        parameters: [
+          { name: 'matchId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+          { name: 'messageId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['reaction'],
+                properties: {
+                  reaction: {
+                    type: 'string',
+                    enum: ['heart', 'thumbsup', 'laugh', 'wow', 'sad'],
+                    nullable: true,
+                    description: 'null 이면 리액션 해제. 같은 값 재선택은 FE 가 null 로 바꿔 보낸다.',
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: { description: 'reaction 이 반영된 Message row', content: { 'application/json': { schema: { $ref: '#/components/schemas/Message' } } } },
+          400: { description: '허용되지 않은 reaction 값', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '매치 비참여자, 본인 메시지, 또는 동결 계정', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           404: { description: '메시지 없음 또는 매치 불일치', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },

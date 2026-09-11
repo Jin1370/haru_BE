@@ -147,6 +147,26 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
     (mutesResult.data ?? []).map((row: { match_id: string }) => row.match_id),
   );
 
+  // chat-photos: 마지막 메시지가 사진인지. RPC 를 새로 파지 않고 id 목록으로 한 번
+  // 더 조회한다 (attachReplyQuotes 와 같은 패턴). original_text 에 담긴 폴백 캡션은
+  // **옛 앱 전용 안내 문구**라("앱 업데이트 후 볼 수 있어요") 최신 앱 목록에 그대로
+  // 뜨면 어색하다 — FE 가 이 플래그를 보고 자기 카피를 쓴다.
+  const lastMessageIds = [...summaryMap.values()]
+    .map((s) => s.last_message_id)
+    .filter((id): id is string => !!id);
+  const photoMessageIds = new Set<string>();
+  if (lastMessageIds.length > 0) {
+    const { data: photoRows, error: photoError } = await supabase
+      .from('messages')
+      .select('id')
+      .in('id', lastMessageIds)
+      .not('photo_path', 'is', null);
+    if (photoError) {
+      console.error('[match.list] last-message photo lookup failed:', photoError.message);
+    }
+    for (const row of photoRows ?? []) photoMessageIds.add(row.id as string);
+  }
+
   // 4. 조합
   // 보안 경계: Supabase Storage URL 은 public 이므로 FE 블러는 UX 보호일 뿐.
   //            all_photos_unlocked=false 인 경우 서버에서 photos 배열을 잘라
@@ -239,6 +259,7 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
             created_at: summary.last_message_created_at,
             audio_status: summary.last_message_audio_status,
             listened_at: summary.last_message_listened_at,
+            is_photo: photoMessageIds.has(summary.last_message_id),
           }
         : null,
       unread_count: unreadCount,

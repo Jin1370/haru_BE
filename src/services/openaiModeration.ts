@@ -82,6 +82,22 @@ export async function checkOpenAiImageModeration(
     if (!result?.categories) return PASS;
 
     const cats = result.categories as unknown as Record<string, boolean>;
+
+    // 운영/검증 가시성: 통과한 사진은 아무 로그도 안 남아 "호출이 되긴 했나" 를
+    // 알 수 없었다. prod 에서는 사진마다 한 줄씩 쌓이면 노이즈라 개발 환경에서만
+    // 점수 상위 3개를 찍는다. 이미지 바이트나 경로는 절대 남기지 않는다.
+    if (env.nodeEnv !== 'production') {
+      const scores = (result.category_scores ?? {}) as unknown as Record<string, number>;
+      const top = Object.entries(scores)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([k, v]) => `${k}=${v.toFixed(4)}`);
+      console.log('[openaiModeration.image]', {
+        flagged: Object.keys(cats).filter((k) => cats[k] === true),
+        top,
+      });
+    }
+
     for (const [openaiKey, ourCategory] of CATEGORY_MAP) {
       if (cats[openaiKey] === true) {
         return { blocked: true, category: ourCategory, rawCategory: openaiKey };

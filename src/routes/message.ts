@@ -49,12 +49,22 @@ const PHOTO_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 // 이 캡션이 하는 일이 하나 더 있다: **사진을 모르는 옛 클라이언트에서 빈
 // 말풍선 대신 텍스트로 보인다.** photo_path 를 모르는 앱도 original_text /
 // translated_text 는 렌더하기 때문.
+// 이 캡션의 유일한 독자는 **사진을 모르는 옛 클라이언트**다. photo_path 를
+// 해석 못 하는 앱도 original_text / translated_text 는 그리기 때문에 빈 말풍선
+// 대신 이 문구가 뜬다. 그래서 "왜 안 보이는지 + 어떻게 하면 되는지" 까지 적는다.
+// 새 앱은 이 문구를 안 쓴다 — 말풍선은 이미지를, 채팅 목록은 last_message.is_photo
+// 를 보고 자기 카피(matches.preview.photo)를 쓴다.
+// 사진 서명 URL 유효 시간. SIGNED_URL_DEFAULT_TTL 과 같은 1시간이지만, 만료
+// 동작을 실기기에서 확인할 때 이 값만 짧게 낮출 수 있도록 상수로 분리해 둔다
+// (공용 기본값을 건드리면 보이스 인트로 URL 까지 같이 짧아진다).
+const PHOTO_URL_TTL_SECONDS = 60 * 60;
+
 const PHOTO_CAPTIONS: Record<string, string> = {
-  ko: '사진을 보냈어요',
-  ja: '写真を送りました',
-  en: 'Sent a photo',
-  th: 'ส่งรูปภาพแล้ว',
-  hi: 'एक फ़ोटो भेजी',
+  ko: '📷 사진을 보냈어요. 앱 업데이트 후 볼 수 있어요',
+  ja: '📷 写真を送りました。アプリを更新すると見られます',
+  en: '📷 Sent a photo. Update the app to view it',
+  th: '📷 ส่งรูปภาพแล้ว อัปเดตแอปเพื่อดู',
+  hi: '📷 एक फ़ोटो भेजी। देखने के लिए ऐप अपडेट करें',
 };
 function photoCaption(lang: string): string {
   return PHOTO_CAPTIONS[lang] ?? PHOTO_CAPTIONS.en;
@@ -237,7 +247,10 @@ async function attachPhotoUrls(
   const signed = new Map<string, string | null>();
   await Promise.all(
     withPhoto.map(async (r) => {
-      signed.set(r.id, await createSignedUrlForPath('chat-photos', r.photo_path));
+      signed.set(
+        r.id,
+        await createSignedUrlForPath('chat-photos', r.photo_path, PHOTO_URL_TTL_SECONDS),
+      );
     }),
   );
   return rows.map((r) =>
@@ -918,7 +931,11 @@ router.get(
       return;
     }
 
-    const photoUrl = await createSignedUrlForPath('chat-photos', msg.photo_path as string);
+    const photoUrl = await createSignedUrlForPath(
+      'chat-photos',
+      msg.photo_path as string,
+      PHOTO_URL_TTL_SECONDS,
+    );
     if (!photoUrl) {
       res.status(500).json({ error: 'Failed to sign photo url' });
       return;

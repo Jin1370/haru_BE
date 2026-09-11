@@ -253,9 +253,10 @@ describe('POST /api/matches/:matchId/messages/photo', () => {
     // TTS/번역을 안 탄다 — 텍스트 전용 경로와 같은 모양
     expect(payload.audio_status).toBe('ready');
     expect(payload.audio_url).toBeNull();
-    // 폴백 캡션: 옛 클라이언트에서 빈 말풍선 대신 텍스트로 보이게
-    expect(payload.original_text).toBe('사진을 보냈어요');
-    expect(payload.translated_text).toBe('写真を送りました');
+    // 폴백 캡션: 사진을 모르는 옛 클라이언트에서 빈 말풍선 대신 뜨는 문구.
+    // 그 앱의 유일한 안내라 "왜 안 보이는지 + 어떻게 하면 되는지" 까지 담는다.
+    expect(payload.original_text).toBe('📷 사진을 보냈어요. 앱 업데이트 후 볼 수 있어요');
+    expect(payload.translated_text).toBe('📷 写真を送りました。アプリを更新すると見られます');
     expect(payload.photo_path).toBe(`${MATCH_ID}/${CLIENT_ID}.jpg`);
     expect(payload.photo_width).toBe(1280);
     expect(payload.photo_height).toBe(960);

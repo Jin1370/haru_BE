@@ -60,11 +60,11 @@ const PHOTO_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const PHOTO_URL_TTL_SECONDS = 60 * 60;
 
 const PHOTO_CAPTIONS: Record<string, string> = {
-  ko: '📷 사진을 보냈어요. 앱 업데이트 후 볼 수 있어요',
-  ja: '📷 写真を送りました。アプリを更新すると見られます',
-  en: '📷 Sent a photo. Update the app to view it',
-  th: '📷 ส่งรูปภาพแล้ว อัปเดตแอปเพื่อดู',
-  hi: '📷 एक फ़ोटो भेजी। देखने के लिए ऐप अपडेट करें',
+  ko: '📷 사진을 보냈어요. 앱을 다시 시작하면 볼 수 있어요',
+  ja: '📷 写真を送りました。アプリを再起動すると見られます',
+  en: '📷 Sent a photo. Restart the app to view it',
+  th: '📷 ส่งรูปภาพแล้ว เปิดแอปใหม่อีกครั้งเพื่อดู',
+  hi: '📷 एक फ़ोटो भेजी। देखने के लिए ऐप फिर से खोलें',
 };
 function photoCaption(lang: string): string {
   return PHOTO_CAPTIONS[lang] ?? PHOTO_CAPTIONS.en;
@@ -209,6 +209,15 @@ interface ReplyQuote {
   // null = 뷰어가 아직 볼 수 없는 메시지 (미청취 마스킹). FE 가 "새 메시지" 로 표시.
   original_text: string | null;
   translated_text: string | null;
+  // chat-photos: 인용 대상이 사진인지. 텍스트와 같은 게이트를 통과한 뒤에만
+  // 채운다 — 서명 URL 은 attachPhotoUrls 가 photo_url 로 미러.
+  //
+  // 폐기(30일)된 사진도 photo_path 는 그대로 둔다. FE 가 "사진이었다" 를 알아야
+  // 본문 폴백 캡션("앱 업데이트 후 볼 수 있어요")이 인용에 뜨는 걸 막는다.
+  // 대신 photo_purged_at 이 있으면 서명을 아예 시도하지 않는다 (객체가 없어서
+  // 어차피 404 — 헛된 Storage 왕복).
+  photo_path: string | null;
+  photo_purged_at: string | null;
 }
 
 // 인용은 본문을 한 번 더 보여주는 표면이라 본문과 **똑같은 두 규칙**을 통과해야
@@ -230,6 +239,8 @@ function toReplyQuote(
     sender_id: row.sender_id,
     original_text: hidden ? null : (row.original_text ?? null),
     translated_text: hidden ? null : (row.translated_text ?? null),
+    photo_path: hidden ? null : (row.photo_path ?? null),
+    photo_purged_at: hidden ? null : (row.photo_purged_at ?? null),
   };
 }
 
@@ -242,20 +253,39 @@ function toReplyQuote(
 async function attachPhotoUrls(
   rows: Record<string, any>[],
 ): Promise<Record<string, any>[]> {
-  const withPhoto = rows.filter((r) => r.photo_path);
-  if (withPhoto.length === 0) return rows;
+  // 인용(reply_to)도 같은 사진을 가리킬 수 있어 **경로 기준**으로 모은다 —
+  // 같은 사진을 두 번 서명하지 않는다. attachReplyQuotes 가 먼저 돌기 때문에
+  // 이 시점엔 인용이 이미 붙어 있다.
+  const paths = new Set<string>();
+  for (const r of rows) {
+    if (r.photo_path) paths.add(r.photo_path);
+    if (r.reply_to?.photo_path && !r.reply_to.photo_purged_at) {
+      paths.add(r.reply_to.photo_path);
+    }
+  }
+  if (paths.size === 0) return rows;
   const signed = new Map<string, string | null>();
   await Promise.all(
-    withPhoto.map(async (r) => {
+    [...paths].map(async (path) => {
       signed.set(
-        r.id,
-        await createSignedUrlForPath('chat-photos', r.photo_path, PHOTO_URL_TTL_SECONDS),
+        path,
+        await createSignedUrlForPath('chat-photos', path, PHOTO_URL_TTL_SECONDS),
       );
     }),
   );
-  return rows.map((r) =>
-    r.photo_path ? { ...r, photo_url: signed.get(r.id) ?? null } : r,
-  );
+  return rows.map((r) => {
+    const next = r.photo_path
+      ? { ...r, photo_url: signed.get(r.photo_path) ?? null }
+      : r;
+    if (!next.reply_to?.photo_path || next.reply_to.photo_purged_at) return next;
+    return {
+      ...next,
+      reply_to: {
+        ...next.reply_to,
+        photo_url: signed.get(next.reply_to.photo_path) ?? null,
+      },
+    };
+  });
 }
 
 async function attachReplyQuotes(
@@ -273,7 +303,9 @@ async function attachReplyQuotes(
   if (missing.length > 0) {
     const { data, error } = await supabase
       .from('messages')
-      .select('id, sender_id, original_text, translated_text, audio_status, listened_at')
+      .select(
+        'id, sender_id, original_text, translated_text, audio_status, listened_at, photo_path, photo_purged_at',
+      )
       // match_id 조건이 IDOR 경계 — 다른 매치의 메시지는 절대 안 딸려온다.
       .eq('match_id', matchId)
       .in('id', missing);

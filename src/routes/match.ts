@@ -149,7 +149,7 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
 
   // chat-photos: 마지막 메시지가 사진인지. RPC 를 새로 파지 않고 id 목록으로 한 번
   // 더 조회한다 (attachReplyQuotes 와 같은 패턴). original_text 에 담긴 폴백 캡션은
-  // **옛 앱 전용 안내 문구**라("앱 업데이트 후 볼 수 있어요") 최신 앱 목록에 그대로
+  // **옛 앱 전용 안내 문구**라("앱을 다시 시작하면 볼 수 있어요") 최신 앱 목록에 그대로
   // 뜨면 어색하다 — FE 가 이 플래그를 보고 자기 카피를 쓴다.
   const lastMessageIds = [...summaryMap.values()]
     .map((s) => s.last_message_id)

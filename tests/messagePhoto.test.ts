@@ -255,8 +255,8 @@ describe('POST /api/matches/:matchId/messages/photo', () => {
     expect(payload.audio_url).toBeNull();
     // 폴백 캡션: 사진을 모르는 옛 클라이언트에서 빈 말풍선 대신 뜨는 문구.
     // 그 앱의 유일한 안내라 "왜 안 보이는지 + 어떻게 하면 되는지" 까지 담는다.
-    expect(payload.original_text).toBe('📷 사진을 보냈어요. 앱 업데이트 후 볼 수 있어요');
-    expect(payload.translated_text).toBe('📷 写真を送りました。アプリを更新すると見られます');
+    expect(payload.original_text).toBe('📷 사진을 보냈어요. 앱을 다시 시작하면 볼 수 있어요');
+    expect(payload.translated_text).toBe('📷 写真を送りました。アプリを再起動すると見られます');
     expect(payload.photo_path).toBe(`${MATCH_ID}/${CLIENT_ID}.jpg`);
     expect(payload.photo_width).toBe(1280);
     expect(payload.photo_height).toBe(960);

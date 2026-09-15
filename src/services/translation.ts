@@ -77,7 +77,7 @@ These rules override any literal reading of the source. Producing a term the pro
 // 일반 단어로 쓰인 경우("하루 종일")까지 얼리면 그것도 오역이라 가드를 같이 둔다.
 const PARTICIPANT_NAME_RULES = `PARTICIPANT NAMES — the names in the profile lines are PROPER NOUNS:
 The Speaker / Addressee profile lines may carry that person's display name. In this conversation those strings are names, even when the same string is also an ordinary word or a kinship term in some language — Korean 시부 also means "father-in-law", 하루 also means "a day", 사랑 also means "love"; Japanese カレン, ハル likewise.
-- When the text refers to one of these two people by that name — typically with an honorific suffix (님 / 씨 / さん / くん / ちゃん) or standing in a vocative or subject position — keep it as a NAME. NEVER render it as the common noun. "시부님은 어때요?" addressed to the person named 시부 is "シブさんはどうですか？", NEVER "義父さんは…".
+- When the text refers to one of these two people by that name — typically with an honorific suffix (님 / 씨 / さん / くん / ちゃん) or standing in a vocative or subject position — keep it as a NAME. NEVER render it as the common noun. "시부님은 어때요?" addressed to the person named 시부 is "シブさんはどうです？", NEVER "義父さんは…".
 - Keep the name in its original form; transliterate into the target script only when the original script would be unreadable there (시부 → シブ, しぶ → 시부). Never translate its literal meaning.
 - Guard against over-applying: if the same string is plainly used as an ordinary word and not as a reference to that person ("하루 종일" = "all day long"), translate it normally. Judge by how the text uses it.
 - These names are given for RECOGNITION ONLY. Never insert a name that the source text does not contain (see ADDRESS TERMS).`;
@@ -159,6 +159,12 @@ const SAFETY_SETTINGS = [
 ];
 
 // ─── Message domain (existing) ────────────────────────────────────────────
+const JA_REGISTER_RULE = `  - Japanese: mirror likewise — casual source MUST stay casual (だ/だよ/だし), polite source → です/ます. Only when the source marks no politeness default to です/ます.
+    Polite here means the SOFT conversational です/ます that adults use when texting or chatting, NOT textbook/business keigo. Korean 해요체 maps to this soft form, never to stiff 습니다체-equivalents:
+    - Questions: drop the question-marker か and end on the verb/です with a rising "？" — "아침은 먹었어요?" → "朝ごはんは食べました？" (NEVER "食べましたか？"); "어때요?" → "どうです？" (NEVER "どうですか？"); "뭐 하세요?" → "何してます？" (NEVER "何をしますか？"). This applies to EVERY question in the text, not only the last sentence. "〜ますか？/〜ですか？" must not appear in the output.
+    - Use conversational sentence-final particles (〜ですね / 〜ですよ / 〜ますよね) where a native speaker would; ALWAYS use contracted forms — 〜てます (NEVER 〜ています), 〜ちゃいました (NEVER 〜てしまいました), 〜なきゃ (NEVER 〜なければ), 〜と思ってます / 〜つもりです (NEVER 〜と思っています).
+    - Never use でしょうか / 〜でございます / 〜いたします / お〜になる / honorific verb forms (〜されてる, 〜なさる, いらっしゃる) or other keigo — those read as customer service, not a person you're getting to know. This includes the no-politeness default: "What do you do for work?" → "お仕事は何してます？" (NEVER "何をされていますか？").`;
+
 const SYSTEM_PROMPT = `You process chat messages between strangers on a dating app in four steps: decide whether it is already in the target language, tag emotion markers, repair what a TTS engine would mispronounce, then render.
 
 STEP 1 — Language check (do this FIRST; the result drives STEP 4):
@@ -185,7 +191,7 @@ The rules below apply to the false branch (translating). They never license rewr
 - CRITICAL: Inline ElevenLabs audio tags written as [soft laugh], [sad], or similar bracketed forms, are SOUND EFFECT MARKERS — not text. You MUST preserve them verbatim in their original position. Do NOT translate them, do NOT remove them, do NOT replace them with native onomatopoeia like ㅋㅋ or 笑 or ㅠㅠ or (泣).
 - Match the source register — MIRROR it, never normalize toward polite:
   - Korean: if the source is 반말, the output MUST be 반말 (e.g. "일찍 일어나는 이유가 있어?" must NOT become "...있어요?"). If the source is polite, use 해요체; avoid stiff 습니다체 unless the source is clearly formal. Only when the source language marks no politeness (e.g. English) default to 해요체.
-  - Japanese: mirror likewise — casual source MUST stay casual (だ/だよ/だし), polite source → です/ます. Only when the source marks no politeness default to です/ます.
+${JA_REGISTER_RULE}
   - English: contemporary conversational tone, contractions allowed (I'm, you'll). No business-speak.
   - Chinese: 您 by default. Allow 你 if the source is clearly casual.
   - Short messages carry a weak register signal ("괜찮아", "응 그거 무서웠어", "어디야"), but weak is not absent. Do NOT retreat to the polite form when the text is short: a single plain ending (-아/-어/-지/-네/-야/-자, or a bare noun reply inside a casual thread) is enough to REQUIRE casual output. Guessing polite "to be safe" is itself an error — it makes a close conversation suddenly sound distant.
@@ -378,7 +384,7 @@ STEP 3 — Produce the text in every requested language:
 - "Playful/friendly" describes TONE and word choice — it is NOT a licence to lower the politeness level. A 해요체 or です・ます intro can be every bit as warm and inviting. Never drop to 반말 / plain form just to sound friendlier; follow the register rules below instead.
 - Register — MIRROR the source, never normalize in either direction:
   - Korean: if the source is 반말, the output MUST be 반말. If the source is polite, use 해요체; avoid stiff 습니다체 unless the source is clearly formal. Only when the source language marks no politeness (e.g. English) default to 해요체.
-  - Japanese: mirror likewise — casual source MUST stay casual (だ/だよ/だし), polite source → です/ます. Only when the source marks no politeness default to です/ます.
+${JA_REGISTER_RULE}
   - English: contemporary conversational tone, contractions allowed (I'm, you'll). No "thee/thou", no business-speak.
   - CRITICAL for a source language with no politeness marking (English above all): a voice intro is heard by STRANGERS browsing profiles, so the unmarked default is the polite one — 해요체 for Korean, です・ます for Japanese. "Hi! Nice to meet you" must become "안녕하세요! 만나서 반가워요" — NEVER "안녕~ 만나서 반가워!". Never infer 반말 / plain form from the informality of English wording; English is informal by default and says nothing about Korean or Japanese politeness.
 - Preserve personal names, place names, brand names, emoji, and onomatopoeia (e.g., 두근두근, ドキドキ). Titles of creative works and dish names are NOT covered by this — they follow the LOCALIZED NAMES rules below (voice intros often name a favourite film, drama, or food).

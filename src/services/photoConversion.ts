@@ -41,6 +41,18 @@ import {
 // gpt-image-2 입력 이미지 토큰(비용 ~80%)을 절감. 비율 유지, 업스케일 안 함.
 // jimp 디코드 실패(손상/미지원 포맷 등) 시 원본 그대로 폴백 — 리사이즈 실패가
 // 변환 자체를 막지 않게 한다.
+export const CONVERTED_JPEG_QUALITY = 75;
+
+export async function recompressJpeg(buffer: Buffer): Promise<Buffer> {
+  try {
+    const image = await Jimp.read(buffer);
+    return await image.quality(CONVERTED_JPEG_QUALITY).getBufferAsync(Jimp.MIME_JPEG);
+  } catch (e) {
+    console.warn('[photoConversion.recompress_skipped]', (e as Error).message);
+    return buffer;
+  }
+}
+
 async function downscaleForConversion(
   buffer: Buffer,
   mimeType: string,
@@ -337,8 +349,12 @@ export async function convertProfilePhoto(input: ConversionInput): Promise<Conve
   // 변환 성공 — Storage 업로드.
   let convertedUrl: string;
   try {
-    const buffer = Buffer.from(b64, 'base64');
-    // output_format='jpeg' + compression 85 (constants/photoConversion.ts).
+    // gpt-image-2 의 JPEG(compression 85) 는 비효율적으로 인코딩돼 768x1024 에
+    // 450KB 가 나온다. 같은 픽셀을 libjpeg q75 로 다시 저장하면 ~165KB — 수채화라
+    // 2배 확대로도 차이가 안 보인다 (2026-09-17 prod 3장 실측). 카드 노출마다
+    // 나가는 Storage egress 를 62% 줄인다. 재인코딩 실패 시 원본 그대로 폴백.
+    // 기존 사진은 scripts/recompress-profile-photos.cjs 로 일회 백필.
+    const buffer = await recompressJpeg(Buffer.from(b64, 'base64'));
     // versioned path 로 캐시 충돌 회피.
     const ts = Date.now();
     const ext = PHOTO_CONVERSION_OUTPUT_FORMAT === 'jpeg' ? 'jpg' : PHOTO_CONVERSION_OUTPUT_FORMAT;

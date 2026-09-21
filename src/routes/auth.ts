@@ -6,6 +6,7 @@ import { authMiddleware } from '../middleware/auth';
 import { deleteVoiceClone } from '../services/elevenlabs';
 import { purgeUserFolders } from '../services/storage';
 import { AuthRequest } from '../types';
+import { retryOnce } from '../utils/retry';
 
 const router = Router();
 
@@ -116,11 +117,18 @@ const PASSWORD_RE = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/;
 // 노출 + 자동 로그아웃 흐름으로 통합. 가해자가 자기 상태를 다음 mutating 호출
 // 까지 모르고 화면을 돌아다니는 UX 회귀를 차단한다 (2026-05-18 dev 환경 표면화).
 // signup 은 신규 가입이라 freeze 불가 → 체크 생략.
+//
+// 3초 제한: service-role 클라이언트는 Storage 업로드 때문에 전역 타임아웃이 없어,
+// Fly wake 직후 죽은 keep-alive 소켓이면 undici 기본 300초까지 매달린다. 토큰
+// 발급 경로 전체가 이 쿼리에 묶이므로 여기서 끊는다 — 시간초과는 아래 error
+// 분기(보수적 통과)로 떨어진다. 정상 응답은 수십 ms.
+const FROZEN_CHECK_TIMEOUT_MS = 3_000;
 async function isAccountFrozen(userId: string): Promise<boolean> {
   const { data, error } = await supabase
     .from('profiles')
     .select('frozen_at')
     .eq('id', userId)
+    .abortSignal(AbortSignal.timeout(FROZEN_CHECK_TIMEOUT_MS))
     .maybeSingle();
   if (error) {
     // profile 조회 실패는 frozen 판정 불가 → 보수적으로 통과 (login 차단이
@@ -691,6 +699,27 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
 });
 
 // 토큰 갱신
+//
+// supabaseAuth.auth.refreshSession() 을 쓰지 않고 GoTrue 에 직접 요청한다.
+// supabaseAuth 는 모든 사용자가 공유하는 GoTrueClient 하나인데, refreshSession
+// 은 그 안의 세션별 상태(refreshingDeferred — "갱신 진행 중" 프라미스, 마지막
+// 갱신자의 세션 저장)를 건드리는 유일한 경로다. 2026-09-21 prod 에서 이 상태가
+// 굳어 프로세스 재시작 전까지 모든 /refresh 가 영구 무응답(실측 1685초)이 됐고,
+// FE 는 갱신 대기에 모든 요청을 묶어 전 화면 무한로딩 → 50초 뒤 강제 로그아웃.
+// 같은 시각 login/google 은 0.4초로 멀쩡했다. 무상태 fetch 면 굳을 상태가 없다.
+// (공유 상태라 동시 갱신 시 남의 세션 프라미스를 돌려받을 여지도 함께 제거)
+//
+// 응답 코드 규칙 — FE(services/api.ts refreshAccessToken) 와 짝:
+//   * GoTrue 4xx (무효/폐기/재사용된 refresh token) → 401  = 세션 사망, FE 로그아웃
+//   * 도달 실패 / 시간초과 / GoTrue 5xx·429          → 503  = 일시적, FE 세션 유지
+// authMiddleware 의 503 분기와 같은 이유 — 몇 초짜리 순단이 로그아웃이 되면 안 된다.
+//
+// 1회 즉시 재시도: 죽은 keep-alive 소켓은 새 커넥션이면 바로 붙는다. 첫 요청이
+// GoTrue 에 도달해 토큰이 이미 회전됐더라도, GoTrue 의 재사용 허용 구간(기본 10초)
+// 안이라 같은 refresh token 으로 같은 새 세션을 돌려받는다.
+const REFRESH_TIMEOUT_MS = 5_000;
+const GOTRUE_KEY = env.supabase.anonKey || env.supabase.serviceRoleKey;
+
 router.post('/refresh', async (req: Request, res: Response) => {
   const { refresh_token } = req.body;
 
@@ -699,21 +728,59 @@ router.post('/refresh', async (req: Request, res: Response) => {
     return;
   }
 
-  const { data, error } = await supabaseAuth.auth.refreshSession({ refresh_token });
-
-  if (error) {
-    res.status(401).json({ error: error.message });
+  let gotrue: globalThis.Response;
+  try {
+    gotrue = await retryOnce(
+      async () => {
+        const r = await fetch(`${env.supabase.url}/auth/v1/token?grant_type=refresh_token`, {
+          method: 'POST',
+          headers: {
+            apikey: GOTRUE_KEY,
+            Authorization: `Bearer ${GOTRUE_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ refresh_token }),
+          signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
+        });
+        if (r.status >= 500 || r.status === 429) throw new Error(`GoTrue ${r.status}`);
+        return r;
+      },
+      'auth.refresh',
+      0,
+    );
+  } catch (e) {
+    console.error('[Auth] refresh unreachable:', e instanceof Error ? e.message : e);
+    res.status(503).json({ error: 'Auth service temporarily unavailable' });
     return;
   }
 
-  if (data.user && (await isAccountFrozen(data.user.id))) {
+  const body = (await gotrue.json().catch(() => ({}))) as {
+    access_token?: string;
+    refresh_token?: string;
+    user?: { id?: string };
+    msg?: string;
+    error_description?: string;
+  };
+
+  if (!gotrue.ok) {
+    res.status(401).json({ error: body.msg ?? body.error_description ?? 'Invalid refresh token' });
+    return;
+  }
+
+  if (!body.access_token || !body.refresh_token) {
+    console.error('[Auth] refresh: GoTrue 200 without tokens');
+    res.status(503).json({ error: 'Auth service temporarily unavailable' });
+    return;
+  }
+
+  if (body.user?.id && (await isAccountFrozen(body.user.id))) {
     res.status(403).json({ error: 'Account frozen', code: 'account_frozen' });
     return;
   }
 
   res.json({
-    access_token: data.session?.access_token,
-    refresh_token: data.session?.refresh_token,
+    access_token: body.access_token,
+    refresh_token: body.refresh_token,
   });
 });
 

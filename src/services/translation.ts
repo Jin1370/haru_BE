@@ -4,7 +4,7 @@ import {
     HarmBlockThreshold,
 } from "@google-cloud/vertexai";
 import { env } from "../config/env";
-import { sanitizeAudioTags, URL_PATTERN } from "../utils/textNormalization";
+import { sanitizeAudioTags, stripAudioTags, URL_PATTERN } from "../utils/textNormalization";
 import { retryOnce } from "../utils/retry";
 import type { VoiceIntroSlotLanguage } from "../types";
 
@@ -298,6 +298,33 @@ function cannotBeTargetLanguage(text: string, targetLanguage: string): boolean {
     return !script.test(stripped);
 }
 
+/**
+ * 번역문이 "렌더 실패" 로 보이는지 판정 (STEP 4 가 번역 대신 원문을 손질만 한 경우).
+ *
+ * 사고: "띠동갑 이라는말이 일본에도있어요??" (target=ja) 가 "띠동갑이라는 말은
+ * 일본에도 있어요？" 로 나갔다 — 띄어쓰기·조사·전각 물음표만 손본 한국어다.
+ * STEP 1 이 아니라 STEP 4 가 실패한 케이스라 OVERRIDE 로는 확률만 낮출 수 있다.
+ *
+ * 두 조건을 AND 로 건다:
+ *   (1) 출력에 타깃 언어 문자가 하나도 없다  — 번역이 안 나왔다
+ *   (2) 출력에 원문과 같은 문자체계가 남아있다 — 원문이 그대로 남았다
+ *
+ * (2) 가 없으면 '응 그거' → "ok", '넷플릭스' → "Netflix" 처럼 **정답인 라틴 단독
+ * 출력**이 전부 오탐된다. (1) 이 없으면 「띠동갑」って… 처럼 원문 단어를 인용하는
+ * **가장 잘 된 번역**이 오탐된다. 둘 다 있어야 실패만 걸린다.
+ */
+function renderLooksUntranslated(
+    translation: string,
+    original: string,
+    targetLanguage: string,
+): boolean {
+    const out = stripAudioTags(translation);
+    if (!cannotBeTargetLanguage(out, targetLanguage)) return false;
+    return Object.values(TARGET_SCRIPT).some(
+        (script) => script.test(out) && script.test(original),
+    );
+}
+
 export async function translateMessage(params: {
     text: string;
     targetLanguage: string;
@@ -310,13 +337,21 @@ ${describeParty("Speaker (who wrote this message)", params.speaker)}
 ${describeParty("Addressee (who reads it)", params.addressee)}
 ${describeContext(params.context)}Text to translate: ${JSON.stringify(params.text)}`;
 
-    const callGemini = async () => {
+    // forceTranslate: STEP 1 판정을 모델 손에서 뺏어 STEP 4 의 번역 브랜치로 고정한다.
+    // "STEP 1 을 건너뛰라" 가 아니라 "STEP 1 의 답은 false 다" 라고 알려주는 형태라
+    // 출력 스키마(already_target_language 필드)와 충돌하지 않는다.
+    const callGemini = async (forceTranslate = false) => {
+        const prompt = forceTranslate
+            ? `${userPrompt}
+
+OVERRIDE — the STEP 1 language check is already settled for you: the "Text to translate" is NOT written in ${params.targetLanguage}. Set already_target_language to false and translate it following STEP 4's false branch. Returning the text unchanged is not an option.`
+            : userPrompt;
         // 순단성 실패만 1회 재시도. 아래 safety-block / JSON 파싱 실패는 다시 해도
         // 같은 결과라 재시도 대상에서 제외 (호출 자체가 throw 한 경우만 감싼다).
         const result = await retryOnce(
             () =>
                 model.generateContent({
-                    contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+                    contents: [{ role: "user", parts: [{ text: prompt }] }],
                 }),
             "translateMessage",
         );
@@ -340,27 +375,61 @@ ${describeContext(params.context)}Text to translate: ${JSON.stringify(params.tex
         };
     };
 
-    let out = await callGemini();
+    // 판정은 호출 **전** 에 끝낸다. 응답을 보고 고치는 구조였을 땐 오판 시 같은
+    // 프롬프트로 재호출했는데, 그건 주사위를 다시 굴리는 것뿐이라 같은 오판이
+    // 연달아 나올 수 있었다 (prod 2026-09-19 "네!!! 완전 좋았어요" → target=ja
+    // 2연속 true → 미번역 배달). 코드가 아는 답은 물어보지 않는다.
+    const forced = cannotBeTargetLanguage(params.text, params.targetLanguage);
+    let out = await callGemini(forced);
 
-    if (
-        out.alreadyTargetLanguage &&
-        cannotBeTargetLanguage(params.text, params.targetLanguage)
-    ) {
-        // 오판 확정. 이 응답의 translation 은 "번역 불필요" 판정을 따라 원문 그대로라
-        // 쓸 수 없다 — 진짜 번역문을 받으려면 다시 물어보는 수밖에 없다. 원인이
-        // 확률적 뒤집힘이라 재호출은 거의 항상 정상으로 온다.
-        console.warn(
-            `[translateMessage] already_target_language 오판 감지 (target=${params.targetLanguage}) — 재호출`,
+    if (forced && out.alreadyTargetLanguage) {
+        // 판정을 명시했는데도 true — 확률적 뒤집힘이 아니라 지시 무시다. 번역문은
+        // 못 믿지만 "원문이 타깃 언어가 아니다" 는 확정 사실이라 boolean 만 바로잡고,
+        // 번역이 안 돼 있으면 message.ts 의 isTranslationIdentity 가 2차로 걸러낸다.
+        // 이 로그가 뜬다면 프롬프트 구조를 손봐야 한다는 신호 (STEP 1 분리 등).
+        console.error(
+            `[translateMessage] OVERRIDE 무시됨 — already_target_language=true (target=${params.targetLanguage})`,
         );
-        out = await callGemini();
-        if (out.alreadyTargetLanguage) {
-            // 두 번 연속 오판. 번역문은 못 믿지만 "원문이 타깃 언어가 아니다" 는
-            // 확정 사실이므로 boolean 만 바로잡아 넘긴다. 재호출도 원문을 그대로
-            // 돌려줬다면 message.ts 의 isTranslationIdentity 가 2차로 걸러낸다.
+        out.alreadyTargetLanguage = false;
+    }
+
+    // 출력 기반 가드 — STEP 1(입력)은 위에서 결정적으로 막았지만 STEP 4(렌더)가
+    // 딴짓하는 건 막을 방법이 없어 사후 1회 재호출로 보정한다. 재호출은 여기서
+    // 끝이다 (재귀 없음, 3차 없음) — 아래 채택 조건이 무엇이든 out 은 확정된다.
+    if (
+        forced &&
+        renderLooksUntranslated(
+            out.translation,
+            params.text,
+            params.targetLanguage,
+        )
+    ) {
+        console.warn(
+            `[translateMessage] 번역문에 원문이 그대로 남음 — 재호출 (target=${params.targetLanguage})`,
+        );
+        try {
+            const retried = await callGemini(true);
+            // 2차가 검사를 통과할 때만 채택 — 맞던 출력을 덮어쓰지 않는다.
+            if (
+                !renderLooksUntranslated(
+                    retried.translation,
+                    params.text,
+                    params.targetLanguage,
+                )
+            ) {
+                out = { ...retried, alreadyTargetLanguage: false };
+            } else {
+                console.error(
+                    `[translateMessage] 재호출도 미번역 — 1차 결과 유지 (target=${params.targetLanguage})`,
+                );
+            }
+        } catch (err) {
+            // 2차 실패로 메시지 배달 자체를 깨면 안 된다 (파이프라인 throw =
+            // audio_status='failed' → 수신자에게 아예 안 보임). 1차 결과 유지.
             console.error(
-                `[translateMessage] 재호출도 already_target_language=true (target=${params.targetLanguage}) — false 로 강제`,
+                "[translateMessage] 렌더 재호출 실패 — 1차 결과 유지",
+                err,
             );
-            out.alreadyTargetLanguage = false;
         }
     }
 

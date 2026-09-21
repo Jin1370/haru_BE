@@ -362,83 +362,170 @@ describe('translateMessage — conversation context', () => {
 });
 
 // ── already_target_language 오판 가드 (2026-09-08) ─────────────────────────
-// prod 사고: ja→ko / ko→ja 메시지가 STEP 1 boolean 뒤집힘으로 미번역 배달됨
-// (982건 중 3건). 타깃 언어의 문자가 원문에 하나도 없으면 "이미 타깃 언어" 는
-// 성립할 수 없다는 결정적 판정으로 잡고 Gemini 를 1회 재호출한다.
-describe('already_target_language 오판 가드', () => {
+// prod 사고 2건: STEP 1 boolean 뒤집힘으로 ko↔ja 메시지가 미번역 배달됨 (982건 중 3건).
+// 2026-09-19 "네!!! 완전 좋았어요" → target=ja 는 재호출에서도 같은 오판이 나와
+// translated_text=null 로 나갔다 — 같은 프롬프트 재호출은 주사위 다시 굴리기였다.
+// 이제 타깃 언어 문자가 원문에 0개면 호출 **전** 에 OVERRIDE 로 판정을 확정해 넘긴다.
+describe('already_target_language 사전 확정(OVERRIDE) 가드', () => {
   beforeEach(() => {
     generateContentMock.mockReset();
   });
 
-  it('한국어 원문 + target ja 오판 → 재호출해서 번역문 확보', async () => {
-    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '라일락 자주 들어요' }));
+  const promptOf = (i: number) =>
+    generateContentMock.mock.calls[i][0].contents[0].parts[0].text as string;
+
+  it('한국어 원문 + target ja → 1콜에 OVERRIDE 동봉, 재호출 없음', async () => {
     mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'ライラックよく聴きます' }));
     const r = await translateMessage({ text: '라일락 자주 들어요', targetLanguage: 'ja' });
-    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(promptOf(0)).toContain('OVERRIDE');
+    expect(promptOf(0)).toContain('NOT written in ja');
     expect(r.alreadyTargetLanguage).toBe(false);
     expect(r.translation).toBe('ライラックよく聴きます');
   });
 
-  it('일본어 원문 + target ko 오판 → 재호출', async () => {
-    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '韓国でも流行ってるんですね' }));
+  it('사고 메시지 "네!!! 완전 좋았어요" → OVERRIDE 대상', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'はい！！！すごく良かったです' }));
+    const r = await translateMessage({ text: '네!!! 완전 좋았어요', targetLanguage: 'ja' });
+    expect(promptOf(0)).toContain('OVERRIDE');
+    expect(r.translation).toBe('はい！！！すごく良かったです');
+  });
+
+  it('일본어 원문 + target ko → OVERRIDE 대상', async () => {
     mockGenerateText(JSON.stringify({ already_target_language: false, translation: '한국에서도 유행하는군요' }));
-    const r = await translateMessage({ text: '韓国でも流行ってるんですね', targetLanguage: 'ko' });
-    expect(r.translation).toBe('한국에서도 유행하는군요');
+    await translateMessage({ text: '韓国でも流行ってるんですね', targetLanguage: 'ko' });
+    expect(promptOf(0)).toContain('NOT written in ko');
   });
 
-  it('영어 원문 + target ko 오판 → 재호출 (라틴 발신도 커버)', async () => {
-    mockGenerateText(JSON.stringify({ already_target_language: true, translation: 'Do you like K-pop?' }));
+  it('영어 원문 + target ko → OVERRIDE 대상 (라틴 발신도 커버)', async () => {
     mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'K팝 좋아해요?' }));
-    const r = await translateMessage({ text: 'Do you like K-pop?', targetLanguage: 'ko' });
-    expect(r.translation).toBe('K팝 좋아해요?');
+    await translateMessage({ text: 'Do you like K-pop?', targetLanguage: 'ko' });
+    expect(promptOf(0)).toContain('OVERRIDE');
   });
 
-  it('재호출도 true 면 boolean 만 false 로 강제 (3번째 호출 없음)', async () => {
-    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '라일락 자주 들어요' }));
-    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '라일락 자주 들어요' }));
+  it('OVERRIDE 무시하고 true 를 내도 번역만 제대로면 boolean 만 강제 (재호출 없음)', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: 'ライラックよく聴きます' }));
     const r = await translateMessage({ text: '라일락 자주 들어요', targetLanguage: 'ja' });
-    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
     expect(r.alreadyTargetLanguage).toBe(false);
   });
 
-  it('정상 already=true (원문에 타깃 문자 있음) 는 재호출 안 함', async () => {
-    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '안녕하세요' }));
-    const r = await translateMessage({ text: '안녕하세요', targetLanguage: 'ko' });
-    expect(generateContentMock).toHaveBeenCalledTimes(1);
+  it('원문에 타깃 문자가 있으면 OVERRIDE 없이 모델 판단을 존중 (코드스위칭)', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: true, translation: 'はい！すごく良かったです' }));
+    const r = await translateMessage({ text: 'はい！すごく良かったです', targetLanguage: 'ja' });
+    expect(promptOf(0)).not.toContain('OVERRIDE');
     expect(r.alreadyTargetLanguage).toBe(true);
   });
 
-  it('이모지·숫자만 있는 메시지는 판단 보류 — 재호출 안 함', async () => {
+  it('혼합 텍스트도 모델 판단 — 타깃 문자가 섞여 있으면 코드가 단정 못 함', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'ラーメンめっちゃ好きです' }));
+    await translateMessage({ text: '라멘 めっちゃ 좋아해요', targetLanguage: 'ja' });
+    expect(promptOf(0)).not.toContain('OVERRIDE');
+  });
+
+  it('이모지·숫자만 있는 메시지는 판단 보류 — OVERRIDE 안 붙음', async () => {
     mockGenerateText(JSON.stringify({ already_target_language: true, translation: '😂😂 555' }));
     const r = await translateMessage({ text: '😂😂 555', targetLanguage: 'ko' });
-    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(promptOf(0)).not.toContain('OVERRIDE');
     expect(r.alreadyTargetLanguage).toBe(true);
   });
 
-  it('링크만 있는 메시지는 판단 보류 — URL 의 라틴 문자는 글자로 안 셈', async () => {
+  it('링크만 있는 메시지도 판단 보류 — URL 의 라틴 문자는 글자로 안 셈', async () => {
     mockGenerateText(JSON.stringify({ already_target_language: true, translation: 'https://youtu.be/abc123' }));
     const r = await translateMessage({ text: 'https://youtu.be/abc123', targetLanguage: 'ko' });
-    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(promptOf(0)).not.toContain('OVERRIDE');
     expect(r.alreadyTargetLanguage).toBe(true);
   });
 
   it('이메일만 있는 메시지도 판단 보류', async () => {
     mockGenerateText(JSON.stringify({ already_target_language: true, translation: 'sejin@gmail.com' }));
     await translateMessage({ text: 'sejin@gmail.com', targetLanguage: 'ja' });
-    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(promptOf(0)).not.toContain('OVERRIDE');
   });
 
-  it('링크 + 한국어 본문 + target ja 는 여전히 재호출', async () => {
-    mockGenerateText(JSON.stringify({ already_target_language: true, translation: '이거 봐 https://youtu.be/abc' }));
+  it('링크 + 한국어 본문 + target ja 는 OVERRIDE 대상 (URL 걷어내면 한글이 남음)', async () => {
     mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'これ見て https://youtu.be/abc' }));
     const r = await translateMessage({ text: '이거 봐 https://youtu.be/abc', targetLanguage: 'ja' });
-    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(promptOf(0)).toContain('OVERRIDE');
     expect(r.translation).toBe('これ見て https://youtu.be/abc');
   });
 
-  it('already=false 면 스크립트와 무관하게 재호출 안 함', async () => {
-    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'ライラック' }));
-    await translateMessage({ text: '라일락', targetLanguage: 'ja' });
+  it('번역이 제대로 나오면 어느 경우에도 Gemini 호출은 1회', async () => {
+    const ok: [string, string, string][] = [
+      ['라일락', 'ja', 'ライラック'],
+      ['はい', 'ja', 'はい'],
+      ['😂', 'ko', '😂'],
+    ];
+    for (const [text, target, translation] of ok) {
+      generateContentMock.mockReset();
+      mockGenerateText(JSON.stringify({ already_target_language: true, translation }));
+      await translateMessage({ text, targetLanguage: target });
+      expect(generateContentMock).toHaveBeenCalledTimes(1);
+    }
+  });
+});
+
+// STEP 4(렌더) 실패 가드. prod 사고: "띠동갑 이라는말이 일본에도있어요??" (target=ja)
+// 가 "띠동갑이라는 말은 일본에도 있어요？" 로 배달됨 — 띄어쓰기·조사·전각 물음표만
+// 손본 한국어다. (출력에 타깃 문자 0개) AND (원문 문자체계가 출력에 잔존) 으로만
+// 발동해 정답인 라틴 단독 출력("ok", "Netflix")과 원문 인용 번역(「띠동갑」って…)을 살린다.
+describe('렌더 실패 가드', () => {
+  beforeEach(() => generateContentMock.mockReset());
+
+  it('사고 케이스: 한국어만 남은 출력 → 재호출해서 일본어 확보', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: '띠동갑이라는 말은 일본에도 있어요？' }));
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: '「띠동갑」って日本にもありますか？' }));
+    const r = await translateMessage({ text: '띠동갑 이라는말이 일본에도있어요??', targetLanguage: 'ja' });
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(r.translation).toBe('「띠동갑」って日本にもありますか？');
+  });
+
+  it('원문 단어를 인용한 정상 번역은 발동 안 함 (타깃 문자가 있음)', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: '「띠동갑」って日本にもありますか？' }));
+    await translateMessage({ text: '띠동갑 이라는말이 일본에도있어요??', targetLanguage: 'ja' });
     expect(generateContentMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('정답인 라틴 단독 출력은 발동 안 함 — ok', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'ok' }));
+    await translateMessage({ text: '응 그거', targetLanguage: 'ja' });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('정답인 라틴 단독 출력은 발동 안 함 — 고유명사', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'Netflix' }));
+    await translateMessage({ text: '넷플릭스', targetLanguage: 'ja' });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('오디오 태그만 남는 출력은 발동 안 함 (ㅋㅋㅋ → [soft laugh])', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: '[soft laugh]' }));
+    await translateMessage({ text: 'ㅋㅋㅋ', targetLanguage: 'ja' });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('재호출도 미번역이면 1차 결과 유지 — 3차 호출 없음', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: '띠동갑이라는 말은 일본에도 있어요？' }));
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: '띠동갑이라는 말은 일본에도 있어요.' }));
+    const r = await translateMessage({ text: '띠동갑 이라는말이 일본에도있어요??', targetLanguage: 'ja' });
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(r.translation).toBe('띠동갑이라는 말은 일본에도 있어요？');
+  });
+
+  it('재호출이 throw 해도 메시지를 잃지 않는다 — 1차 결과 유지', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: '띠동갑이라는 말은 일본에도 있어요？' }));
+    // safety-block = 응답에 text 가 없는 형태. callGemini 가 내부에서 throw 한다.
+    generateContentMock.mockResolvedValue({ response: { candidates: [] } });
+    const r = await translateMessage({ text: '띠동갑 이라는말이 일본에도있어요??', targetLanguage: 'ja' });
+    expect(r.translation).toBe('띠동갑이라는 말은 일본에도 있어요？');
+  }, 10000);
+
+  it('무한 호출 불가 — 모든 응답이 미번역이어도 generateContent 는 정확히 2회', async () => {
+    generateContentMock.mockResolvedValue({
+      response: { candidates: [{ content: { parts: [{ text: JSON.stringify({ already_target_language: true, translation: '띠동갑이라는 말은 일본에도 있어요' }) }] } }] },
+    });
+    await translateMessage({ text: '띠동갑 이라는말이 일본에도있어요??', targetLanguage: 'ja' });
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
   });
 });

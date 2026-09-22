@@ -29,6 +29,7 @@ import { sendPushToUser } from '../services/pushNotifications';
 import { isBlocked } from '../constants/moderationDictionary';
 import { checkOpenAiModeration, checkOpenAiImageModeration } from '../services/openaiModeration';
 import { requireNotFrozen } from '../utils/freezeGuard';
+import { retryOnce } from '../utils/retry';
 import { logModerationBlock } from '../utils/moderationAudit';
 import { isCampaignBot, sendCampaignEntryGuide } from '../services/campaignBot';
 import { randomUUID } from 'crypto';
@@ -169,13 +170,23 @@ async function idempotentInsertMessage(
   matchId: string,
   senderId: string,
 ): Promise<{ row: MessageRow | null; inserted: boolean; conflict: boolean }> {
-  const { data: insertedRows, error } = await supabase
-    .from('messages')
-    .upsert(payload, { onConflict: 'id', ignoreDuplicates: true })
-    .select();
-
-  if (error) {
-    console.error(`[idempotentInsertMessage] upsert failed id=${payload.id}:`, error.message);
+  // 2026-09-20 prod: 번역·TTS·Storage 까지 다 끝낸 뒤 이 upsert 만 `fetch failed`
+  // (Fly→Supabase 커넥션 1회 딸꾹질) 로 죽어 메시지가 통째로 유실됐다. DO NOTHING
+  // 이라 재시도가 안전하다 — 첫 시도가 실제로 들어갔으면 0 rows → 아래 재select.
+  // supabase-js 는 throw 대신 error 를 돌려주므로 retryOnce 가 잡도록 throw 로 변환.
+  let insertedRows: unknown[] | null = null;
+  try {
+    insertedRows = await retryOnce(async () => {
+      const { data, error } = await supabase
+        .from('messages')
+        .upsert(payload, { onConflict: 'id', ignoreDuplicates: true })
+        .select();
+      // details 에 원 스택이 담긴다 — `fetch failed` 의 cause 를 다음엔 알 수 있게.
+      if (error) throw new Error(`${error.message} (code=${error.code}) ${error.details ?? ''}`);
+      return data;
+    }, `messages.upsert ${payload.id}`);
+  } catch (e) {
+    console.error(`[idempotentInsertMessage] upsert failed id=${payload.id}:`, e);
     return { row: null, inserted: false, conflict: false };
   }
   if (insertedRows && insertedRows.length > 0) {

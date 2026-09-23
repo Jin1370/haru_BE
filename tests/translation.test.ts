@@ -26,7 +26,7 @@ vi.mock('@google-cloud/vertexai', () => {
 });
 
 // Now import after mock is registered.
-import { translateMessage, translateVoiceIntro } from '../src/services/translation';
+import { translateMessage, translateVoiceIntro, jaGreetingFor } from '../src/services/translation';
 
 function mockGenerateText(text: string) {
   generateContentMock.mockResolvedValueOnce({
@@ -55,17 +55,26 @@ describe('translateMessage', () => {
     expect(prompt).not.toContain('[soft laugh]');
   });
 
-  it('target ja 에만 발송 시각(일본 시각)을 싣는다 — 인사말 시간대 규칙용', async () => {
-    mockGenerateText(JSON.stringify({ translation: 'こんばんは' }));
-    // 2026-09-23T08:30Z = 17:30 JST
-    await translateMessage({ text: '안녕하세요', targetLanguage: 'ja', sentAt: new Date('2026-09-23T08:30:00Z') });
+  it('jaGreetingFor — 일본 시각 경계 (04/10/18시)', () => {
+    const at = (jst: string) => jaGreetingFor(new Date(`2026-09-23T${jst}:00+09:00`));
+    expect(at('03:59')).toBe('こんばんは');
+    expect(at('04:00')).toBe('おはようございます');
+    expect(at('09:59')).toBe('おはようございます');
+    expect(at('10:00')).toBe('こんにちは');
+    expect(at('17:59')).toBe('こんにちは');
+    expect(at('18:00')).toBe('こんばんは');
+  });
+
+  it('target ja 에만 발송 시각 인사를 싣는다', async () => {
+    mockGenerateText(JSON.stringify({ translation: 'こんにちは' }));
+    await translateMessage({ text: '안녕하세요', targetLanguage: 'ja', sentAt: new Date('2026-09-23T17:59:00+09:00') });
     const jaPrompt = generateContentMock.mock.calls[0]?.[0]?.contents?.[0]?.parts?.[0]?.text ?? '';
-    expect(jaPrompt).toContain('Local time when sent: 17:30');
+    expect(jaPrompt).toContain('Greeting for the send time: こんにちは');
 
     mockGenerateText(JSON.stringify({ translation: '안녕하세요' }));
     await translateMessage({ text: 'こんにちは', targetLanguage: 'ko' });
     const koPrompt = generateContentMock.mock.calls[1]?.[0]?.contents?.[0]?.parts?.[0]?.text ?? '';
-    expect(koPrompt).not.toContain('Local time');
+    expect(koPrompt).not.toContain('Greeting for the send time');
   });
 
   it('화이트리스트 태그는 보존', async () => {

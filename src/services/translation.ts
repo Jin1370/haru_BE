@@ -196,7 +196,7 @@ ${JA_REGISTER_RULE}
   - Chinese: 您 by default. Allow 你 if the source is clearly casual.
   - Short messages carry a weak register signal ("괜찮아", "응 그거 무서웠어", "어디야"), but weak is not absent. Do NOT retreat to the polite form when the text is short: a single plain ending (-아/-어/-지/-네/-야/-자, or a bare noun reply inside a casual thread) is enough to REQUIRE casual output. Guessing polite "to be safe" is itself an error — it makes a close conversation suddenly sound distant.
   - The polite default applies ONLY when the source language marks no politeness at all (English, Thai romanized chat, etc.), never as a fallback for "I am not sure".
-- Japanese greetings: a time-neutral greeting (안녕하세요, 안녕, hi, hello) becomes the greeting for the "Local time when sent" line — 04:00–09:59 おはようございます (casual: おはよう), 10:00–16:59 こんにちは, 17:00–03:59 こんばんは.
+- Japanese greetings: a time-neutral greeting (안녕하세요, 안녕, hi, hello) becomes the one on the "Greeting for the send time" line (casual source: おはようございます → おはよう).
 - Keep personal names, place names, and brand names in their original or properly romanized form. Titles of creative works and dish names are NOT covered by this — they follow the LOCALIZED NAMES rules below.
 - Emoji: carry every emoji across UNCHANGED, in the same position relative to the surrounding words (trailing stays trailing). Never drop one, never add one the source lacks, never swap it for a different emoji, and never turn it into words ("😊" must not become "笑顔" or "smiley") or into an audio tag — [soft laugh] / [sad] are only for the typed markers listed in the audio tag step, never for an emoji.
 - Do NOT respond to the content — only translate.
@@ -326,6 +326,16 @@ function renderLooksUntranslated(
     );
 }
 
+// 04–10시 おはよう / 10–18시 こんにちは / 18–04시 こんばんは (일본 시각)
+export function jaGreetingFor(date: Date): string {
+    const hour = Number(
+        new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Tokyo", hour: "2-digit", hourCycle: "h23" }).format(date),
+    );
+    if (hour >= 4 && hour < 10) return "おはようございます";
+    if (hour >= 10 && hour < 18) return "こんにちは";
+    return "こんばんは";
+}
+
 export async function translateMessage(params: {
     text: string;
     targetLanguage: string;
@@ -335,15 +345,11 @@ export async function translateMessage(params: {
     // 인사말 시간대 규칙용. 재합성은 최초 발송 시각을 넘겨야 표시 번역과 음성이 일치한다.
     sentAt?: Date;
 }): Promise<{ translation: string; alreadyTargetLanguage: boolean }> {
-    // 한국·일본 모두 UTC+9 라 일본 시각 하나로 충분하다.
+    // 시각→인사 판정은 코드에서 한다 — 모델에 시각을 주고 경계를 맡기면 17:59 를
+    // こんばんは 로 반올림하는 등 경계에서 흔들렸다. 한·일 모두 UTC+9 라 일본 시각 기준.
     const localTime =
         params.targetLanguage === "ja"
-            ? `Local time when sent: ${new Intl.DateTimeFormat("en-GB", {
-                  timeZone: "Asia/Tokyo",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  hourCycle: "h23",
-              }).format(params.sentAt ?? new Date())}\n`
+            ? `Greeting for the send time: ${jaGreetingFor(params.sentAt ?? new Date())}\n`
             : "";
     const userPrompt = `Target language: ${params.targetLanguage}
 ${localTime}${describeParty("Speaker (who wrote this message)", params.speaker)}

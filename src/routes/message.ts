@@ -1300,6 +1300,7 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
         msg.created_at as string,
         msg.sender_id as string,
       ),
+      sentAt: new Date(msg.created_at as string),
     });
 
     // 실패 복구 경로에서 채울 번역문 — 최초 파이프라인이 번역 단계에서 죽었으면

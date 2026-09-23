@@ -55,6 +55,19 @@ describe('translateMessage', () => {
     expect(prompt).not.toContain('[soft laugh]');
   });
 
+  it('target ja 에만 발송 시각(일본 시각)을 싣는다 — 인사말 시간대 규칙용', async () => {
+    mockGenerateText(JSON.stringify({ translation: 'こんばんは' }));
+    // 2026-09-23T08:30Z = 17:30 JST
+    await translateMessage({ text: '안녕하세요', targetLanguage: 'ja', sentAt: new Date('2026-09-23T08:30:00Z') });
+    const jaPrompt = generateContentMock.mock.calls[0]?.[0]?.contents?.[0]?.parts?.[0]?.text ?? '';
+    expect(jaPrompt).toContain('Local time when sent: 17:30');
+
+    mockGenerateText(JSON.stringify({ translation: '안녕하세요' }));
+    await translateMessage({ text: 'こんにちは', targetLanguage: 'ko' });
+    const koPrompt = generateContentMock.mock.calls[1]?.[0]?.contents?.[0]?.parts?.[0]?.text ?? '';
+    expect(koPrompt).not.toContain('Local time');
+  });
+
   it('화이트리스트 태그는 보존', async () => {
     mockGenerateText(JSON.stringify({ translation: 'so funny [soft laugh]' }));
     const { translation } = await translateMessage({ text: 'x', targetLanguage: 'en' });

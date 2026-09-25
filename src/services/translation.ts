@@ -345,6 +345,13 @@ export async function translateMessage(params: {
     // 인사말 시간대 규칙용. 재합성은 최초 발송 시각을 넘겨야 표시 번역과 음성이 일치한다.
     sentAt?: Date;
 }): Promise<{ translation: string; alreadyTargetLanguage: boolean }> {
+    // 글자·숫자가 하나도 없으면(??, !!, 😊) 번역할 내용이 없다 — 모델에 넘기면
+    // "??" → "どうしました？" 처럼 없는 말을 지어내고, TTS 가 번역문 기준이라 그게
+    // 발신자 클론 보이스로 합성된다 (2026-09-25 실측 2/9회). true 반환 = 번역 미표시.
+    if (!/[\p{L}\p{N}]/u.test(params.text)) {
+        return { translation: params.text, alreadyTargetLanguage: true };
+    }
+
     // 시각→인사 판정은 코드에서 한다 — 모델에 시각을 주고 경계를 맡기면 17:59 를
     // こんばんは 로 반올림하는 등 경계에서 흔들렸다. 한·일 모두 UTC+9 라 일본 시각 기준.
     const localTime =

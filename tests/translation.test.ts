@@ -55,6 +55,16 @@ describe('translateMessage', () => {
     expect(prompt).not.toContain('[soft laugh]');
   });
 
+  it('글자·숫자 없는 원문(??)은 Gemini 없이 그대로 — 없는 말 지어내기 차단', async () => {
+    for (const text of ['??', '！！', '😊']) {
+      expect(await translateMessage({ text, targetLanguage: 'ja' })).toEqual({
+        translation: text,
+        alreadyTargetLanguage: true,
+      });
+    }
+    expect(generateContentMock).not.toHaveBeenCalled();
+  });
+
   it('jaGreetingFor — 일본 시각 경계 (04/10/18시)', () => {
     const at = (jst: string) => jaGreetingFor(new Date(`2026-09-23T${jst}:00+09:00`));
     expect(at('03:59')).toBe('こんばんは');
@@ -477,7 +487,6 @@ describe('already_target_language 사전 확정(OVERRIDE) 가드', () => {
     const ok: [string, string, string][] = [
       ['라일락', 'ja', 'ライラック'],
       ['はい', 'ja', 'はい'],
-      ['😂', 'ko', '😂'],
     ];
     for (const [text, target, translation] of ok) {
       generateContentMock.mockReset();

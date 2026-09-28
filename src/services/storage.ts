@@ -1,14 +1,27 @@
 import { supabase } from '../config/supabase';
+import { retryOnce } from '../utils/retry';
 
+// 2026-09-24 prod: 보이스 한마디 en 슬롯이 TTS 까지 끝낸 뒤 업로드만 `fetch failed`
+// (Fly→Supabase 커넥션 딸꾹질) 로 죽어 'failed' 확정 → 영어권 디스커버에서 사라졌다.
+// 네트워크 에러(StorageUnknownError) 만 1회 재시도 — 4xx(용량·형식) 는 다시 해도
+// 같으니 즉시 실패. 경로가 호출 전에 확정되고 upsert 라 재시도는 같은 파일을
+// 덮어쓸 뿐 중복이 생기지 않는다.
 export async function uploadFile(
   bucket: string,
   path: string,
   body: Buffer,
   contentType: string
 ): Promise<string> {
-  const { error } = await supabase.storage
-    .from(bucket)
-    .upload(path, body, { contentType, upsert: true });
+  let error: { message: string } | null;
+  try {
+    ({ error } = await retryOnce(async () => {
+      const r = await supabase.storage.from(bucket).upload(path, body, { contentType, upsert: true });
+      if (r.error?.name === 'StorageUnknownError') throw r.error;
+      return r;
+    }, `storage.upload ${bucket}/${path}`));
+  } catch (e) {
+    error = e as Error;
+  }
 
   if (error) {
     throw new Error(`Storage upload failed: ${error.message}`);

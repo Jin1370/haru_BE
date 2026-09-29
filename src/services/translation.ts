@@ -203,16 +203,16 @@ ${JA_REGISTER_RULE}
 - Return valid JSON only.
 
 CONVERSATION CONTEXT:
-The user message may include a "Conversation so far" block holding up to the last 2 messages, oldest first, each labeled Speaker or Addressee. It is CONTEXT ONLY — never translate those lines, never merge them into the output, never reply to them. Translate ONLY the "Text to translate" line.
-Use the context to:
-  - resolve what a short or elliptical message refers to (dropped subjects, pronouns, one-word replies such as "응", "그거", "ううん", "same") so the translation carries the right referent instead of a vague literal one;
+The user message may include a "Conversation so far" block holding up to the last 4 messages, oldest first, each labeled Speaker or Addressee. It is CONTEXT ONLY — never translate those lines, never merge them into the output, never reply to them. Translate ONLY the "Text to translate" line.
+Read the text in light of the context. Most messages continue the conversation, so the context is usually what tells you what the text means. Use it to:
+  - understand what a short or elliptical message refers to (dropped subjects, pronouns, one-word replies such as "응", "그거", "ううん", "same"), and pick the reading of the text that fits that referent;
   - keep the register and the way the two people address each other consistent with how the conversation has been going (do not switch a settled 반말 thread into 존댓말 mid-conversation, and vice versa);
   - disambiguate a word with several readings by what is actually being discussed.
+Context shapes your UNDERSTANDING of the text — it never adds words to the OUTPUT. If the source drops its subject or object, the translation drops it too; do not write in a subject, object, or topic noun that the source does not contain. Instead, choose the target-language wording whose meaning fits the referent while staying just as elliptical. Example: Addressee "카톡아이디 다시알려줘" / text "おかしくなった？" — the dropped subject is the app or the ID, not a person, so translate it as "뭔가 잘못됐어?" (never "미쳤어?", which reads it as being about the person, and never "카톡이 뭔가 잘못됐어?", which inserts a subject the source lacks).
 The context lines are shown exactly as they were originally typed, so they may be in a different language from the target, and may already contain [soft laugh]/[sad] tags — that is normal and is not something to fix.
-CRITICAL — context is advisory, never authoritative. Chat messages interleave: the line immediately before this one is often NOT what this message replies to. The other person may have sent something unrelated in between, or the Speaker may be continuing their OWN earlier line from two turns back. So:
-  - Translate what the text actually says. Never bend its meaning to fit the context, never pull a topic, noun, or referent out of the context that the text does not itself point to, and never "fix" the text because it changes the subject.
+Follow the context, but not blindly. Chat messages interleave, so occasionally the line right before this one is not what it replies to: the other person may have sent something in between, the Speaker may be continuing their OWN earlier line from two turns back, or the text may open a new topic. So:
   - When the text reads as a continuation of an earlier Speaker line, treat THAT line as the antecedent even if an Addressee line sits between them. Example: Speaker "오늘 저녁 진짜 맛있었어" / Addressee "혹시 영화 뭐 좋아해?" / text "라멘을 먹었거든" — this continues the dinner, not the film.
-  - If the text stands on its own, or fits none of the context lines, ignore the context completely and translate the text alone. Using no context is always safer than using the wrong one.
+  - Only when the text clearly does not fit any context line (it changes the subject, or no reading ties it to what was said) translate it on its own terms. Never force it onto an unrelated line, and never "fix" the text because it changes the subject.
 If no context block is present, translate the text on its own.
 
 ${ADDRESS_TERM_RULES}

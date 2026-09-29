@@ -1467,12 +1467,17 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
         const path = `${messageId}.mp3`;
         audioUrl = await uploadFile('voice-messages', path, audio, 'audio/mpeg');
       } catch (ttsError) {
-        // ponytail: 2026-09-29 ElevenLabs 키 quota 소진 임시 우회. 401/429(한도·키 문제)면
-        // 음성 없이 텍스트 전용 'ready' 로 배달한다 — FE textOnlyReady 분기가 게이트 없이 노출.
-        // 그 외 에러는 기존대로 'failed' + 송신자 재시도. 한도 복구되면 이 분기는 발동 안 함.
-        const status = (ttsError as { statusCode?: number }).statusCode;
-        if (status !== 401 && status !== 429) throw ttsError;
-        console.warn(`[processAndInsertMessage] TTS unavailable (${status}) → text-only messageId=${messageId}`);
+        // 번역은 성공했는데 음성(합성·업로드)만 실패 — 음성 없이 텍스트 전용 'ready' 로
+        // 배달한다 (FE textOnlyReady 분기가 게이트 없이 노출 + 푸시 발송). 'failed' 로
+        // 숨기면 송신자가 재시도를 안 누르는 한 메시지가 유실된다 (2026-09-29 quota 사고).
+        // retryOnce 가 이미 1회 재시도한 뒤라 여기 도달한 건 일시 장애도 아님.
+        // 번역 실패는 이 try 밖이라 기존대로 'failed' (수신자가 못 읽는 원문만 가면 무의미).
+        // 조용히 삼키면 이번처럼 장애를 모른다 — 반드시 Sentry 로 올린다.
+        console.warn(`[processAndInsertMessage] TTS failed → text-only messageId=${messageId}:`, (ttsError as Error).message);
+        Sentry.captureException(ttsError, {
+          tags: { pipeline: 'message', stage: 'tts_fallback' },
+          extra: { messageId, matchId, recipientLang },
+        });
       }
     }
 

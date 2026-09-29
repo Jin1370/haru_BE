@@ -1462,9 +1462,18 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
       // TTS 스킵 — audio_url=null 이지만 의도된 경로이므로 'ready' 로 마킹.
     } else {
       const textToSynthesize = ensureSpeakableForTTS(ttsText);
-      const audio = await synthesizeSpeech(textToSynthesize, voiceId, emotion, senderGender, recipientLang);
-      const path = `${messageId}.mp3`;
-      audioUrl = await uploadFile('voice-messages', path, audio, 'audio/mpeg');
+      try {
+        const audio = await synthesizeSpeech(textToSynthesize, voiceId, emotion, senderGender, recipientLang);
+        const path = `${messageId}.mp3`;
+        audioUrl = await uploadFile('voice-messages', path, audio, 'audio/mpeg');
+      } catch (ttsError) {
+        // ponytail: 2026-09-29 ElevenLabs 키 quota 소진 임시 우회. 401/429(한도·키 문제)면
+        // 음성 없이 텍스트 전용 'ready' 로 배달한다 — FE textOnlyReady 분기가 게이트 없이 노출.
+        // 그 외 에러는 기존대로 'failed' + 송신자 재시도. 한도 복구되면 이 분기는 발동 안 함.
+        const status = (ttsError as { statusCode?: number }).statusCode;
+        if (status !== 401 && status !== 429) throw ttsError;
+        console.warn(`[processAndInsertMessage] TTS unavailable (${status}) → text-only messageId=${messageId}`);
+      }
     }
 
     // idempotent-send: 최종 INSERT 를 ON CONFLICT (id) DO NOTHING 으로.

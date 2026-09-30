@@ -39,9 +39,9 @@ function cutoffIso(daysAgo: number): string {
 }
 
 type AuditTable = {
-  table: 'moderation_blocks' | 'freeze_events' | 'reports' | 'blocks' | 'deletion_stats';
-  timeColumn: 'blocked_at' | 'triggered_at' | 'created_at' | 'deleted_at';
-  key: 'moderation' | 'freeze' | 'reports' | 'blocks' | 'deletionStats';
+  table: 'moderation_blocks' | 'freeze_events' | 'reports' | 'blocks' | 'deletion_stats' | 'daily_active_users';
+  timeColumn: 'blocked_at' | 'triggered_at' | 'created_at' | 'deleted_at' | 'day';
+  key: 'moderation' | 'freeze' | 'reports' | 'blocks' | 'deletionStats' | 'dau';
 };
 
 const AUDIT_TABLES: AuditTable[] = [
@@ -50,6 +50,7 @@ const AUDIT_TABLES: AuditTable[] = [
   { table: 'reports',           timeColumn: 'created_at',   key: 'reports'       },
   { table: 'blocks',            timeColumn: 'created_at',   key: 'blocks'        },
   { table: 'deletion_stats',    timeColumn: 'deleted_at',   key: 'deletionStats' },
+  { table: 'daily_active_users', timeColumn: 'day',         key: 'dau'           },
 ];
 
 async function sweepAuditTable(
@@ -86,6 +87,7 @@ export async function sweepAuditTables(): Promise<{
   reportsDeleted: number;
   blocksDeleted: number;
   deletionStatsDeleted: number;
+  dauDeleted: number;
   errors: number;
 }> {
   const cutoff = cutoffIso(RETENTION_DAYS);
@@ -101,6 +103,7 @@ export async function sweepAuditTables(): Promise<{
     reportsDeleted:       lookup.reports.deleted,
     blocksDeleted:        lookup.blocks.deleted,
     deletionStatsDeleted: lookup.deletionStats.deleted,
+    dauDeleted:           lookup.dau.deleted,
     errors: results.filter((r) => r.error).length,
   };
 }
@@ -116,7 +119,8 @@ function runSweep(label: string): void {
         r.freezeDeleted > 0 ||
         r.reportsDeleted > 0 ||
         r.blocksDeleted > 0 ||
-        r.deletionStatsDeleted > 0
+        r.deletionStatsDeleted > 0 ||
+        r.dauDeleted > 0
       ) {
         console.log(`[audit-cleanup.sweep] ${label}`, r);
       }

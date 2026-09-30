@@ -35,7 +35,7 @@ beforeEach(() => {
   vi.restoreAllMocks();
 });
 
-const TABLES = 5; // AUDIT_TABLES 길이
+const TABLES = 6; // AUDIT_TABLES 길이
 
 describe('sweepAuditTable 재시도', () => {
   it('정상이면 테이블당 1 회만 호출', async () => {

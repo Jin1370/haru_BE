@@ -665,6 +665,16 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
     return;
   }
 
+  // (1.11) daily_active_users (mig 057) 동기 DELETE — FK 없는 user-linked 테이블.
+  const { error: dauErr } = await supabase
+    .from('daily_active_users')
+    .delete()
+    .eq('user_id', userId);
+  if (dauErr) {
+    res.status(500).json({ error: dauErr.message });
+    return;
+  }
+
   // (2) Anonymize the auth.users row so the user can no longer authenticate
   // and their original email becomes free for re-registration. Email goes to
   // a non-routable .local address; password is set to 32 bytes of random hex

@@ -129,5 +129,35 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
   }
 
   req.userId = data.user.id;
+  recordDailyActive(data.user.id);
   next();
+}
+
+// DAU 기록 (mig 057). 사용자당 하루 1 회만 DB 에 쓴다 — 응답은 기다리지 않는다.
+// 날짜는 KST (주 사용자 한·일 모두 UTC+9). 임퍼소네이션 경로는 기록 안 함.
+// ponytail: 인스턴스별 메모리 Set 이라 재시작/다중 머신이면 하루 몇 번 더 쓴다 —
+// PK (user_id, day) + ignoreDuplicates 라 중복 행은 안 생겨 무해.
+let dauDay = '';
+const dauSeen = new Set<string>();
+
+export function kstDay(now = Date.now()): string {
+  return new Date(now + 9 * 3600_000).toISOString().slice(0, 10);
+}
+
+export function recordDailyActive(userId: string): void {
+  const day = kstDay();
+  if (day !== dauDay) {
+    dauDay = day;
+    dauSeen.clear();
+  }
+  if (dauSeen.has(userId)) return;
+  dauSeen.add(userId);
+  // 실패해도 재시도 안 함 (그 인스턴스에서 그날 1 번만 로그) — mig 미적용 시
+  // 매 요청 에러 로그가 Sentry 로 쏟아지는 걸 막는다.
+  supabase
+    .from('daily_active_users')
+    .upsert({ user_id: userId, day }, { onConflict: 'user_id,day', ignoreDuplicates: true })
+    .then(({ error }) => {
+      if (error) console.error('[dau] upsert failed', error.message);
+    });
 }

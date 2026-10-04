@@ -147,7 +147,7 @@ async function synthesizeSlot(args: {
   try {
     await setSlotStatus(userId, lang, 'processing');
     // TTS 입력: [soft laugh] 만 audible, [sad] 등 display-only 태그는 제거 (사용자 정책).
-    const ttsText = stripNonAudibleTags(text);
+    const ttsText = stripNonAudibleTags(text, lang);
     // strip 후 audible 콘텐츠가 없으면 (순수 sad 슬롯 등) 소리 없이 'ready'.
     // display 텍스트(voice_intro_translations 슬롯)는 이미 commit 되어 유지된다.
     if (!hasSpeakableContent(ttsText)) {
@@ -234,7 +234,7 @@ export async function generateVoiceIntroAudios(
         const value = translations[lang];
         if (typeof value === 'string' && value.length > 0) {
           slotTexts[lang] = value; // TTS 입력: audio tag 포함
-          displayTexts[lang] = replaceTagsForDisplay(value, lang); // DB 저장: slot 언어 슬랭
+          displayTexts[lang] = replaceTagsForDisplay(value, lang, voiceIntroText); // DB 저장: slot 언어 슬랭
         }
       }
     } catch (err) {

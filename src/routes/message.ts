@@ -1306,14 +1306,14 @@ router.post('/:matchId/messages/:messageId/audio', requireNotFrozen, async (req:
     // 실패 복구 경로에서 채울 번역문 — 최초 파이프라인이 번역 단계에서 죽었으면
     // translated_text 가 null 로 남아 있다. 판정 규칙은 최초 INSERT 와 동일
     // (identity 면 null 이라 FE 번역 인디케이터가 안 뜬다).
-    const displayText = replaceTagsForDisplay(translation, recipientLang);
+    const displayText = replaceTagsForDisplay(translation, recipientLang, originalText);
     const recoveredTranslatedText =
       alreadyTargetLanguage || isTranslationIdentity(translation, originalText)
         ? null
         : displayText;
 
     // [soft laugh] 만 audible — [sad] 등은 TTS 에서 제거 (사용자 정책).
-    const ttsText = stripNonAudibleTags(translation);
+    const ttsText = stripNonAudibleTags(translation, recipientLang);
     let audioUrl: string | null = null;
     if (!hasSpeakableContent(ttsText)) {
       if (!isPurged) {
@@ -1447,7 +1447,7 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
     // 판정은 프로필 언어가 아니라 Gemini STEP 1 이 실제 텍스트를 보고 내린 결과 —
     // 코드스위칭(프로필=ja인데 한국어로 타이핑)도 여기서 걸린다. STEP 1 이 false 로
     // 오판했는데 출력이 원문과 다를 게 없으면 isTranslationIdentity 가 2차로 잡는다.
-    const displayText = replaceTagsForDisplay(translation, recipientLang);
+    const displayText = replaceTagsForDisplay(translation, recipientLang, text);
     const isIdentity =
       alreadyTargetLanguage || isTranslationIdentity(translation, text);
     const translatedText = isIdentity ? null : displayText;
@@ -1455,7 +1455,7 @@ async function processAndInsertMessage(job: ProcessJob): Promise<void> {
     // TTS 입력: [soft laugh] 만 남기고 [sad] 등 display-only 태그 제거 (사용자 정책).
     // 순수 sad 메시지(ㅠㅠ)는 strip 후 빈 텍스트 → TTS 스킵(audio_url=null),
     // display 슬랭은 translatedText 에 그대로 유지.
-    const ttsText = stripNonAudibleTags(translation);
+    const ttsText = stripNonAudibleTags(translation, recipientLang);
 
     let audioUrl: string | null = null;
     if (!hasSpeakableContent(ttsText)) {

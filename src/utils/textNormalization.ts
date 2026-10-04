@@ -126,10 +126,68 @@ export const URL_PATTERN = /(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:\/?#\[\]@!$&'()
 const EMOJI_PATTERN =
   /[\p{Extended_Pictographic}\p{Regional_Indicator}\u{FE0E}\u{FE0F}\u{20E3}\u{200D}\u{1F3FB}-\u{1F3FF}]/gu;
 
-export function stripNonAudibleTags(text: string): string {
+// export 사유: translation.ts 의 언어 판정도 "이메일은 어느 언어도 아니다" 를 쓴다.
+export const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+
+// 9자리 이상 숫자열 = 전화·계좌 등 번호로 본다 (숫자 사이 하이픈·점·공백 한 칸 허용, 전각 숫자와
+// 일본식 長音 하이픈 「090ー1234ー5678」 포함). 날짜(2026.10.04 = 8자리)·콤마 금액은 비대상.
+// 계좌·주문번호도 걸리므로 대체어는 "전화번호" 가 아니라 "번호" 로 둔다.
+const PHONE_PATTERN =
+  /(?<![0-9０-９])\+?[0-9０-９](?:[-‐－ー.． ]?[0-9０-９]){8,}(?![0-9０-９])/g;
+
+// 얼굴 이모티콘(카오모지). 괄호형 (^^) (´・ω・`) (๑•̀ㅂ•́)و✧ 은 괄호 안에 "말"이 없을
+// 때만 지운다 — (笑)(웃음)(ok)(1) 처럼 말이 든 괄호는 남긴다. 단독 카타카나(ノ)·라틴
+// 한 글자(T_T 의 T)는 얼굴 부품이라 말로 안 친다. 괄호 없는 형은 흔한 꼴만 고정 목록.
+const KAOMOJI_PAREN = /[٩ヽ\\]?[(（]([^()（）]{1,20})[)）][و۶ﾉノ/ゞ✧☆彡]*/g;
+const KAOMOJI_WORDY = /[가-힣぀-ゟ一-鿿0-9０-９ก-ฮऀ-ॿ]|[ァ-ヶ]{2,}|[A-Za-z]{2,}/;
+const KAOMOJI_BARE =
+  /\^[_\-o.ω]?\^|[Tㅠㅜ;][_.][Tㅠㅜ;]|>[_.\-]?<|-_-;*|[oO]_[oO]|(?<!\S)[:;=][-']?[)(DPp](?!\S)/g;
+
+// URL·이메일·전화번호를 그냥 지우면 "https://…로 들어가면 돼" 가 "로 들어가면 돼" 로
+// 읽혀 앞말이 끊긴다. 문장 속에선 이 단어로 바꿔 읽고, 그것만 있던 메시지는 비워 TTS 스킵.
+type NeutralWords = { link: string; email: string; phone: string };
+const NEUTRAL_WORDS: Record<string, NeutralWords> = {
+  ko: { link: '링크', email: '이메일', phone: '번호' },
+  ja: { link: 'リンク', email: 'メール', phone: '番号' },
+  en: { link: 'link', email: 'email', phone: 'number' },
+  th: { link: 'ลิงก์', email: 'อีเมล', phone: 'หมายเลข' },
+  hi: { link: 'लिंक', email: 'ईमेल', phone: 'नंबर' },
+};
+const SILENT: NeutralWords = { link: ' ', email: ' ', phone: ' ' };
+
+// 줄 끝(뒤에 글자 없이 기호·이모지·감정 태그만 남은) URL·이메일·번호는 단어로 읽지 않고
+// 지운다 — "이거 참고해 https://…" 가 "이거 참고해 링크" 로 덧붙어 어색하다. 문장 중간
+// ("https://…로 들어가면 돼") 만 단어로 바꿔 앞말 끊김을 막는다.
+const TRAILING = String.raw`(?=(?:[^\p{L}\p{N}\n]|\[(?:soft laugh|sad)\])*(?:\n|$))`;
+const TRAILING_PATTERNS = [URL_PATTERN, EMAIL_PATTERN, PHONE_PATTERN].map(
+  (re) => new RegExp(re.source + TRAILING, 'giu'),
+);
+
+// 줄 끝에 여러 개가 연달아 있으면("연락해 메일 번호") 끝에서부터 벗겨지도록 반복.
+function removeTrailing(text: string): string {
+  let prev;
+  do {
+    prev = text;
+    for (const re of TRAILING_PATTERNS) text = text.replace(re, ' ');
+  } while (text !== prev);
+  return text;
+}
+
+export function stripNonAudibleTags(text: string, lang?: string): string {
   if (typeof text !== 'string' || text.length === 0) return text;
-  return text
-    .replace(URL_PATTERN, ' ')
+  const words = lang ? NEUTRAL_WORDS[lang] : undefined;
+  const silent = stripNonAudible(text, SILENT);
+  if (!words || !hasSpeakableContent(silent)) return silent;
+  return stripNonAudible(text, words);
+}
+
+function stripNonAudible(text: string, words: NeutralWords): string {
+  return removeTrailing(text)
+    .replace(URL_PATTERN, words.link)
+    .replace(EMAIL_PATTERN, words.email)
+    .replace(PHONE_PATTERN, words.phone)
+    .replace(KAOMOJI_PAREN, (m, inner: string) => (KAOMOJI_WORDY.test(inner) ? m : ' '))
+    .replace(KAOMOJI_BARE, ' ')
     .replace(EMOJI_PATTERN, ' ')
     .replace(AUDIO_TAG_PATTERN, (m) => (m === '[soft laugh]' ? m : ''))
     // 남은 한글 호환 자모(ㄱ-ㅎ, ㅏ-ㅣ) 제거 — 단독 자모는 발화 불가라 합성하면
@@ -180,14 +238,14 @@ export function readKoreanNumbersForTTS(text: string): string {
 // audio tag 를 그냥 stripAudioTags 로 제거하면 원본의 감정 표현이 번역본에서 사라짐
 // (예: "번역 어때요?ㅋㅋㅋ" → "翻訳はどうですか？" — 웃음이 안 보임).
 // 대신 타깃 언어의 자연스러운 슬랭으로 치환해서 의도 보존:
-//   ko: ㅋㅋㅋ, ja: www, en: lol, th: 555, hi: हाहा
+//   ko: ㅋㅋㅋ (원문 웃음이 笑 뿐이면 ㅎㅎ), ja: 笑 (원문에 ㅋ 가 있으면 笑笑), en: lol, th: 555, hi: हाहा
 // TTS 입력엔 audio tag 그대로 유지 (실제 효과음 합성) — 이 함수는 DB 저장·UI 표시 전용.
 
 type DisplayTagName = 'soft laugh' | 'sad';
 type DisplayLang = 'ko' | 'ja' | 'en' | 'th' | 'hi';
 
 const TAG_DISPLAY_SLANG: Record<DisplayTagName, Record<DisplayLang, string>> = {
-  'soft laugh': { ko: 'ㅋㅋㅋ', ja: 'www', en: 'lol', th: '555', hi: 'हाहा' },
+  'soft laugh': { ko: 'ㅋㅋㅋ', ja: '笑', en: 'lol', th: '555', hi: 'हाहा' },
   sad:          { ko: 'ㅠㅠ',   ja: '(泣)', en: ':(',  th: 'T_T', hi: ':(' },
 };
 
@@ -197,15 +255,42 @@ const DEFAULT_TAG_SLANG: Record<DisplayTagName, string> = {
   sad: ':(',
 };
 
+// 한국어 웃음의 결을 일본어 표시에 반영 — Gemini 는 ㅋ/ㅎ 를 같은 [soft laugh] 로
+// 접어 정보가 사라지므로 원문을 직접 본다. ㅋ(따로 쓴 것 + 받침에 붙은 것 "재밌닼")가
+// 하나라도 있으면 笑笑, 그 외(ㅎㅎ·lol 등)는 笑. 메시지 단위 판정이라 ㅋ·ㅎ 가 섞이면
+// 전부 笑笑. ㅎ 받침은 좋/많/않 과 헷갈려 보지 않는다 (그 외로 떨어져 笑 — 의도대로).
+function hasKoreanKiek(text: string): boolean {
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!;
+    if (c === 0x314b) return true; // ㅋ
+    if (c >= 0xac00 && c <= 0xd7a3 && (c - 0xac00) % 28 === 24) return true; // 받침 ㅋ
+  }
+  return false;
+}
+
+// 일본어 웃음의 결을 한국어 표시에 반영 (위와 대칭). 笑 는 존댓말에 붙는 가벼운
+// 미소라 ㅎㅎ, w·草·爆 는 크게 웃는 쪽이라 ㅋㅋㅋ. w 는 라틴 단어(wow) 속 w 를 빼려고
+// 앞뒤가 라틴 문자가 아닐 때만 웃음으로 본다. 爆笑 는 爆 가 우선해 ㅋㅋㅋ.
+const JA_BIG_LAUGH = /(?<![A-Za-z])[wWｗＷ]+(?![A-Za-z])|[草爆]/;
+function koLaughFor(original?: string): string {
+  if (!original || JA_BIG_LAUGH.test(original)) return 'ㅋㅋㅋ';
+  return original.includes('笑') ? 'ㅎㅎ' : 'ㅋㅋㅋ';
+}
+
 /**
  * 텍스트의 audio tag(`[soft laugh]`/`[sad]`)를 타깃 언어의 자연스러운 슬랭으로
  * 치환. translated_text DB 저장 직전에 적용. TTS 입력은 별도 보존.
+ * original: 번역 전 원문 — 웃음 표기 판정용 (ja: 笑/笑笑, ko: ㅎㅎ/ㅋㅋㅋ).
  */
-export function replaceTagsForDisplay(text: string, targetLang: string): string {
+export function replaceTagsForDisplay(text: string, targetLang: string, original?: string): string {
   if (typeof text !== 'string' || text.length === 0) return text;
+  const jaLaugh = original && hasKoreanKiek(original) ? '笑笑' : '笑';
+  const koLaugh = koLaughFor(original);
   return text
     .replace(/\[(soft laugh|sad)\]/g, (_match, name: string) => {
       const tagName = name as DisplayTagName;
+      if (tagName === 'soft laugh' && targetLang === 'ja') return jaLaugh;
+      if (tagName === 'soft laugh' && targetLang === 'ko') return koLaugh;
       const langMap = TAG_DISPLAY_SLANG[tagName];
       const variant = (langMap as Record<string, string>)[targetLang];
       return variant ?? DEFAULT_TAG_SLANG[tagName];

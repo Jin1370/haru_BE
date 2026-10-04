@@ -4,7 +4,7 @@ import {
     HarmBlockThreshold,
 } from "@google-cloud/vertexai";
 import { env } from "../config/env";
-import { sanitizeAudioTags, stripAudioTags, URL_PATTERN } from "../utils/textNormalization";
+import { EMAIL_PATTERN, sanitizeAudioTags, stripAudioTags, URL_PATTERN } from "../utils/textNormalization";
 import { retryOnce } from "../utils/retry";
 import type { VoiceIntroSlotLanguage } from "../types";
 
@@ -17,7 +17,7 @@ Some chat text contains typed "emotion markers": laughter or crying rendered as 
   - crying / sadness marker → [sad]
 Markers to detect, across every language:
   - Korean: ㅋ or ㅎ (single or repeated), INCLUDING a trailing ㅋ/ㅎ fused into a syllable's final consonant — e.g. 욬 = 요 + ㅋ, 큨 = 큐 + ㅋ, 릌 = 리 + ㅋ. Restore the base syllable and move the laughter into [soft laugh] (e.g. 웃기네욬ㅋㅋ → 웃기네요[soft laugh]). Same for ㅠ or ㅜ (single or repeated, incl. fused) → [sad].
-  - Japanese: ｗ / ww / www, 笑 or （笑）, 草 (but NOT 笑顔 or 微笑 which mean "smile" — leave those untouched).
+  - Japanese: ｗ / ww / www, 笑 or （笑）, 草, and 爆 / （爆） / 爆笑 used as a sentence-final laugh (but NOT 笑顔 or 微笑 which mean "smile", and NOT 爆 inside a word such as 爆発 / 爆弾 / 爆睡 — leave those untouched).
   - English: hahaha / hehe / lol / lmao / rofl; kaomoji xD / :D / =D → [soft laugh]; :( / :'( / T_T / ;_; / Q_Q → [sad].
   - Thai: 555, ฮ่าๆ → [soft laugh].
   - Hindi: हाहा, हीही → [soft laugh].
@@ -36,6 +36,7 @@ The result of this step is what the TTS engine reads aloud, so a typo or a lette
 - Do NOT change spacing. Spacing does not affect how the text is read aloud, and re-spacing makes an otherwise unchanged message look edited.
 - Do NOT change word choice, sentence endings, politeness level, dialect, emoji, or the audio tags. This step repairs, it does not rewrite.
 - URLs, email addresses and @handles: copy them character-for-character, here and in every later step including translation. Never "fix" a typo inside one, never translate or transliterate words inside a path, never re-space or shorten one. A changed link is a dead link.
+- Account IDs WITHOUT an @ count too: a word that the context shows is a username or messenger/SNS ID — typically right after 아이디 / ID / 라인 / LINE / 카톡 / 인스타 / インスタ, or given in reply to "what's your ID?" — is copied character-for-character exactly like a handle, even when it looks like an ordinary word or a typo ("라인 아이디 ajfe야" keeps "ajfe"; never "fix" it to "safe", never transliterate it to アジェ). A changed ID is a dead contact.
 - When in doubt, leave the text exactly as it is. A confident wrong "correction" is worse than an uncorrected typo — it changes what the sender said.`;
 
 // 호칭(kinship-style address term) 규칙.
@@ -104,7 +105,9 @@ Output the title under which the work was officially released, published, or dis
 An established local name is often completely unrelated to the source words — the two markets may have borrowed different parts of the same original foreign name (감바스 from Spanish "gambas", アヒージョ from "ajillo", one dish). That is expected and correct. Prefer it over any literal rendering.
 CRITICAL — never invent one: if you are not confident that an established local name exists, keep the source name as it is (romanized only if the target script makes it unreadable) instead of guessing. A plausible-sounding but wrong name is worse than the untranslated original, because the reader can still look the original up.
 CRITICAL — never substitute a different thing: map only to the SAME work or the SAME dish. If the target market has no equivalent, keep the source name — do not swap in something merely similar (된장찌개 is NOT 味噌汁).
-If a work or dish is known in the target market under its original or English name unchanged, keep that form.`;
+If a work or dish is known in the target market under its original or English name unchanged, keep that form.
+Spot titles even when they are unquoted and woven into a sentence, especially when the conversation is about music, films, or artists. A title often starts with or contains ordinary words (ただ声一つ, 君の名は。, 夜に駆ける) — treat the whole title as ONE unit: never split it, never translate part of it as ordinary words while leaving the rest. When no established local title exists, keep the full original title intact and mark it with quotes so the reader sees it is a title.
+  - Addressee "好きな曲は？" / text "ただ声一つですかねー" → "'ただ声一つ'일까요~" (NEVER "그냥 '声一つ'인 것 같아요" — ただ is part of the title, not the adverb "just").`;
 
 export interface AddressParty {
     gender?: string | null; // 'male' | 'female' | 'other'
@@ -196,6 +199,11 @@ ${JA_REGISTER_RULE}
   - Chinese: 您 by default. Allow 你 if the source is clearly casual.
   - Short messages carry a weak register signal ("괜찮아", "응 그거 무서웠어", "어디야"), but weak is not absent. Do NOT retreat to the polite form when the text is short: a single plain ending (-아/-어/-지/-네/-야/-자, or a bare noun reply inside a casual thread) is enough to REQUIRE casual output. Guessing polite "to be safe" is itself an error — it makes a close conversation suddenly sound distant.
   - The polite default applies ONLY when the source language marks no politeness at all (English, Thai romanized chat, etc.), never as a fallback for "I am not sure".
+- Questions keep their question mark. Japanese often marks a question only with a sentence-final particle (か / の / かな / っけ) and no "？", but Korean and English readers rely on the "?" — without it "그 정도예요" reads as a statement. When a source sentence IS a question, the translated sentence MUST end with "?" even if the source has none (place it at the end of that sentence, before any trailing audio tag or emoji). Decide by meaning, NOT by the particle alone — か also ends realizations and acknowledgments that are not questions:
+  - "そんなにですか" → "그 정도예요?" (NEVER "그 정도예요") | "食べ物ですか" → "음식이요?" | "学生ですか" → "학생이에요?"
+  - "そうか" / "そっか" / "なるほどね" (realizing) → "그렇구나" — no "?"
+  - "そうですか" acknowledging what was just said → "그렇군요"; said in surprise or doubt → "그래요?". Use the conversation context to tell which.
+  - "〜ですかね" / "〜かな" musing or guessing aloud → a soft guess ("〜려나요" / "〜일까요" / "〜인 것 같아요"), not a direct question to the reader.
 - Japanese greetings: a time-neutral greeting (안녕하세요, 안녕, hi, hello) becomes the one on the "Greeting for the send time" line (casual source: おはようございます → おはよう).
 - Keep personal names, place names, and brand names in their original or properly romanized form. Titles of creative works and dish names are NOT covered by this — they follow the LOCALIZED NAMES rules below.
 - Emoji: carry every emoji across UNCHANGED, in the same position relative to the surrounding words (trailing stays trailing). Never drop one, never add one the source lacks, never swap it for a different emoji, and never turn it into words ("😊" must not become "笑顔" or "smiley") or into an audio tag — [soft laugh] / [sad] are only for the typed markers listed in the audio tag step, never for an emoji.
@@ -279,7 +287,12 @@ const TARGET_SCRIPT: Record<string, RegExp> = {
 // URL·이메일은 어느 언어로도 읽히지 않는 중립 토큰인데 라틴 문자를 포함한다.
 // 빼지 않으면 링크 한 줄만 보낸 메시지가 "글자가 있다"로 잡혀 매번 재호출을 유발한다
 // (이모지·숫자만 있는 메시지는 판단 보류로 빠지는 것과 같은 취급이 되어야 한다).
-const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// 영문자+숫자가 섞인 공백 없는 토큰(maru48cat, kim_99)은 아이디로 본다 — 번역할 게
+// 없어 Gemini 가 그대로 돌려주면 렌더 가드가 "미번역" 으로 오판해 재호출 + Sentry
+// error 를 낸다 (2026-10-04 "maru48cat" target=ko). 앞뒤가 한글이어도 경계로 인정.
+// ponytail: 숫자 없는 아이디(marucat)는 영단어와 구별 불가라 여전히 판정 대상.
+const HANDLE_PATTERN =
+    /(?<![A-Za-z0-9_.])(?=[A-Za-z0-9_.]*\d)(?=[A-Za-z0-9_.]*[A-Za-z])[A-Za-z0-9_.]+(?![A-Za-z0-9_.])/g;
 
 /**
  * 원문이 타깃 언어로 쓰였을 리 없는지 판정 (already_target_language=true 검증용).
@@ -294,8 +307,9 @@ function cannotBeTargetLanguage(text: string, targetLanguage: string): boolean {
     if (!script) return false; // 미등록 언어 / null 타깃은 판단 보류
     const stripped = text
         .replace(URL_PATTERN, " ")
-        .replace(EMAIL_PATTERN, " ");
-    if (!/\p{L}/u.test(stripped)) return false; // 이모지·숫자·링크만 → 판단 보류
+        .replace(EMAIL_PATTERN, " ")
+        .replace(HANDLE_PATTERN, " ");
+    if (!/\p{L}/u.test(stripped)) return false; // 이모지·숫자·링크·아이디만 → 판단 보류
     return !script.test(stripped);
 }
 

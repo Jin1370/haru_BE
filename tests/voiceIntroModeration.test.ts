@@ -157,8 +157,8 @@ describe('voiceIntro service — audio tag pipeline (non-preset, Gemini 단독 �
     });
     await generateVoiceIntroAudios(USER_ID, '안녕 ㅋㅋㅋ', VOICE_ID, 'ko');
     const profile = hoisted.supabaseState.profile;
-    // ja 슬롯: [soft laugh] → www, en 슬롯: [soft laugh] → lol
-    expect(profile.voice_intro_translations.ja).toBe('こんにちは www');
+    // ja 슬롯: [soft laugh] → 笑笑 (원문에 ㅋ), en 슬롯: [soft laugh] → lol
+    expect(profile.voice_intro_translations.ja).toBe('こんにちは 笑笑');
     expect(profile.voice_intro_translations.en).toBe('hello lol');
     expect(profile.voice_intro_translations.ja).not.toContain('[soft laugh]');
     expect(profile.voice_intro_translations.en).not.toContain('[soft laugh]');
@@ -214,8 +214,8 @@ describe('voiceIntro service — audio tag pipeline (non-preset, Gemini 단독 �
     const profile = hoisted.supabaseState.profile;
     // 작성자 ko 슬롯: 디스플레이 텍스트 (ㅋㅋㅋ + ㅠㅠ 복원)
     expect(profile.voice_intro_translations.ko).toBe('안녕ㅋㅋㅋ 그래도 슬프네ㅠㅠ');
-    // 번역 슬롯 ja: www + (泣)
-    expect(profile.voice_intro_translations.ja).toBe('JA www (泣)');
+    // 번역 슬롯 ja: 笑笑 (원문에 ㅋ) + (泣)
+    expect(profile.voice_intro_translations.ja).toBe('JA 笑笑 (泣)');
     // 번역 슬롯 en: lol + :(
     expect(profile.voice_intro_translations.en).toBe('EN lol :(');
   });

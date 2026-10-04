@@ -187,6 +187,51 @@ describe('stripNonAudibleTags', () => {
 
   it('링크만 있는 메시지 → 빈 문자열 (호출처가 TTS 스킵 판단)', () => {
     expect(hasSpeakableContent(stripNonAudibleTags('https://open.spotify.com/track/xyz'))).toBe(false);
+    // lang 을 줘도 "링크" 한 단어만 읽히지 않는다
+    expect(stripNonAudibleTags('https://open.spotify.com/track/xyz 😊', 'ko')).toBe('');
+  });
+
+  it('lang 을 주면 문장 속 URL 은 "링크" 로 읽는다 — 앞말 끊김 방지', () => {
+    expect(stripNonAudibleTags('https://youtu.be/abc123로 들어가면 돼', 'ko')).toBe('링크로 들어가면 돼');
+    expect(stripNonAudibleTags('여기 https://youtu.be/abc 로 들어가면 돼', 'ko')).toBe('여기 링크 로 들어가면 돼');
+    expect(stripNonAudibleTags('https://a.b/cから入ればいいよ', 'ja')).toBe('リンクから入ればいいよ');
+    expect(stripNonAudibleTags('check https://a.b/c out', 'en')).toBe('check link out');
+    // 줄 끝 링크는 단어 없이 지운다 — "이거 참고해 링크" 로 덧붙지 않게
+    expect(stripNonAudibleTags('이거 참고해 https://youtu.be/abc', 'ko')).toBe('이거 참고해');
+    expect(stripNonAudibleTags('참고해 https://a.b/c [soft laugh]', 'ko')).toBe('참고해 [soft laugh]');
+    expect(stripNonAudibleTags('이거 봐 https://a.b/c\n어때?', 'ko')).toBe('이거 봐 어때?');
+    // 미등록 언어는 기존대로 제거
+    expect(stripNonAudibleTags('여기 https://a.b/c 봐', 'xx')).toBe('여기 봐');
+  });
+
+  it('얼굴 이모티콘은 무음 — 말이 든 괄호는 남긴다', () => {
+    expect(stripNonAudibleTags('ありがとう(^^)', 'ja')).toBe('ありがとう');
+    expect(stripNonAudibleTags('좋아^^', 'ko')).toBe('좋아');
+    expect(stripNonAudibleTags('やった(๑•̀ㅂ•́)و✧', 'ja')).toBe('やった');
+    expect(stripNonAudibleTags('ラーメン(ノ´∀｀)', 'ja')).toBe('ラーメン');
+    expect(stripNonAudibleTags('10:30 :) 만나', 'ko')).toBe('10:30 만나');
+    expect(stripNonAudibleTags('(笑) 面白い', 'ja')).toBe('(笑) 面白い');
+    expect(stripNonAudibleTags('(ok) 좋아', 'ko')).toBe('(ok) 좋아');
+  });
+
+  it('문장 속 이메일·긴 번호는 단어로 대체', () => {
+    expect(stripNonAudibleTags('maru@gmail.com 으로 연락해', 'ko')).toBe('이메일 으로 연락해');
+    expect(stripNonAudibleTags('010-1234-5678 로 전화해', 'ko')).toBe('번호 로 전화해');
+    expect(stripNonAudibleTags('電話は090ー1234ー5678です', 'ja')).toBe('電話は番号です');
+    expect(stripNonAudibleTags('+82 10 1234 5678 call me', 'en')).toBe('number call me');
+    // 줄 끝 이메일·번호는 단어 없이 지운다 (연달아 있어도 끝에서부터)
+    expect(stripNonAudibleTags('연락해 maru@gmail.com', 'ko')).toBe('연락해');
+    expect(stripNonAudibleTags('내 번호야 010-1234-5678', 'ko')).toBe('내 번호야');
+    expect(stripNonAudibleTags('연락해 maru@gmail.com 010-1234-5678', 'ko')).toBe('연락해');
+    // 날짜(8자리)·금액은 전화번호 아님
+    expect(stripNonAudibleTags('2026.10.04에 만나', 'ko')).toBe('2026.10.04에 만나');
+    expect(stripNonAudibleTags('10000원이야', 'ko')).toBe('10000원이야');
+  });
+
+  it('이모티콘·이메일·전화번호·링크만 있는 메시지 → 빈 문자열 (TTS 스킵)', () => {
+    for (const t of ['(^^)', '(´・ω・`)', 'T_T', 'maru@gmail.com', '010-1234-5678', 'https://a.b/c 😊 (^^)']) {
+      expect(stripNonAudibleTags(t, 'ko')).toBe('');
+    }
   });
 
   // 사고: 「はじめまして☺️」가 "はじめまして☺️…" 로 합성돼 「また」가 함께 발화됨.
@@ -214,7 +259,7 @@ describe('replaceTagsForDisplay', () => {
   describe('soft laugh', () => {
     it('각 언어별 슬랭으로 치환', () => {
       expect(replaceTagsForDisplay('[soft laugh]', 'ko')).toBe('ㅋㅋㅋ');
-      expect(replaceTagsForDisplay('[soft laugh]', 'ja')).toBe('www');
+      expect(replaceTagsForDisplay('[soft laugh]', 'ja')).toBe('笑');
       expect(replaceTagsForDisplay('[soft laugh]', 'en')).toBe('lol');
       expect(replaceTagsForDisplay('[soft laugh]', 'th')).toBe('555');
       expect(replaceTagsForDisplay('[soft laugh]', 'hi')).toBe('हाहा');
@@ -239,18 +284,48 @@ describe('replaceTagsForDisplay', () => {
   });
 
   describe('문장 내 부분 치환 (사용자 시나리오)', () => {
-    it('ko → ja: ㅋㅋㅋ 포함 문장 → www', () => {
+    it('ko → ja: 원문에 ㅋ 가 있으면 笑笑', () => {
       // 번역 어때요?ㅋㅋㅋ → Gemini(STEP1 태깅+ja 번역) → "翻訳はどうですか？[soft laugh]"
-      // → display(ja) → "翻訳はどうですか？www"
-      expect(replaceTagsForDisplay('翻訳はどうですか？[soft laugh]', 'ja')).toBe(
-        '翻訳はどうですか？www',
+      expect(replaceTagsForDisplay('翻訳はどうですか？[soft laugh]', 'ja', '번역 어때요?ㅋㅋㅋ')).toBe(
+        '翻訳はどうですか？笑笑',
       );
+    });
+
+    it('ko → ja: 받침에 붙은 ㅋ("재밌닼")도 笑笑', () => {
+      expect(replaceTagsForDisplay('面白い[soft laugh]', 'ja', '재밌닼')).toBe('面白い笑笑');
+    });
+
+    it('ko → ja: ㅎㅎ 는 笑 — 받침 ㅎ(좋아)는 ㅋ 로 안 셈', () => {
+      expect(replaceTagsForDisplay('いいね[soft laugh]', 'ja', '좋아ㅎㅎ')).toBe('いいね笑');
+    });
+
+    it('ko → ja: ㅋ·ㅎ 섞이면 전부 笑笑 (메시지 단위 판정)', () => {
+      expect(replaceTagsForDisplay('A[soft laugh] B[soft laugh]', 'ja', '아ㅋㅋ 그리고ㅎㅎ')).toBe('A笑笑 B笑笑');
+    });
+
+    it('영어 lol → ko 는 ㅋㅋㅋ', () => {
+      expect(replaceTagsForDisplay('웃겨[soft laugh]', 'ko', 'funny lol')).toBe('웃겨ㅋㅋㅋ');
+    });
+
+    it('ja → ko: 笑 뿐이면 ㅎㅎ', () => {
+      expect(replaceTagsForDisplay('기모노예요?[soft laugh]', 'ko', '着物ですか？笑')).toBe('기모노예요?ㅎㅎ');
+      expect(replaceTagsForDisplay('무슨 말이에요?[soft laugh]', 'ko', 'どうゆうことですか笑笑')).toBe('무슨 말이에요?ㅎㅎ');
+    });
+
+    it('ja → ko: w·草·爆 는 ㅋㅋㅋ (爆笑 도 爆 우선)', () => {
+      for (const orig of ['面白いwww', '面白いｗ', 'それは草', '面白すぎ爆', '面白すぎ爆笑', '笑 そしてwww']) {
+        expect(replaceTagsForDisplay('웃겨[soft laugh]', 'ko', orig)).toBe('웃겨ㅋㅋㅋ');
+      }
+    });
+
+    it('ja → ko: 라틴 단어 속 w(wow)는 웃음으로 안 셈', () => {
+      expect(replaceTagsForDisplay('와우[soft laugh]', 'ko', 'wow笑')).toBe('와우ㅎㅎ');
     });
 
     it('여러 태그 동시 치환 (ja)', () => {
       expect(
         replaceTagsForDisplay('[soft laugh] 今日.. でも.. [sad]', 'ja'),
-      ).toBe('www 今日.. でも.. (泣)');
+      ).toBe('笑 今日.. でも.. (泣)');
     });
   });
 

@@ -475,6 +475,25 @@ describe('already_target_language 사전 확정(OVERRIDE) 가드', () => {
     expect(promptOf(0)).not.toContain('OVERRIDE');
   });
 
+  it('아이디만 있는 메시지도 판단 보류 — 재호출 없음 (prod "maru48cat")', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'maru48cat' }));
+    await translateMessage({ text: 'maru48cat', targetLanguage: 'ko' });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+    expect(promptOf(0)).not.toContain('OVERRIDE');
+  });
+
+  it('아이디 + 일본어 본문 + target ko 는 OVERRIDE 대상 (아이디만 걷어냄)', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'LINE 아이디는 maru48cat이에요' }));
+    await translateMessage({ text: 'LINEのIDはmaru48catです', targetLanguage: 'ko' });
+    expect(promptOf(0)).toContain('OVERRIDE');
+  });
+
+  it('숫자 없는 영단어는 여전히 OVERRIDE 대상', async () => {
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: '좋아' }));
+    await translateMessage({ text: 'okay', targetLanguage: 'ko' });
+    expect(promptOf(0)).toContain('OVERRIDE');
+  });
+
   it('링크 + 한국어 본문 + target ja 는 OVERRIDE 대상 (URL 걷어내면 한글이 남음)', async () => {
     mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'これ見て https://youtu.be/abc' }));
     const r = await translateMessage({ text: '이거 봐 https://youtu.be/abc', targetLanguage: 'ja' });

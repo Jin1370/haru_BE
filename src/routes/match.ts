@@ -13,7 +13,10 @@ import { isCampaignBot } from '../services/campaignBot';
 
 const matchListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional().default(20),
-  before: z.string().datetime().optional(),
+  before: z.string().datetime({ offset: true }).optional(),
+  // 'activity' = mig 058 last_activity_at(마지막 대화) 정렬. 미지정은 옛 클라이언트
+  // 호환용 matches.created_at 정렬. before 커서는 선택된 정렬 키를 따라간다.
+  sort: z.enum(['activity']).optional(),
 });
 
 interface MatchSummary {
@@ -55,6 +58,7 @@ router.use(authMiddleware);
 router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, res: Response) => {
   const limit = req.query.limit as unknown as number;
   const before = req.query.before as string | undefined;
+  const sortKey = req.query.sort === 'activity' ? 'last_activity_at' : 'created_at';
 
   // 1. 매치 조회. 언매치된 매치도 tombstone 노출용으로 포함하되, 본인이
   // 숨김 처리(hidden_by 에 자기 user_id append)한 매치는 본인 목록에서만
@@ -64,11 +68,13 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
     .select('*')
     .or(`user1_id.eq.${req.userId!},user2_id.eq.${req.userId!}`)
     .not('hidden_by', 'cs', `{${req.userId!}}`)
-    .order('created_at', { ascending: false })
+    .order(sortKey, { ascending: false })
     .limit(limit);
 
+  // ponytail: 단일 키 커서 — 정렬 키 µs 동률이면 경계 행이 다음 페이지에서 빠질 수
+  // 있다. 실사용상 동률 없음, 생기면 (sortKey, id) 복합 커서로.
   if (before) {
-    matchQuery = matchQuery.lt('created_at', before);
+    matchQuery = matchQuery.lt(sortKey, before);
   }
 
   const { data: matches, error } = await matchQuery;
@@ -235,6 +241,8 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
     return {
       match_id: match.id,
       created_at: match.created_at,
+      // mig 058. FE 의 activity 정렬 커서. 미적용 환경 폴백으로 created_at.
+      last_activity_at: (match.last_activity_at as string | undefined) ?? match.created_at,
       // unmatched_at 가 채워져 있으면 FE 가 채팅 종료 tombstone 으로
       // 렌더 + 입력창 비활성화. 새 메시지 POST 는 message.ts 에서 동일
       // 컬럼으로 막는다.

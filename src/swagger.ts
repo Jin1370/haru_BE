@@ -856,7 +856,8 @@ export const swaggerDocument = {
         summary: '내 매치 목록 (상대 프로필 + 마지막 메시지 + 읽지 않은 수)',
         parameters: [
           { name: 'limit', in: 'query', schema: { type: 'integer', default: 20, maximum: 100 } },
-          { name: 'before', in: 'query', schema: { type: 'string', format: 'date-time' }, description: '이 시각 이전 매치만 (커서)' },
+          { name: 'before', in: 'query', schema: { type: 'string', format: 'date-time' }, description: '커서 — sort 키(기본 created_at, activity 면 last_activity_at)가 이 시각 이전인 매치만' },
+          { name: 'sort', in: 'query', schema: { type: 'string', enum: ['activity'] }, description: 'activity = 마지막 대화 순 (mig 058). 미지정 시 매치 생성 순' },
         ],
         responses: {
           200: { description: '매치 목록', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/MatchWithPartner' } } } } },

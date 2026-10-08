@@ -58,6 +58,7 @@ const USER_FOLDERS: Array<[bucket: string, folder: (u: string) => string]> = [
   ['photos', (u) => u], // 옛 평면 구조 (mig 028 이전) + dev 시드
   ['photos', (u) => `${u}/originals`], // 변환 전 원본 (실패/대기분 잔존 가능)
   ['photos', (u) => `${u}/converted`], // 워터컬러 변환본
+  ['photos', (u) => `${u}/blurred`], // 잠긴 카드용 블러본 (mig 059)
   ['voice-intro-audio', (u) => u],
 ];
 

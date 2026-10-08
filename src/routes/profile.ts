@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import multer from 'multer';
 import { supabase } from '../config/supabase';
+import { env } from '../config/env';
 import { uploadFile, deleteFile, extractPath, createSignedSlotUrls } from '../services/storage';
 import { generateVoiceIntroAudios, normalizeAuthorLanguage, VOICE_INTRO_BUCKET } from '../services/voiceIntro';
 import { convertProfilePhoto } from '../services/photoConversion';
@@ -208,9 +209,20 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
   // 불필요한 ElevenLabs 호출을 막는다.
   const { data: prev } = await supabase
     .from('profiles')
-    .select('voice_intro')
+    .select('voice_intro, birth_date, gender, nationality')
     .eq('id', req.userId!)
     .maybeSingle();
+
+  // 별사탕 유료화: 생년월일·성별·국적은 가입 후 변경 불가. 성별·나이로 한도·매칭
+  // 조건을 바꿔 쓰는 우회를 막는다. FE 는 같은 값을 계속 보내므로 "바뀐 경우" 만 거부.
+  if (
+    env.monetization.enabled &&
+    prev &&
+    (prev.birth_date !== birth_date || prev.gender !== gender || prev.nationality !== nationality)
+  ) {
+    res.status(403).json({ error: 'Profile field is locked', code: 'profile_field_locked' });
+    return;
+  }
 
   // voice-intro-preset-bypass sprint: phrase id 매칭 시 BE 카탈로그가
   // 작성자 언어/번역 텍스트의 단일 진실 소스. 사용자 페이로드의 voice_intro 와

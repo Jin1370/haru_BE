@@ -22,6 +22,7 @@ const envState = vi.hoisted(() => ({
   unlimitedLikeCodeDays: 30,
   unlimitedLikeUserIds: [] as string[],
   hiddenUserIds: [] as string[],
+  monetizationEnabled: false,
 }));
 vi.mock('../src/config/env', () => ({
   env: {
@@ -37,6 +38,12 @@ vi.mock('../src/config/env', () => ({
     openai: { moderationApiKey: '' },
     image: { azureBaseUrl: '', azureApiKey: '', azureApiVersion: '2025-04-01-preview' },
     vertexAi: { projectId: 'test', location: 'us-central1' },
+    monetization: {
+      get enabled() {
+        return envState.monetizationEnabled;
+      },
+      revenuecatWebhookAuth: '',
+    },
     discover: {
       get passResetEnabled() {
         return envState.passResetEnabled;
@@ -87,6 +94,12 @@ const captured = vi.hoisted(() => ({
   },
 
   // POST /swipe
+  existing: { data: null as null | { id: string; reset_at: string | null }, error: null as null | { message: string } },
+  cardCount: { count: 0, error: null as null | { message: string } },
+  reveal: { data: null as null | { liker_id: string }, error: null as null | { message: string } },
+  spend: { data: 10 as unknown, error: null as null | { message: string } },
+  rpcCalls: [] as Array<{ name: string; args: unknown }>,
+  swipeUpdatePayload: null as null | Record<string, unknown>,
   reciprocal: { data: null as null | { id: string }, error: null as null | { code?: string; message: string } },
   budgetCount: { count: 0, error: null as null | { message: string } }, // counts_toward_limit=true count (cap + quota-like)
   passCount: { count: 0, error: null as null | { message: string } },   // direction='pass' count (quota only)
@@ -118,20 +131,26 @@ vi.mock('../src/config/supabase', () => {
     }
     if (t === 'swipes') {
       if (b._op === 'insert') return { error: captured.insertError };
-      if (b._op === 'delete') return captured.deleteResult;
+      if (b._op === 'delete' || b._op === 'update') return captured.deleteResult;
       // select
       const hasCount = b._selectOpts && b._selectOpts.count;
       if (hasCount) {
         if (b._eqs.some((e: any) => e.col === 'direction' && e.val === 'pass')) {
           return captured.passCount;
         }
+        // 탐색 카드 count (유료화 ON 카드 한도)
+        if (b._eqs.some((e: any) => e.col === 'source')) return captured.cardCount;
         // counts_toward_limit=true 예산 count (POST 캡 + GET quota-like 공유)
         captured.budgetCountEqs = b._eqs;
         return captured.budgetCount;
       }
+      // 기존 스와이프 조회 (POST /swipe 0단계 — 다시보기 판정)
+      if (b._cols === 'id, reset_at') return captured.existing;
       // count 없는 select+single = reciprocal 조회
       return captured.reciprocal;
     }
+    if (t === 'like_reveals') return captured.reveal;
+    if (t === 'star_ledger') return b._op === 'insert' ? { error: null } : { data: [], error: null };
     if (t === 'matches') {
       if (b._op === 'insert') return captured.matchInsert;
       return captured.matchExisting;
@@ -165,11 +184,21 @@ vi.mock('../src/config/supabase', () => {
       },
       eq(col: string, val: unknown) {
         b._eqs.push({ col, val });
-        if (b._op === 'delete' && table === 'swipes') {
+        if ((b._op === 'delete' || b._op === 'update') && table === 'swipes') {
           captured.deleteEqCalls.push({ col, val });
         }
         return b;
       },
+      update(_payload: Record<string, unknown>, opts?: unknown) {
+        b._op = 'update';
+        if (table === 'swipes') captured.swipeUpdatePayload = _payload;
+        captured.deleteOptions = opts ?? null;
+        captured.deleteEqCalls = [];
+        return b;
+      },
+      upsert() { return b; },
+      is() { return b; },
+      limit() { return b; },
       gte() { return b; },
       lt() { return b; },
       in() { b._hasIn = true; return b; },
@@ -195,6 +224,11 @@ vi.mock('../src/config/supabase', () => {
   return {
     supabase: {
       from: (table: string) => makeBuilder(table),
+      async rpc(name: string, args: unknown) {
+        captured.rpcCalls.push({ name, args });
+        if (name === 'spend_stars') return captured.spend;
+        return { data: [{ free: 0, paid: 0 }], error: null };
+      },
       auth: {
         getUser,
         admin: {
@@ -228,6 +262,13 @@ beforeEach(() => {
   envState.hiddenUserIds = [];
   captured.frozen = { is_active: true, frozen_at: null };
   captured.referral = { data: null, error: null };
+  captured.existing = { data: null, error: null };
+  captured.cardCount = { count: 0, error: null };
+  captured.reveal = { data: null, error: null };
+  captured.spend = { data: 10, error: null };
+  captured.rpcCalls = [];
+  captured.swipeUpdatePayload = null;
+  envState.monetizationEnabled = false;
   captured.reciprocal = { data: null, error: null };
   captured.budgetCount = { count: 0, error: null };
   captured.passCount = { count: 0, error: null };
@@ -491,6 +532,108 @@ describe('GET /api/discover/quota — 오늘 소모한 like 예산', () => {
     expect(eqs.find((e) => e.col === 'swiper_id')?.val).toBe(VIEWER);
     expect(eqs.find((e) => e.col === 'direction')?.val).toBe('like');
     expect(eqs.find((e) => e.col === 'counts_toward_limit')?.val).toBe(true);
+  });
+});
+
+describe('POST /api/discover/swipe — 별사탕 유료화 ON (mig 059)', () => {
+  const swipe = (body: Record<string, unknown>) =>
+    request(app)
+      .post('/api/discover/swipe?tz_offset_minutes=-540')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
+      .send({ swiped_id: SWIPED, ...body });
+
+  beforeEach(() => {
+    envState.monetizationEnabled = true;
+  });
+
+  it('탐색 탭 좋아요는 즉시 매치여도 좋아요 예산을 쓴다 (탭 기준)', async () => {
+    captured.reciprocal = { data: { id: 'recip-1' }, error: null };
+    captured.matchInsert = { data: { id: 'm1', user1_id: VIEWER, user2_id: SWIPED }, error: null };
+
+    const res = await swipe({ direction: 'like' });
+
+    expect(res.status).toBe(200);
+    expect(captured.swipeInsertPayload).toMatchObject({ counts_toward_limit: true, source: 'discover' });
+  });
+
+  it('탐색 카드 10장을 다 쓰면 429 daily_card_limit', async () => {
+    captured.cardCount = { count: 10, error: null };
+
+    const res = await swipe({ direction: 'pass' });
+
+    expect(res.status).toBe(429);
+    expect(res.body.code).toBe('daily_card_limit');
+    expect(captured.swipeInsertPayload).toBeNull();
+  });
+
+  it('받은 좋아요 탭 좋아요 — 공개 안 했으면 403 like_not_revealed', async () => {
+    captured.reciprocal = { data: { id: 'recip-1' }, error: null };
+    captured.reveal = { data: null, error: null };
+
+    const res = await swipe({ direction: 'like', source: 'likes' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('like_not_revealed');
+  });
+
+  it('받은 좋아요 탭 좋아요 — 공개했으면 카드·좋아요 면제 (카드 한도 초과여도 통과)', async () => {
+    captured.reciprocal = { data: { id: 'recip-1' }, error: null };
+    captured.reveal = { data: { liker_id: SWIPED }, error: null };
+    captured.cardCount = { count: 99, error: null };
+    captured.budgetCount = { count: 99, error: null };
+    captured.matchInsert = { data: { id: 'm1', user1_id: VIEWER, user2_id: SWIPED }, error: null };
+
+    const res = await swipe({ direction: 'like', source: 'likes' });
+
+    expect(res.status).toBe(200);
+    expect(captured.swipeInsertPayload).toMatchObject({ counts_toward_limit: false, source: 'likes' });
+  });
+
+  it('좋아요 한도 초과 — 별사탕 확인 없으면 429, 확인하면 1개 차감 후 저장', async () => {
+    captured.budgetCount = { count: 15, error: null };
+
+    const blocked = await swipe({ direction: 'like' });
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.code).toBe('daily_limit_reached');
+    expect(captured.rpcCalls.some((c) => c.name === 'spend_stars')).toBe(false);
+
+    const paid = await swipe({ direction: 'like', pay_with_stars: true });
+    expect(paid.status).toBe(200);
+    expect(captured.rpcCalls).toContainEqual({
+      name: 'spend_stars',
+      args: { p_user: VIEWER, p_amount: 1, p_kind: 'like' },
+    });
+    expect(captured.swipeInsertPayload).not.toBeNull();
+  });
+
+  it('별사탕 부족 → 402 insufficient_stars, 스와이프는 기록 안 됨', async () => {
+    captured.budgetCount = { count: 15, error: null };
+    captured.spend = { data: null, error: { message: 'insufficient_stars' } };
+
+    const res = await swipe({ direction: 'like', pay_with_stars: true });
+
+    expect(res.status).toBe(402);
+    expect(res.body.code).toBe('insufficient_stars');
+    expect(captured.swipeInsertPayload).toBeNull();
+  });
+
+  it('다시보기 카드 — 기존 행을 갱신하고 카드 한도를 보지 않는다', async () => {
+    captured.existing = { data: { id: 'row-1', reset_at: '2026-10-01T00:00:00Z' }, error: null };
+    captured.cardCount = { count: 99, error: null };
+
+    const res = await swipe({ direction: 'pass' });
+
+    expect(res.status).toBe(200);
+    expect(captured.swipeInsertPayload).toBeNull();
+    expect(captured.swipeUpdatePayload).toMatchObject({ source: 'recycled', reset_at: null });
+  });
+
+  it('이미 스와이프한 사람 (reset 안 됨) → 409', async () => {
+    captured.existing = { data: { id: 'row-1', reset_at: null }, error: null };
+
+    const res = await swipe({ direction: 'like' });
+
+    expect(res.status).toBe(409);
   });
 });
 

@@ -675,6 +675,29 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
     return;
   }
 
+  // (1.12) 별사탕 (mig 059) — FK 없는 user-linked 테이블. 받은 좋아요 공개 기록은
+  // 양방향 삭제. 원장은 구매(purchase) 줄만 남긴다 — 전자상거래법상 대금결제 기록
+  // 보존(5년) 대상이고, 남는 건 익명화된 user_id·개수·스토어 거래 ID 뿐이다.
+  for (const [table, column] of [
+    ['like_reveals', 'viewer_id'],
+    ['like_reveals', 'liker_id'],
+  ] as const) {
+    const { error } = await supabase.from(table).delete().eq(column, userId);
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+  }
+  const { error: ledgerErr } = await supabase
+    .from('star_ledger')
+    .delete()
+    .eq('user_id', userId)
+    .neq('kind', 'purchase');
+  if (ledgerErr) {
+    res.status(500).json({ error: ledgerErr.message });
+    return;
+  }
+
   // (2) Anonymize the auth.users row so the user can no longer authenticate
   // and their original email becomes free for re-registration. Email goes to
   // a non-routable .local address; password is set to 32 bytes of random hex

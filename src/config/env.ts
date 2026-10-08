@@ -135,6 +135,15 @@ export const env = {
       .filter(Boolean),
   },
 
+  // 별사탕 유료화 (mig 059, 정책 상수는 constants/stars.ts). OFF 면 카드 한도·
+  // 받은 좋아요 블러·탭 기준 좋아요 차감·프로필 잠금이 전부 꺼지고 지금 동작 그대로.
+  // 새 빌드(결제·광고 UI)가 배포된 뒤 MIN_APP_VERSION 과 함께 켠다.
+  monetization: {
+    enabled: process.env.MONETIZATION_ENABLED === 'true',
+    // RevenueCat 대시보드 → Webhooks 의 Authorization 헤더 값. 미설정이면 웹훅 거부.
+    revenuecatWebhookAuth: process.env.REVENUECAT_WEBHOOK_AUTH ?? '',
+  },
+
   // 캠페인 봇 (하치와레 발견 이벤트). 이 UUID 를 가진 프로필은:
   //   1) like 를 받으면 상대 like 없이도 즉시 매치 (POST /swipe 에서 reciprocal 강제)
   //   2) 매치 직후 자동으로 안내 메시지 3건 발송 (services/campaignBot.ts)

@@ -800,7 +800,7 @@ export const swaggerDocument = {
           required: true,
           content: {
             'application/json': {
-              schema: { type: 'object', required: ['swiped_id', 'direction'], properties: { swiped_id: { type: 'string', format: 'uuid' }, direction: { type: 'string', enum: ['like', 'pass'] } } },
+              schema: { type: 'object', required: ['swiped_id', 'direction'], properties: { swiped_id: { type: 'string', format: 'uuid' }, direction: { type: 'string', enum: ['like', 'pass'] }, source: { type: 'string', enum: ['discover', 'likes'], default: 'discover', description: '유료화 ON: likes(받은 좋아요 탭) 면 카드·좋아요 면제 — 서버가 (상대가 나를 like) AND (공개함) 확인, 아니면 403 like_not_revealed' }, pay_with_stars: { type: 'boolean', default: false, description: '유료화 ON: 좋아요 한도 초과 시 별사탕 1개로 보내기 (사용자 확인 후에만 true)' } } },
             },
           },
         },
@@ -830,6 +830,11 @@ export const swaggerDocument = {
               remaining: { type: 'integer', example: 12, description: 'max(0, limit - count)' },
               date: { type: 'string', example: '2026-06-03' },
               pass_reset_enabled: { type: 'boolean', description: 'pass 리셋 라우트 활성 여부. false 면 FE 가 "넘긴 사람 다시 보기" 버튼 숨김.' },
+              monetization_enabled: { type: 'boolean', description: 'MONETIZATION_ENABLED. true 일 때만 아래 별사탕 필드가 온다.' },
+              stars: { type: 'object', properties: { free: { type: 'integer' }, paid: { type: 'integer' }, total: { type: 'integer' } } },
+              cards: { type: 'object', properties: { used: { type: 'integer' }, limit: { type: 'integer' } }, description: '오늘 탐색 카드 사용/한도 (화면 비표시, 잠금·타이머 판단용)' },
+              next_free_reveal_at: { type: 'string', format: 'date-time', nullable: true, description: 'null = 지금 무료 공개 가능' },
+              ads_remaining: { type: 'integer', description: '오늘(KST) 남은 광고 보상 횟수' },
             }, required: ['count', 'limit', 'remaining', 'date', 'pass_reset_enabled'] } } },
           },
         },
@@ -846,6 +851,47 @@ export const swaggerDocument = {
           403: { description: '계정 freeze 또는 pass 리셋 비활성', content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string' }, code: { type: 'string', enum: ['account_frozen', 'pass_reset_disabled'] } }, required: ['error', 'code'] } } } },
           500: { description: '삭제 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
+      },
+    },
+    '/api/discover/card-reset': {
+      post: {
+        tags: ['Discover'],
+        summary: '[별사탕] 탐색 카드 10장 추가 (별사탕 4개)',
+        description: 'MONETIZATION_ENABLED 일 때만. 오늘 카드 한도 = 무료 10 + 오늘 리셋 횟수 × 10 (원장에서 파생).',
+        responses: {
+          200: { description: '차감 완료', content: { 'application/json': { schema: { type: 'object', properties: { stars_total: { type: 'integer' } } } } } },
+          402: { description: '별사탕 부족 (code: insufficient_stars)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '유료화 OFF (monetization_disabled) 또는 freeze', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/discover/likes-received/reveal': {
+      post: {
+        tags: ['Discover'],
+        summary: '[별사탕] 받은 좋아요 1명 공개',
+        description: '마지막 무료 공개 후 24시간이 지났으면 무료, 아니면 pay_with_stars=true 일 때 별사탕 2개. 공개 후 GET /likes-received 를 다시 부르면 일반 카드로 내려온다. 유료화 ON 의 GET /likes-received 는 공개한 사람 + 첫 미공개자 1명(locked=true, 블러 사진·가짜 텍스트)만 반환.',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['liker_id'], properties: { liker_id: { type: 'string', format: 'uuid' }, pay_with_stars: { type: 'boolean', default: false } } } } } },
+        responses: {
+          200: { description: '공개됨', content: { 'application/json': { schema: { type: 'object', properties: { revealed: { type: 'boolean' }, next_free_reveal_at: { type: 'string', format: 'date-time', nullable: true } } } } } },
+          402: { description: 'reveal_requires_stars (next_free_reveal_at 동봉) / insufficient_stars', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: '이 사용자의 좋아요 없음 (like_not_found)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/rewards/admob': {
+      get: {
+        tags: ['Rewards'],
+        summary: '[별사탕] AdMob 보상형 광고 서버측 검증 콜백 (구글이 호출)',
+        description: '구글 공개키로 ECDSA 서명 검증 후 user_id 에게 별사탕 1개 (KST 하루 2회, transaction_id 중복 지급 없음). 인증 없음.',
+        responses: { 200: { description: '처리됨 (granted 여부 포함)' }, 400: { description: '서명 불일치' } },
+      },
+    },
+    '/api/rewards/revenuecat': {
+      post: {
+        tags: ['Rewards'],
+        summary: '[별사탕] RevenueCat 웹훅 — 소모성 구매 지급',
+        description: 'Authorization 헤더 = REVENUECAT_WEBHOOK_AUTH. NON_RENEWING_PURCHASE 만 처리 (stars_30=30, stars_80=80). transaction_id 중복 지급 없음. 환불 회수는 미구현.',
+        responses: { 200: { description: '처리됨' }, 401: { description: '헤더 불일치' } },
       },
     },
 

@@ -22,6 +22,7 @@ import reportRoutes from './routes/report';
 import preferenceRoutes from './routes/preference';
 import notificationsRoutes from './routes/notifications';
 import adminRoutes from './routes/admin';
+import rewardsRoutes from './routes/rewards';
 import { startAudioExpiryScheduler } from './jobs/purgeExpiredAudio';
 import { startPhotoExpiryScheduler } from './jobs/purgeExpiredPhotos';
 import { startAuditCleanupScheduler } from './jobs/cleanupAuditTables';
@@ -141,6 +142,8 @@ app.use('/api/config', configRoutes);
 // 랜딩페이지 출시 대기자 모집 폼 — 인증 불필요한 공개 라우트 (가입 전 방문자).
 // waitlistLimiter: 무작위 이메일 대량 제출로 인한 무한 row 증식 차단.
 app.use('/api/waitlist', waitlistLimiter, waitlistRoutes);
+// 별사탕 충전 웹훅 (AdMob SSV / RevenueCat) — 외부 서버가 호출, 자체 서명·비밀값 검증.
+app.use('/api/rewards', rewardsRoutes);
 // authLimiter: credential stuffing(유출 비번 대량 시도) 차단.
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/profile', profileRoutes);

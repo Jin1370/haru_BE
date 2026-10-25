@@ -34,7 +34,13 @@ async function getAdmobKeys(force = false): Promise<Map<string, string>> {
 export function verifyAdmobSignature(rawQuery: string, pem: string): boolean {
   const sigIdx = rawQuery.indexOf('&signature=');
   if (sigIdx === -1) return false;
-  const message = rawQuery.slice(0, sigIdx);
+  // 구글은 URL 디코딩된 문자열에 서명한다 (보상 이름 '별사탕' 같은 비ASCII 에서 차이가 난다).
+  let message: string;
+  try {
+    message = decodeURIComponent(rawQuery.slice(0, sigIdx));
+  } catch {
+    return false;
+  }
   const signature = new URLSearchParams(rawQuery.slice(sigIdx + 1)).get('signature');
   if (!signature) return false;
   const verifier = createVerify('sha256');

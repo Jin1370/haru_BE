@@ -17,4 +17,7 @@ export const AD_REWARD_DAILY_MAX = 2;
 export const STAR_PRODUCTS: Record<string, number> = {
   stars_30: 30,
   stars_80: 80,
+  // iOS App Store 제품 ID
+  star_30: 30,
+  star_80: 80,
 };

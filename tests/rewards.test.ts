@@ -35,4 +35,14 @@ describe('verifyAdmobSignature', () => {
   it('서명이 없으면 거부', () => {
     expect(verifyAdmobSignature(MESSAGE, pem)).toBe(false);
   });
+
+  // AdMob 콘솔 'URL 확인' 이 실제로 보낸 요청 (2026-10-14). 보상 이름이 한글이라
+  // 구글은 URL 디코딩된 문자열에 서명한다 — 인코딩된 채 검증하면 실패했다.
+  it('실제 구글 서명 (비ASCII 보상 이름) 통과', () => {
+    const googlePem =
+      '-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE+nzvoGqvDeB9+SzE6igTl7TyK4JB\nbglwir9oTcQta8NuG26ZpZFxt+F2NDk7asTE6/2Yc8i1ATcGIqtuS5hv0Q==\n-----END PUBLIC KEY-----';
+    const query =
+      'ad_network=5450213213286189855&ad_unit=1234567890&reward_amount=1&reward_item=%EB%B3%84%EC%82%AC%ED%83%95&timestamp=1791959559346&transaction_id=123456789&signature=MEYCIQCVKKkIvtbK38hcEoxxm3E8rlcmCvmWR9-HMYFjCFsUxAIhANjeLi7QqS0ooli9WqS9ZfaETrPEQ9tLrK0WsFml6qK_&key_id=3335741209';
+    expect(verifyAdmobSignature(query, googlePem)).toBe(true);
+  });
 });

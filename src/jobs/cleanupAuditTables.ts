@@ -108,6 +108,45 @@ export async function sweepAuditTables(): Promise<{
   };
 }
 
+// 탈퇴자의 별사탕 구매 내역 (star_ledger kind='purchase') 5 년 sweep.
+// deleteAccount (1.12) 가 구매 줄만 남기는 이유가 전자상거래법상 대금결제 기록
+// 5 년 보존이라, 결제 시점 기준 5 년이 지나면 지운다. 탈퇴자만 대상 — 활동 중인
+// 사용자의 원장을 지우면 잔액(star_balance = 원장 합계)이 바뀐다.
+const PURCHASE_RETENTION_DAYS = 5 * 365 + 2; // 윤년 여유
+
+export async function sweepExpiredPurchaseLedger(): Promise<number> {
+  const cutoff = cutoffIso(PURCHASE_RETENTION_DAYS);
+  // ponytail: 오래된 구매 줄 1000 개만 후보로 본다. 활동 중 사용자의 5 년 넘은
+  // 구매가 1000 개를 넘으면 탈퇴자 줄이 밀려 안 지워질 수 있다 — 그때는
+  // DELETE ... USING profiles 조인 RPC 로 옮긴다.
+  const { data: rows, error: rowsErr } = await supabase
+    .from('star_ledger')
+    .select('user_id')
+    .eq('kind', 'purchase')
+    .lt('created_at', cutoff)
+    .limit(1000);
+  if (rowsErr) throw new Error(`star_ledger select: ${rowsErr.message}`);
+  const candidates = [...new Set((rows ?? []).map((r) => r.user_id as string))];
+  if (candidates.length === 0) return 0;
+
+  const { data: deleted, error: profErr } = await supabase
+    .from('profiles')
+    .select('id')
+    .in('id', candidates)
+    .not('deleted_at', 'is', null);
+  if (profErr) throw new Error(`profiles select: ${profErr.message}`);
+  const ids = (deleted ?? []).map((p) => p.id as string);
+  if (ids.length === 0) return 0;
+
+  const { count, error: delErr } = await supabase
+    .from('star_ledger')
+    .delete({ count: 'exact' })
+    .in('user_id', ids)
+    .lt('created_at', cutoff);
+  if (delErr) throw new Error(`star_ledger delete: ${delErr.message}`);
+  return count ?? 0;
+}
+
 let scheduler: NodeJS.Timeout | null = null;
 
 // 0 건이면 silent (출시 직후 매 부팅마다 빈 sweep 로그 노이즈 회피).
@@ -126,6 +165,11 @@ function runSweep(label: string): void {
       }
     })
     .catch((err) => console.error(`[audit-cleanup.sweep] ${label} error`, err));
+  sweepExpiredPurchaseLedger()
+    .then((n) => {
+      if (n > 0) console.log(`[audit-cleanup.purchase] ${label}`, { deleted: n });
+    })
+    .catch((err) => console.error(`[audit-cleanup.purchase] ${label} error`, err));
 }
 
 export function startAuditCleanupScheduler(): void {

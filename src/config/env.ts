@@ -13,7 +13,7 @@ dotenv.config();
 //     * GOOGLE_APPLICATION_CREDENTIALS_JSON       ← 원본 JSON 문자열 (Unix shell 에서만 안전)
 //   로컬 개발은 GOOGLE_APPLICATION_CREDENTIALS 파일 경로 사용 (이 분기 스킵).
 //
-// 본 사이드 이펙트가 translation.ts (VertexAI 초기화) 보다 먼저 실행되도록
+// 본 사이드 이펙트가 translation.ts (회사 Vertex 클라이언트 초기화) 보다 먼저 실행되도록
 // env.ts 의 module 최상단에서 수행.
 const credentialsB64 = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON_B64;
 const credentialsJsonRaw = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
@@ -82,9 +82,13 @@ export const env = {
     azureApiVersion: process.env.AZURE_IMAGE_API_VERSION || '2025-04-01-preview',
   },
 
-  vertexAi: {
-    projectId: required('GCP_PROJECT_ID'),
-    location: process.env.GCP_LOCATION || 'us-central1',
+  // Vertex AI Gemini (translation.ts). 회사 프로젝트(GCP_PROJECT_ID + 서비스 계정
+  // JSON)가 설정돼 있으면 그쪽을 먼저 쓰고, 실패하면 개인 키(GEMINI_API_KEY =
+  // 서비스 계정 바인딩 API 키)로 폴백. 회사 지원 종료 후엔 GCP_* 를 지우면 된다.
+  gemini: {
+    apiKey: required('GEMINI_API_KEY'),
+    companyProjectId: process.env.GCP_PROJECT_ID || '',
+    companyLocation: process.env.GCP_LOCATION || 'us-central1',
   },
 
   // 디스커버 "지나친 카드 다시 보기" (pass 스와이프 리셋) 일몰 게이트.

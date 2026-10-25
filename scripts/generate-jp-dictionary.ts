@@ -6,23 +6,20 @@
 //
 // 동작:
 //   1. `src/constants/moderationDictionary.ts` 의 KO_DICTIONARY_SOURCE 를 input 으로 사용.
-//   2. 카테고리별 Gemini 2.5 Flash 호출 — system prompt 에 self_harm 1인칭 제외 룰 명시.
+//   2. 카테고리별 Gemini 3.8 Flash 호출 — system prompt 에 self_harm 1인칭 제외 룰 명시.
 //   3. JSON 만 stdout 으로 출력 — { "sexual": [...], "drug": [...], "minor": [...], "self_harm": [...] }
 //   4. stderr 에 "*** HUMAN REVIEW REQUIRED ***" 경고 print — 자동 commit ❌.
 //   5. 사용자가 stdout 결과를 검수 → moderationDictionary.ts 의 JA_* 상수에 직접 paste.
 //
 // **자동 commit 금지** — 본 스크립트는 산출만 한다. 검수는 architect/사용자 책임.
 //
-// 비용/지연: 4 카테고리 × ~30 토큰 = 4 호출. gemini-2.5-flash 단가 무시 가능.
+// 비용/지연: 4 카테고리 × ~30 토큰 = 4 호출. gemini-3.8-flash 단가 무시 가능.
 
-import { VertexAI, HarmCategory, HarmBlockThreshold } from "@google-cloud/vertexai";
+import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import { env } from "../src/config/env";
 import { KO_DICTIONARY_SOURCE } from "../src/constants/moderationDictionary";
 
-const vertexAi = new VertexAI({
-    project: env.vertexAi.projectId,
-    location: env.vertexAi.location,
-});
+const ai = new GoogleGenAI({ vertexai: true, apiKey: env.gemini.apiKey });
 
 const SYSTEM_PROMPT = `You are localizing a content moderation dictionary for a Korean-Japanese dating app called "haru".
 
@@ -40,16 +37,10 @@ Rules:
 Output schema:
 ["token1", "token2", ...]`;
 
-const model = vertexAi.getGenerativeModel({
-    model: "gemini-2.5-flash",
-    systemInstruction: {
-        role: "system",
-        parts: [{ text: SYSTEM_PROMPT }],
-    },
-    generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.3,
-    },
+const CONFIG = {
+    systemInstruction: SYSTEM_PROMPT,
+    responseMimeType: "application/json",
+    temperature: 0.3,
     safetySettings: [
         // self_harm/sexual 카테고리는 BLOCK_ONLY_HIGH 로 두지 않으면 모델이 응답 자체를 거부할 수 있다.
         // 본 스크립트는 모더레이션 사전 생성 목적이므로 임시로 BLOCK_NONE.
@@ -59,7 +50,7 @@ const model = vertexAi.getGenerativeModel({
         { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
         { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
     ],
-});
+};
 
 type Category = "sexual" | "drug" | "minor" | "self_harm";
 
@@ -71,11 +62,13 @@ ${JSON.stringify(koTokens, null, 2)}
 
 Output a JSON array of Japanese tokens following the rules in the system prompt.`;
 
-    const result = await model.generateContent({
+    const result = await ai.models.generateContent({
+        model: "gemini-3.8-flash",
+        config: CONFIG,
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
     });
 
-    const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text;
+    const raw = result.text;
     if (!raw) {
         process.stderr.write(`[WARN] category=${category} returned no text (possibly safety-blocked)\n`);
         return [];

@@ -74,35 +74,29 @@ async function downscaleForConversion(
 }
 
 // SDK 클라이언트는 module top-level lazy init — env 미설정 시 null.
-// 우선순위: Azure OpenAI(APIM) 설정이 있으면 그쪽으로 구성, 없으면 OpenAI 직접
-// (openaiModeration.ts 와 동일한 `OPENAI_API_KEY` 재사용) fallback.
+// 우선순위: 회사 Azure OpenAI(APIM) → 실패 시 개인 OpenAI 직접(`OPENAI_API_KEY`,
+// openaiModeration.ts 와 같은 키). 회사 지원이 끊길 때까지 비용을 회사 쪽에서 소진.
 // Azure 경유: baseURL = .../deployments/<name> (경로에 /openai 없음 — APIM 매핑),
 // 인증은 `api-key` 헤더, `api-version` 쿼리. SDK 가 함께 보내는 Authorization Bearer 는
-// APIM 이 무시하므로 충돌 없음 (라이브 검증 완료). `images.edit` 호출부는 무변경 —
-// 클라이언트 구성만 바뀌므로 vi.mock('openai') 기반 단위 테스트도 그대로 통과.
-let client: OpenAI | null = null;
-function getClient(): OpenAI | null {
-  if (client) return client;
-  if (env.image.azureBaseUrl && env.image.azureApiKey) {
-    client = new OpenAI({
-      apiKey: env.image.azureApiKey,
-      baseURL: env.image.azureBaseUrl,
-      defaultQuery: { 'api-version': env.image.azureApiVersion },
-      defaultHeaders: { 'api-key': env.image.azureApiKey },
-    });
-    // 어떤 provider 가 실제 활성화됐는지 가시화 — 배포 env 에 AZURE_IMAGE_* 누락 시
-    // 조용히 OpenAI 로 폴백하는 상황을 부팅 로그(첫 변환 시점)에서 잡기 위함.
-    console.log('[photoConversion] image provider = Azure OpenAI (APIM):', env.image.azureBaseUrl);
-    return client;
+// APIM 이 무시하므로 충돌 없음 (라이브 검증 완료).
+let azureClient: OpenAI | null | undefined;
+let openaiClient: OpenAI | null | undefined;
+function getClients(): { azure: OpenAI | null; openai: OpenAI | null } {
+  if (azureClient === undefined) {
+    azureClient =
+      env.image.azureBaseUrl && env.image.azureApiKey
+        ? new OpenAI({
+            apiKey: env.image.azureApiKey,
+            baseURL: env.image.azureBaseUrl,
+            defaultQuery: { 'api-version': env.image.azureApiVersion },
+            defaultHeaders: { 'api-key': env.image.azureApiKey },
+          })
+        : null;
   }
-  if (env.openai.moderationApiKey) {
-    console.warn(
-      '[photoConversion] image provider = OpenAI direct (fallback) — AZURE_IMAGE_BASE_URL/AZURE_IMAGE_API_KEY 미설정',
-    );
-    client = new OpenAI({ apiKey: env.openai.moderationApiKey });
-    return client;
+  if (openaiClient === undefined) {
+    openaiClient = env.openai.moderationApiKey ? new OpenAI({ apiKey: env.openai.moderationApiKey }) : null;
   }
-  return null;
+  return { azure: azureClient, openai: openaiClient };
 }
 
 export interface ConversionInput {
@@ -235,8 +229,8 @@ export async function convertProfilePhoto(input: ConversionInput): Promise<Conve
   // status='processing' 으로 전이 — 동시 sweep 워커가 같은 row 잡지 않도록 가드.
   await updatePhotoStatus(photoRowId, { status: 'processing' });
 
-  const c = getClient();
-  if (!c) {
+  const { azure, openai } = getClients();
+  if (!azure && !openai) {
     const failureReason = 'openai_key_missing';
     await updatePhotoStatus(photoRowId, { status: 'failed', failure_reason: failureReason });
     console.error('[photoConversion.openai_key_missing]', { user_id: userId, photo_row_id: photoRowId });
@@ -253,17 +247,32 @@ export async function convertProfilePhoto(input: ConversionInput): Promise<Conve
       `original-${photoRowId}.${mimeTypeToExt(downscaled.mimeType)}`,
       { type: downscaled.mimeType },
     );
-    const response = await c.images.edit({
-      model: PHOTO_CONVERSION_MODEL,
-      image: file,
-      prompt: WATERCOLOR_PROMPT,
-      size: PHOTO_CONVERSION_SIZE,
-      quality: PHOTO_CONVERSION_QUALITY,
-      output_format: PHOTO_CONVERSION_OUTPUT_FORMAT,
-      output_compression: PHOTO_CONVERSION_OUTPUT_COMPRESSION,
-      user: userId,
-      n: 1,
-    });
+    const edit = (c: OpenAI) =>
+      c.images.edit({
+        model: PHOTO_CONVERSION_MODEL,
+        image: file,
+        prompt: WATERCOLOR_PROMPT,
+        size: PHOTO_CONVERSION_SIZE,
+        quality: PHOTO_CONVERSION_QUALITY,
+        output_format: PHOTO_CONVERSION_OUTPUT_FORMAT,
+        output_compression: PHOTO_CONVERSION_OUTPUT_COMPRESSION,
+        user: userId,
+        n: 1,
+      });
+    let response;
+    if (azure) {
+      try {
+        response = await edit(azure);
+      } catch (err) {
+        // 안전 필터 거부는 폴백하지 않는다 — 다른 제공자로 다시 보내 필터를
+        // 우회하는 통로가 되면 안 된다. 그 외(키 정지·한도·5xx)만 개인 키로.
+        if (!openai || detectModerationRejection(err).rejected) throw err;
+        console.warn('[photoConversion] Azure 실패 — OpenAI 직접으로 재시도:', (err as Error).message);
+        response = await edit(openai);
+      }
+    } else {
+      response = await edit(openai!);
+    }
     // gpt-image models always return b64_json (response_format 무시).
     b64 = response.data?.[0]?.b64_json;
     if (!b64) {

@@ -1,8 +1,10 @@
 import {
-    VertexAI,
+    GoogleGenAI,
     HarmCategory,
     HarmBlockThreshold,
-} from "@google-cloud/vertexai";
+    ThinkingLevel,
+    type GenerateContentConfig,
+} from "@google/genai";
 import { env } from "../config/env";
 import { EMAIL_PATTERN, sanitizeAudioTags, stripAudioTags, URL_PATTERN } from "../utils/textNormalization";
 import { retryOnce } from "../utils/retry";
@@ -137,10 +139,58 @@ function describeParty(label: string, party?: AddressParty): string {
     return `${label}: ${namePart}${gender}, ${age === null ? "unknown age" : `${age} years old`}`;
 }
 
-const vertexAi = new VertexAI({
-    project: env.vertexAi.projectId,
-    location: env.vertexAi.location,
-});
+// 개인 키: Vertex AI 를 서비스 계정에 묶인 API 키로 호출 (express 경로, location=global).
+const ai = new GoogleGenAI({ vertexai: true, apiKey: env.gemini.apiKey });
+
+// 2.5-flash 는 신규 프로젝트에 막혀 3.8-flash 로 이전 (2026-10-26). 실제 프롬프트로
+// 27개 사례 × 3회 비교에서 2.5 와 동등했던 건 3.8-flash(thinking LOW) 뿐이었다.
+// 429(용량 부족) 일 때만 3.1-flash-lite 로 1회 — 같은 비교에서 3.8 다음으로 근접.
+// 품질은 한 단계 낮지만 번역 실패 = 메시지 유실(수신자 GET 필터)보다 낫다.
+const PRIMARY_MODEL = "gemini-3.8-flash";
+const FALLBACK_MODEL = "gemini-3.1-flash-lite";
+
+// 회사 프로젝트(서비스 계정 ADC + 2.5-flash, 옛 동작 그대로)가 설정돼 있으면 먼저 쓴다 —
+// 회사 지원이 끊길 때까지 비용을 회사 쪽에서 소진. 어떤 에러든 개인 키로 넘어가고,
+// 401/403(키 정지·권한 회수)이면 이후 호출은 회사 쪽을 건너뛴다 (재시작 시 초기화).
+const companyAi = env.gemini.companyProjectId
+    ? new GoogleGenAI({
+          vertexai: true,
+          project: env.gemini.companyProjectId,
+          location: env.gemini.companyLocation,
+      })
+    : null;
+const COMPANY_MODEL = "gemini-2.5-flash";
+let companyDisabled = false;
+
+async function generate(config: GenerateContentConfig, prompt: string): Promise<string | undefined> {
+    const contents = [{ role: "user", parts: [{ text: prompt }] }];
+    if (companyAi && !companyDisabled) {
+        try {
+            const result = await companyAi.models.generateContent({ model: COMPANY_MODEL, contents, config });
+            return result.text;
+        } catch (err) {
+            const status = (err as { status?: number }).status;
+            if (status === 401 || status === 403) companyDisabled = true;
+            console.warn(
+                `[translation] 회사 키 실패 (${status ?? (err as Error).message}) — 개인 키로 재시도` +
+                    (companyDisabled ? ", 이후 회사 키 사용 중단" : ""),
+            );
+        }
+    }
+    try {
+        const result = await ai.models.generateContent({
+            model: PRIMARY_MODEL,
+            contents,
+            config: { ...config, thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+        });
+        return result.text;
+    } catch (err) {
+        if ((err as { status?: number }).status !== 429) throw err;
+        console.warn(`[translation] ${PRIMARY_MODEL} 429 — ${FALLBACK_MODEL} 로 재시도`);
+        const result = await ai.models.generateContent({ model: FALLBACK_MODEL, contents, config });
+        return result.text;
+    }
+}
 
 const SAFETY_SETTINGS = [
     {
@@ -232,18 +282,12 @@ ${LOCALIZED_NAME_RULES}
 Output schema — emit the fields in this exact order, deciding the language check before writing any text:
 { "already_target_language": boolean, "translation": string }`;
 
-const model = vertexAi.getGenerativeModel({
-    model: "gemini-2.5-flash",
-    systemInstruction: {
-        role: "system",
-        parts: [{ text: SYSTEM_PROMPT }],
-    },
-    generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.4,
-    },
+const MESSAGE_CONFIG: GenerateContentConfig = {
+    systemInstruction: SYSTEM_PROMPT,
+    responseMimeType: "application/json",
+    temperature: 0.4,
     safetySettings: SAFETY_SETTINGS,
-});
+};
 
 // 직전 대화 2턴. role 은 **번역 대상 메시지의 발신자 기준** — 'speaker' 는 그 사람이
 // 직접 쓴 이전 메시지, 'addressee' 는 상대가 쓴 것. 프롬프트의 Speaker/Addressee
@@ -388,15 +432,10 @@ OVERRIDE — the STEP 1 language check is already settled for you: the "Text to 
             : userPrompt;
         // 순단성 실패만 1회 재시도. 아래 safety-block / JSON 파싱 실패는 다시 해도
         // 같은 결과라 재시도 대상에서 제외 (호출 자체가 throw 한 경우만 감싼다).
-        const result = await retryOnce(
-            () =>
-                model.generateContent({
-                    contents: [{ role: "user", parts: [{ text: prompt }] }],
-                }),
+        const raw = await retryOnce(
+            () => generate(MESSAGE_CONFIG, prompt),
             "translateMessage",
         );
-
-        const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text;
         if (!raw) {
             throw new Error(
                 "Vertex AI returned no text (possibly safety-blocked)",
@@ -510,18 +549,12 @@ Output schema:
 { "translations": { "<lang>": "<translation>", ... }, "detected_source_language": "<bcp47-ish>" }
 The keys of "translations" must be exactly the languages requested by the user; no extras, none missing.`;
 
-const voiceIntroModel = vertexAi.getGenerativeModel({
-    model: "gemini-2.5-flash",
-    systemInstruction: {
-        role: "system",
-        parts: [{ text: VOICE_INTRO_SYSTEM_PROMPT }],
-    },
-    generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.5, // higher than translateMessage(0.4) for natural register
-    },
+const VOICE_INTRO_CONFIG: GenerateContentConfig = {
+    systemInstruction: VOICE_INTRO_SYSTEM_PROMPT,
+    responseMimeType: "application/json",
+    temperature: 0.5, // higher than translateMessage(0.4) for natural register
     safetySettings: SAFETY_SETTINGS,
-});
+};
 
 export async function translateVoiceIntro(params: {
     text: string;
@@ -541,11 +574,7 @@ Target languages: ${JSON.stringify(params.targetLanguages)}
 ${describeParty("Speaker (who recorded this intro)", params.speaker)}
 Voice intro text: ${JSON.stringify(params.text)}`;
 
-    const result = await voiceIntroModel.generateContent({
-        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-    });
-
-    const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text;
+    const raw = await generate(VOICE_INTRO_CONFIG, userPrompt);
     if (!raw) {
         throw new Error("Vertex AI returned no text (possibly safety-blocked)");
     }

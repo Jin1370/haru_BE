@@ -1,28 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock @google-cloud/vertexai BEFORE importing the module under test so the
-// VertexAI client is never instantiated against real credentials. vi.hoisted
-// is required because vi.mock factory runs before module-scope `const` init.
-const { generateContentMock } = vi.hoisted(() => ({ generateContentMock: vi.fn() }));
+// Mock @google/genai BEFORE importing the module under test so the client is
+// never instantiated against real credentials. vi.hoisted is required because
+// vi.mock factory runs before module-scope `const` init.
+const { generateContentMock } = vi.hoisted(() => {
+  // 회사 프로젝트 경로는 아래 '회사 키 폴백' 에서만 켠다 (dotenv 는 기존 값을 덮지 않음).
+  process.env.GCP_PROJECT_ID = '';
+  return { generateContentMock: vi.fn() };
+});
 
-vi.mock('@google-cloud/vertexai', () => {
-  class VertexAI {
-    getGenerativeModel() {
-      return { generateContent: generateContentMock };
-    }
+vi.mock('@google/genai', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@google/genai')>();
+  class GoogleGenAI {
+    models = { generateContent: generateContentMock };
   }
-  return {
-    VertexAI,
-    HarmCategory: {
-      HARM_CATEGORY_HARASSMENT: 'HARM_CATEGORY_HARASSMENT',
-      HARM_CATEGORY_HATE_SPEECH: 'HARM_CATEGORY_HATE_SPEECH',
-      HARM_CATEGORY_SEXUALLY_EXPLICIT: 'HARM_CATEGORY_SEXUALLY_EXPLICIT',
-      HARM_CATEGORY_DANGEROUS_CONTENT: 'HARM_CATEGORY_DANGEROUS_CONTENT',
-    },
-    HarmBlockThreshold: {
-      BLOCK_ONLY_HIGH: 'BLOCK_ONLY_HIGH',
-    },
-  };
+  return { ...actual, GoogleGenAI };
 });
 
 // Now import after mock is registered.
@@ -30,7 +22,7 @@ import { translateMessage, translateVoiceIntro, jaGreetingFor } from '../src/ser
 
 function mockGenerateText(text: string) {
   generateContentMock.mockResolvedValueOnce({
-    response: { candidates: [{ content: { parts: [{ text }] } }] },
+    text,
   });
 }
 
@@ -288,7 +280,7 @@ describe('translateVoiceIntro', () => {
 
   it('빈 응답(safety block)이면 throw', async () => {
     generateContentMock.mockResolvedValueOnce({
-      response: { candidates: [{ content: { parts: [{}] } }] },
+      text: undefined,
     });
     await expect(
       translateVoiceIntro({
@@ -566,16 +558,67 @@ describe('렌더 실패 가드', () => {
   it('재호출이 throw 해도 메시지를 잃지 않는다 — 1차 결과 유지', async () => {
     mockGenerateText(JSON.stringify({ already_target_language: false, translation: '띠동갑이라는 말은 일본에도 있어요？' }));
     // safety-block = 응답에 text 가 없는 형태. callGemini 가 내부에서 throw 한다.
-    generateContentMock.mockResolvedValue({ response: { candidates: [] } });
+    generateContentMock.mockResolvedValue({ text: undefined });
     const r = await translateMessage({ text: '띠동갑 이라는말이 일본에도있어요??', targetLanguage: 'ja' });
     expect(r.translation).toBe('띠동갑이라는 말은 일본에도 있어요？');
   }, 10000);
 
   it('무한 호출 불가 — 모든 응답이 미번역이어도 generateContent 는 정확히 2회', async () => {
     generateContentMock.mockResolvedValue({
-      response: { candidates: [{ content: { parts: [{ text: JSON.stringify({ already_target_language: true, translation: '띠동갑이라는 말은 일본에도 있어요' }) }] } }] },
+      text: JSON.stringify({ already_target_language: true, translation: '띠동갑이라는 말은 일본에도 있어요' }),
     });
     await translateMessage({ text: '띠동갑 이라는말이 일본에도있어요??', targetLanguage: 'ja' });
     expect(generateContentMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('모델 폴백', () => {
+  beforeEach(() => generateContentMock.mockReset());
+
+  it('429 면 폴백 모델로 1회 재시도', async () => {
+    generateContentMock.mockRejectedValueOnce(Object.assign(new Error('Resource exhausted'), { status: 429 }));
+    mockGenerateText(JSON.stringify({ already_target_language: false, translation: 'こんにちは' }));
+    const r = await translateMessage({ text: '안녕하세요', targetLanguage: 'ja' });
+    expect(r.translation).toBe('こんにちは');
+    const models = generateContentMock.mock.calls.map((c) => c[0].model);
+    expect(models).toEqual(['gemini-3.8-flash', 'gemini-3.1-flash-lite']);
+    expect(generateContentMock.mock.calls[1][0].config.thinkingConfig).toBeUndefined();
+  });
+
+  it('429 외 에러는 폴백 안 함', async () => {
+    generateContentMock.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400 }));
+    await expect(
+      translateVoiceIntro({ text: '안녕', sourceLanguage: 'ko', targetLanguages: ['ja'] }),
+    ).rejects.toThrow('bad request');
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('회사 키 폴백', () => {
+  beforeEach(() => generateContentMock.mockReset());
+
+  it('회사 키 성공이면 2.5-flash 만, 403 이면 개인 키로 넘어가고 이후 회사 키를 건너뛴다', async () => {
+    process.env.GCP_PROJECT_ID = 'company-project';
+    vi.resetModules();
+    const { translateVoiceIntro: tvi } = await import('../src/services/translation');
+    const ok = { text: JSON.stringify({ translations: { ja: 'こんにちは' }, detected_source_language: 'ko' }) };
+    const call = () => tvi({ text: '안녕', sourceLanguage: 'ko', targetLanguages: ['ja'] });
+
+    generateContentMock.mockResolvedValueOnce(ok);
+    await call();
+    generateContentMock.mockRejectedValueOnce(Object.assign(new Error('Permission denied'), { status: 403 }));
+    generateContentMock.mockResolvedValueOnce(ok);
+    await call();
+    generateContentMock.mockResolvedValueOnce(ok);
+    await call();
+
+    expect(generateContentMock.mock.calls.map((c) => c[0].model)).toEqual([
+      'gemini-2.5-flash',
+      'gemini-2.5-flash',
+      'gemini-3.8-flash',
+      'gemini-3.8-flash',
+    ]);
+    expect(generateContentMock.mock.calls[0][0].config.thinkingConfig).toBeUndefined();
+    process.env.GCP_PROJECT_ID = '';
   });
 });

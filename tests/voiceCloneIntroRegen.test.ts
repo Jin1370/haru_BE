@@ -24,7 +24,7 @@ vi.mock('../src/config/env', () => ({
     elevenlabs: { apiKey: 'test' },
     openai: { moderationApiKey: '' },
     image: { azureBaseUrl: '', azureApiKey: '', azureApiVersion: '2025-04-01-preview' },
-    vertexAi: { projectId: 'test', location: 'us-central1' },
+    gemini: { apiKey: 'test' },
     monetization: { enabled: false, revenuecatWebhookAuth: '' },
     discover: {
       passResetEnabled: true,

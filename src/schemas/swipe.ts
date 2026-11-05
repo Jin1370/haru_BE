@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CARD_RESET_AMOUNT } from '../constants/stars';
 
 export const swipeBodySchema = z.object({
   swiped_id: z.string().uuid(),
@@ -10,6 +11,10 @@ export const swipeBodySchema = z.object({
   // 좋아요 한도 소진 후 사용자가 "별사탕 1개 사용" 을 확인했을 때만 true.
   // 한도 안이면 무시된다 (차감 안 함).
   pay_with_stars: z.boolean().optional().default(false),
+});
+
+export const cardResetBodySchema = z.object({
+  cards: z.number().int().min(1).max(CARD_RESET_AMOUNT),
 });
 
 export const revealBodySchema = z.object({

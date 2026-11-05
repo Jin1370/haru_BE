@@ -31,6 +31,20 @@ export async function spendStars(userId: string, amount: number, kind: string): 
   return data as number;
 }
 
+// 탐색 카드 구매. 차감과 구매 기록을 한 트랜잭션으로 처리한다 (mig 060).
+export async function buyCards(userId: string, cards: number, stars: number): Promise<number> {
+  const { data, error } = await supabase.rpc('buy_cards', {
+    p_user: userId,
+    p_cards: cards,
+    p_stars: stars,
+  });
+  if (error) {
+    if (error.message.includes('insufficient_stars')) throw new InsufficientStarsError();
+    throw new Error(`buy_cards: ${error.message}`);
+  }
+  return data as number;
+}
+
 // 충전. ref(외부 거래 ID)가 이미 있으면 지급하지 않고 false — 웹훅 재시도 대비.
 export async function grantStars(
   userId: string,

@@ -8,13 +8,14 @@ import {
   discoverQuerySchema,
   quotaQuerySchema,
   revealBodySchema,
+  cardResetBodySchema,
 } from '../schemas/swipe';
-import { getStarBalance, spendStars, grantStars, sumLedger, InsufficientStarsError } from '../services/stars';
+import { getStarBalance, spendStars, buyCards, grantStars, sumLedger, InsufficientStarsError } from '../services/stars';
 import { getBlurredMainPhotos } from '../services/photoBlur';
 import {
   CARD_DAILY_FREE,
-  CARD_RESET_COST,
   CARD_RESET_AMOUNT,
+  cardResetCost,
   LIKE_STAR_COST,
   REVEAL_STAR_COST,
   REVEAL_FREE_INTERVAL_MS,
@@ -197,7 +198,7 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   // reciprocity 풀 = 나를 like 한(direction='like') 사람들. idx_swipes_swiped 가
   // swiped_id 인덱스를 제공하므로 swiped_id=viewer 필터는 인덱스 사용.
   const [swipedResult, blockedResult, prefsResult, reciprocalResult] = await Promise.all([
-    supabase.from('swipes').select('swiped_id, reset_at').eq('swiper_id', req.userId!),
+    supabase.from('swipes').select('swiped_id, reset_at, source, created_at').eq('swiper_id', req.userId!),
     supabase.from('blocks').select('blocker_id, blocked_id')
       .or(`blocker_id.eq.${req.userId!},blocked_id.eq.${req.userId!}`),
     supabase.from('user_preferences').select('*').eq('user_id', req.userId!).single(),
@@ -351,8 +352,17 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
   let lockedRow: (typeof scored)[number] | null = null;
   let availableNew = 0;
   if (env.monetization.enabled) {
-    const { used, limit: cardLimit } = await getCardAllowance(req.userId!, tzOffsetMinutes);
-    let freeNew = Math.max(0, cardLimit - used);
+    // 쓴 카드 수는 제외 목록과 같은 스냅샷에서 센다. 따로 읽으면 그 사이 저장된
+    // 스와이프가 제외되지 않은 채 사용량에만 잡혀, 남은 한도를 잠식하고 잠긴 카드가
+    // 일찍 나온다.
+    const { fromIso, toIso } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
+    const fromMs = new Date(fromIso).getTime();
+    const toMs = new Date(toIso).getTime();
+    const used = (swipedResult.data ?? []).filter((r: any) => {
+      const at = new Date(r.created_at).getTime();
+      return r.source === 'discover' && at >= fromMs && at < toMs;
+    }).length;
+    let freeNew = Math.max(0, (await getCardLimit(req.userId!, fromIso)) - used);
     page = [];
     for (const row of scored) {
       if (page.length >= limit) break;
@@ -762,12 +772,24 @@ const UNLIMITED_LIKE_LIMIT = 999_999;
 // 오늘 탐색 카드 사용량/한도. 카드 = 탐색 탭 스와이프(좋아요+넘기기). 받은 좋아요 탭
 // (source='likes')과 다시보기 카드(source='recycled')는 세지 않는다.
 // 한도 = 무료 10 + 오늘 리셋 횟수 × 10. like 면제 계정은 카드도 무제한.
+// 오늘 카드 한도 = 무료 + 오늘 구매한 장수.
+async function getCardLimit(userId: string, fromIso: string): Promise<number> {
+  const [purchases, unlimited] = await Promise.all([
+    supabase.from('card_purchases').select('cards').eq('user_id', userId).gte('created_at', fromIso),
+    hasUnlimitedLikes(userId),
+  ]);
+  if (purchases.error) throw new Error(`card_purchases: ${purchases.error.message}`);
+  if (unlimited) return UNLIMITED_LIKE_LIMIT;
+  const bought = (purchases.data ?? []).reduce((sum: number, r: { cards: number }) => sum + r.cards, 0);
+  return CARD_DAILY_FREE + bought;
+}
+
 async function getCardAllowance(
   userId: string,
   tzOffsetMinutes: number,
 ): Promise<{ used: number; limit: number }> {
   const { fromIso, toIso } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-  const [{ count, error }, resetStars, unlimited] = await Promise.all([
+  const [{ count, error }, limit] = await Promise.all([
     supabase
       .from('swipes')
       .select('id', { count: 'exact', head: true })
@@ -775,13 +797,9 @@ async function getCardAllowance(
       .eq('source', 'discover')
       .gte('created_at', fromIso)
       .lt('created_at', toIso),
-    sumLedger(userId, 'card_reset', fromIso),
-    hasUnlimitedLikes(userId),
+    getCardLimit(userId, fromIso),
   ]);
   if (error) throw new Error(`card count: ${error.message}`);
-  const limit = unlimited
-    ? UNLIMITED_LIKE_LIMIT
-    : CARD_DAILY_FREE + Math.floor(resetStars / CARD_RESET_COST) * CARD_RESET_AMOUNT;
   return { used: count ?? 0, limit };
 }
 
@@ -922,12 +940,12 @@ async function getMonetizationQuota(userId: string, tzOffsetMinutes: number) {
   };
 }
 
-// 탐색 카드 10장 추가 (별사탕 CARD_RESET_COST 개). 오늘 리셋 횟수는 원장에서
-// 파생되므로 차감 기록이 곧 한도 증가다.
-router.post('/card-reset', requireNotFrozen, async (req: AuthRequest, res: Response) => {
+// 탐색 카드 n장 구매. 가격은 서버가 장수로 계산하고, 구매 기록이 곧 오늘 한도 증가다.
+router.post('/card-reset', requireNotFrozen, validateBody(cardResetBodySchema), async (req: AuthRequest, res: Response) => {
   if (monetizationOff(res)) return;
+  const { cards } = req.body;
   try {
-    const remaining = await spendStars(req.userId!, CARD_RESET_COST, 'card_reset');
+    const remaining = await buyCards(req.userId!, cards, cardResetCost(cards));
     res.json({ stars_total: remaining });
   } catch (e) {
     if (e instanceof InsufficientStarsError) {

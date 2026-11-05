@@ -856,8 +856,9 @@ export const swaggerDocument = {
     '/api/discover/card-reset': {
       post: {
         tags: ['Discover'],
-        summary: '[별사탕] 탐색 카드 10장 추가 (별사탕 4개)',
-        description: 'MONETIZATION_ENABLED 일 때만. 오늘 카드 한도 = 무료 10 + 오늘 리셋 횟수 × 10 (원장에서 파생).',
+        summary: '[별사탕] 탐색 카드 n장 구매',
+        description: 'MONETIZATION_ENABLED 일 때만. 가격은 10장에 4개 비율로 올림 (1~2장 1개, 3~5장 2개, 6~7장 3개, 8~10장 4개). 오늘 카드 한도 = 무료 10 + 오늘 구매한 장수.',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['cards'], properties: { cards: { type: 'integer', minimum: 1, maximum: 10 } } } } } },
         responses: {
           200: { description: '차감 완료', content: { 'application/json': { schema: { type: 'object', properties: { stars_total: { type: 'integer' } } } } } },
           402: { description: '별사탕 부족 (code: insufficient_stars)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },

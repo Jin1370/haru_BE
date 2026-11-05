@@ -681,6 +681,7 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
   for (const [table, column] of [
     ['like_reveals', 'viewer_id'],
     ['like_reveals', 'liker_id'],
+    ['card_purchases', 'user_id'],
   ] as const) {
     const { error } = await supabase.from(table).delete().eq(column, userId);
     if (error) {

@@ -800,7 +800,7 @@ export const swaggerDocument = {
           required: true,
           content: {
             'application/json': {
-              schema: { type: 'object', required: ['swiped_id', 'direction'], properties: { swiped_id: { type: 'string', format: 'uuid' }, direction: { type: 'string', enum: ['like', 'pass'] }, source: { type: 'string', enum: ['discover', 'likes'], default: 'discover', description: '유료화 ON: likes(받은 좋아요 탭) 면 카드·좋아요 면제 — 서버가 (상대가 나를 like) AND (공개함) 확인, 아니면 403 like_not_revealed' }, pay_with_stars: { type: 'boolean', default: false, description: '유료화 ON: 좋아요 한도 초과 시 별사탕 1개로 보내기 (사용자 확인 후에만 true)' } } },
+              schema: { type: 'object', required: ['swiped_id', 'direction'], properties: { swiped_id: { type: 'string', format: 'uuid' }, direction: { type: 'string', enum: ['like', 'pass'] }, next_card_id: { type: 'string', format: 'uuid', description: '받은 좋아요 탭: 넘긴 직후 화면에 나올 잠긴 카드. 맨 앞 카드로 고정' }, source: { type: 'string', enum: ['discover', 'likes'], default: 'discover', description: '유료화 ON: likes(받은 좋아요 탭) 면 카드·좋아요 면제 — 서버가 (상대가 나를 like) AND (공개함 OR 무료 카드 사용 가능) 확인, 아니면 403 like_not_revealed. 공개 기록이 없는 카드를 넘기면 무료 카드를 쓴 것으로 기록' }, pay_with_stars: { type: 'boolean', default: false, description: '유료화 ON: 좋아요 한도 초과 시 별사탕 1개로 보내기 (사용자 확인 후에만 true)' } } },
             },
           },
         },
@@ -833,7 +833,7 @@ export const swaggerDocument = {
               monetization_enabled: { type: 'boolean', description: 'MONETIZATION_ENABLED. true 일 때만 아래 별사탕 필드가 온다.' },
               stars: { type: 'object', properties: { free: { type: 'integer' }, paid: { type: 'integer' }, total: { type: 'integer' } } },
               cards: { type: 'object', properties: { used: { type: 'integer' }, limit: { type: 'integer' } }, description: '오늘 탐색 카드 사용/한도 (화면 비표시, 잠금·타이머 판단용)' },
-              next_free_reveal_at: { type: 'string', format: 'date-time', nullable: true, description: 'null = 지금 무료 공개 가능' },
+              next_free_reveal_at: { type: 'string', format: 'date-time', nullable: true, description: 'null = 지금 무료 카드 사용 가능. 무료 카드를 넘긴 시각 + 24시간' },
               ads_remaining: { type: 'integer', description: '오늘(KST) 남은 광고 보상 횟수' },
             }, required: ['count', 'limit', 'remaining', 'date', 'pass_reset_enabled'] } } },
           },
@@ -870,12 +870,11 @@ export const swaggerDocument = {
       post: {
         tags: ['Discover'],
         summary: '[별사탕] 받은 좋아요 1명 공개',
-        description: '마지막 무료 공개 후 24시간이 지났으면 무료, 아니면 pay_with_stars=true 일 때 별사탕 2개. 공개 후 GET /likes-received 를 다시 부르면 일반 카드로 내려온다. 유료화 ON 의 GET /likes-received 는 공개한 사람 + 첫 미공개자 1명(locked=true, 블러 사진·가짜 텍스트)만 반환.',
-        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['liker_id'], properties: { liker_id: { type: 'string', format: 'uuid' }, pay_with_stars: { type: 'boolean', default: false } } } } } },
+        description: '별사탕 2개로 잠긴 카드 공개. 상대가 탈퇴·정지·차단됐거나 좋아요가 없으면 차감 없이 revealed=false. 무료 카드는 이 라우트 없이 일반 카드로 내려온다. 공개 후 GET /likes-received 를 다시 부르면 일반 카드로 내려온다. 유료화 ON 의 GET /likes-received 는 공개한 사람 + 첫 미공개자 1명(locked=true, 블러 사진·가짜 텍스트)만 반환.',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['liker_id'], properties: { liker_id: { type: 'string', format: 'uuid' } } } } } },
         responses: {
-          200: { description: '공개됨', content: { 'application/json': { schema: { type: 'object', properties: { revealed: { type: 'boolean' }, next_free_reveal_at: { type: 'string', format: 'date-time', nullable: true } } } } } },
-          402: { description: 'reveal_requires_stars (next_free_reveal_at 동봉) / insufficient_stars', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          404: { description: '이 사용자의 좋아요 없음 (like_not_found)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          200: { description: '공개됨', content: { 'application/json': { schema: { type: 'object', properties: { revealed: { type: 'boolean' } } } } } },
+          402: { description: 'insufficient_stars', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },

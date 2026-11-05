@@ -5,9 +5,12 @@ export const swipeBodySchema = z.object({
   swiped_id: z.string().uuid(),
   direction: z.enum(['like', 'pass']),
   // 별사탕 유료화 (mig 059). 미전달 = 탐색 탭 (옛 FE 호환).
-  // 'likes' 는 받은 좋아요 탭 — 서버가 (상대가 나를 like) AND (내가 공개함) 을
-  // 확인한 뒤에만 카드·좋아요 차감을 면제한다.
+  // 'likes' 는 받은 좋아요 탭 — 서버가 (상대가 나를 like) AND (공개함 OR 무료 카드)
+  // 를 확인한 뒤에만 카드·좋아요 차감을 면제한다.
   source: z.enum(['discover', 'likes']).optional().default('discover'),
+  // 받은 좋아요 탭에서 이 카드를 넘긴 직후 화면에 나올 잠긴 카드. 서버가 맨 앞 카드로
+  // 고정한다. 나를 like 한 미공개 후보가 아니면 GET /likes-received 가 무시한다.
+  next_card_id: z.string().uuid().optional(),
   // 좋아요 한도 소진 후 사용자가 "별사탕 1개 사용" 을 확인했을 때만 true.
   // 한도 안이면 무시된다 (차감 안 함).
   pay_with_stars: z.boolean().optional().default(false),
@@ -19,7 +22,6 @@ export const cardResetBodySchema = z.object({
 
 export const revealBodySchema = z.object({
   liker_id: z.string().uuid(),
-  pay_with_stars: z.boolean().optional().default(false),
 });
 
 // POST /swipe 의 서버측 하드 캡 계산용 tz. quotaQuerySchema 와 동일 의미

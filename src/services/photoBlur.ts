@@ -7,8 +7,9 @@ import { uploadFile } from './storage';
 // 블러본을 만든다. 메인 사진 1장만, 처음 필요할 때 만들어 profile_photos.blurred_url
 // 에 저장하고 재사용 (요청마다 만들면 Fly 메모리 부담 — 2026-07 OOM).
 // 작게 줄여서 흐리면 원본 디테일이 구조적으로 남지 않고 용량도 수 KB.
+// 파일명에 강도를 넣어, 값을 바꾸고 blurred_url 을 비우면 캐시 없이 새 사진이 나가게 한다.
 const BLUR_WIDTH = 96;
-const BLUR_RADIUS = 6;
+const BLUR_RADIUS = 5;
 
 async function makeBlurred(sourceUrl: string): Promise<Buffer> {
   const res = await fetch(sourceUrl);
@@ -47,7 +48,7 @@ export async function getBlurredMainPhotos(userIds: string[]): Promise<Map<strin
       if (!row.converted_url) return;
       try {
         const buffer = await makeBlurred(row.converted_url);
-        const url = await uploadFile('photos', `${row.user_id}/blurred/${row.id}.jpg`, buffer, 'image/jpeg');
+        const url = await uploadFile('photos', `${row.user_id}/blurred/${row.id}_r${BLUR_RADIUS}.jpg`, buffer, 'image/jpeg');
         const { error: updErr } = await supabase
           .from('profile_photos')
           .update({ blurred_url: url })

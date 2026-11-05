@@ -127,11 +127,10 @@ export function computeTier(candidate: Candidate, prefs: ViewerPrefs): number {
 }
 
 // 동일 티어 안에서의 2차 정렬 점수.
-// - 기본 신호(관심사·사진·신규·jitter) 합산 상한은 65.
-// - reciprocity boost(+50): 후보가 이미 viewer 를 like 한 경우 가산. 같은 티어
-//   안에서 다른 모든 신호(최대 65) 를 압도해 매칭 확률을 끌어올리는 신호.
+// - 기본 신호(관심사·사진·신규·jitter) 합산 상한은 70.
+// - reciprocity: 후보가 이미 viewer 를 like 한 경우. 유료화 OFF 는 +50, ON 은 -15.
 // 티어 경계 보호는 정렬 키 우선순위 (tier ASC > intra DESC) 가 담당 —
-// reciprocity 가 +50 가산되어 합산이 65 를 넘어도 다른 티어 후보 위로 못 올라간다.
+// reciprocity 가 합산을 얼마나 바꿔도 다른 티어 후보를 넘지 못한다.
 export function computeIntraScore(
   candidate: Candidate,
   viewer: Viewer,
@@ -146,7 +145,7 @@ export function computeIntraScore(
 
   // 프로필 완성도(사진 3장 이상)
   if (candidate.photos.length >= 3) {
-    score += 10;
+    score += 15;
   }
 
   // 신규 유저 부스트 (7일 이내)
@@ -159,13 +158,11 @@ export function computeIntraScore(
   score += hashJitter(candidate.id, viewer.id, 15);
 
   // reciprocity boost: 후보가 이미 viewer 를 like 한 경우.
-  // 같은 티어 안에서 다른 신호 합 (≤65) 을 압도하지만, 정렬 1차 키가 tier 라
-  // 티어 경계는 넘지 않는다. "내가 만나고 싶은 사람 중 나를 좋아하는 사람" 이
-  // 같은 티어 안에서 1순위로 노출되어 매칭 funnel 양방향 마주칠 확률을 끌어올린다.
-  // 유료화 ON 이면 +20 (중간 노출) — 받은 좋아요 공개가 유료라 탐색 맨 위에
-  // 그 사람들을 몰아주면 공개할 이유가 사라진다.
+  // 유료화 OFF: +50 — 같은 티어 안에서 1순위로 노출해 양방향 마주칠 확률을 높인다.
+  // 유료화 ON : -15 — 받은 좋아요 공개가 유료라, 탐색에서 앞에 나오면 공개할 이유가
+  // 사라진다.
   if (reciprocalLikerIds.has(candidate.id)) {
-    score += env.monetization.enabled ? 20 : 50;
+    score += env.monetization.enabled ? -15 : 50;
   }
 
   return score;
@@ -461,9 +458,7 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
 // 정책) — 디스커버와 동일하게 적용. 언어/국가 선호는 SQL 단계에서 거르지 않고 티어
 // 정렬 신호로만 사용 (디스커버 동일 패턴).
 //
-// 정렬: (tier ASC, like 시각 DESC). 같은 티어 안에선 최근 받은 좋아요 우선.
-// reciprocity boost (+50) 는 모든 후보에 동일 적용되어 무력화되므로 intra score
-// 계산을 생략. 디스커버의 (tier ASC, intra DESC) 와 다른 점은 2차 키만.
+// 정렬: 탐색과 같은 (tier ASC, intra DESC).
 //
 // 일일 50장 한도와는 무관하게 GET 은 무료(조회는 카운트 안 함). 실제 스와이프
 // 행위(POST /swipe)는 디스커버 swipe 와 동일 엔드포인트를 공유하므로 quota 도 함께 적용됨.
@@ -500,7 +495,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
       .from('blocks')
       .select('blocker_id, blocked_id')
       .or(`blocker_id.eq.${req.userId!},blocked_id.eq.${req.userId!}`),
-    supabase.from('profiles').select('language').eq('id', req.userId!).single(),
+    supabase.from('profiles').select('language, interests').eq('id', req.userId!).single(),
     supabase.from('user_preferences').select('*').eq('user_id', req.userId!).single(),
   ]);
 
@@ -566,16 +561,15 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return true;
   });
 
-  // 5) 티어 계산 + 정렬: (tier ASC, like 시각 DESC).
-  //    like 시각 DESC 는 `eligibleIds` 인덱스 ASC 와 동치 (1단계에서 시간 역순으로
-  //    정렬됐으므로). reciprocity boost 는 모든 후보 동일 적용이라 무력화 → intra
-  //    score 미산정.
+  // 5) 티어 계산 + 정렬: 탐색과 같은 (tier ASC, intra DESC). 이 풀은 전원이 나를
+  //    like 했으므로 reciprocity 는 순서에 영향이 없어 넘기지 않는다.
   const viewerPrefs: ViewerPrefs = {
     preferred_nationalities: (prefs?.preferred_nationalities as string[] | null) ?? [],
   };
-
-  const orderIndex = new Map<string, number>();
-  eligibleIds.forEach((id, idx) => orderIndex.set(id, idx));
+  const viewer: Viewer = {
+    id: req.userId!,
+    interests: (viewerProfileResult.data?.interests as string[] | null) ?? [],
+  };
 
   const scored = visible.map((row: any) => {
     const candidate: Candidate = {
@@ -589,32 +583,45 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return {
       ...row,
       _tier: computeTier(candidate, viewerPrefs),
-      _likeIndex: orderIndex.get(row.id) ?? 0,
+      _intra: computeIntraScore(candidate, viewer),
     };
   });
 
   scored.sort((a, b) => {
     if (a._tier !== b._tier) return a._tier - b._tier;
-    return a._likeIndex - b._likeIndex;
+    return b._intra - a._intra;
   });
 
-  // 별사탕 유료화: 공개한 사람만 일반 카드로, 공개 안 한 첫 사람은 잠긴(블러)
-  // 카드로, 나머지는 내려주지 않는다 (인원수 비노출 정책).
+  // 별사탕 유료화: 공개한 사람 + 무료 카드 1장만 일반 카드로, 그다음 사람은 잠긴(블러)
+  // 카드로, 나머지는 내려주지 않는다 (인원수 비노출 정책). 무료 카드는 넘겨야 쓴 것으로
+  // 기록되므로(POST /swipe), 안 넘기고 며칠이 지나도 무료 카드는 1장뿐이다.
   let visibleRows = scored;
   let lockedRow: (typeof scored)[number] | null = null;
   if (env.monetization.enabled && scored.length > 0) {
-    const { data: reveals, error: revealsErr } = await supabase
-      .from('like_reveals')
-      .select('liker_id')
-      .eq('viewer_id', req.userId!)
-      .in('liker_id', scored.map((r) => r.id));
-    if (revealsErr) {
-      res.status(500).json({ error: revealsErr.message });
+    const [revealsResult, pinResult, nextFree] = await Promise.all([
+      supabase
+        .from('like_reveals')
+        .select('liker_id')
+        .eq('viewer_id', req.userId!)
+        .in('liker_id', scored.map((r) => r.id)),
+      supabase.from('like_card_pins').select('liker_id').eq('viewer_id', req.userId!).maybeSingle(),
+      getNextFreeRevealAt(req.userId!),
+    ]);
+    if (revealsResult.error || pinResult.error) {
+      res.status(500).json({ error: (revealsResult.error ?? pinResult.error)!.message });
       return;
     }
-    const revealed = new Set((reveals ?? []).map((r: any) => r.liker_id as string));
-    visibleRows = scored.filter((r) => revealed.has(r.id));
-    lockedRow = scored.find((r) => !revealed.has(r.id)) ?? null;
+    const revealed = new Set((revealsResult.data ?? []).map((r: any) => r.liker_id as string));
+    const pinnedId = (pinResult.data?.liker_id as string | undefined) ?? null;
+    const split = splitLikeCards(scored, revealed, nextFree === null, pinnedId);
+    visibleRows = split.visible;
+    lockedRow = split.locked;
+    if (split.pin && split.pin !== pinnedId) {
+      const { error: pinErr } = await supabase
+        .from('like_card_pins')
+        .upsert({ viewer_id: req.userId!, liker_id: split.pin, pinned_at: new Date().toISOString() });
+      if (pinErr) console.error('[likes-received] pin failed:', pinErr);
+    }
   }
 
   // 6) 응답 가공 — discover 와 동일하게 사진 1장 / photo_access 잠금 / voice intro
@@ -624,7 +631,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   // LAUNCH_CHECKLIST #3: discover 와 동일 — private 버킷 전환에 맞춰 응답 직전
   // voice intro slot URL 을 짧은 TTL 서명 URL 로 변환.
   const results: Record<string, unknown>[] = await Promise.all(
-    visibleRows.map(async ({ _tier, _likeIndex, voice_intro_audio_urls, created_at, ...rest }) => {
+    visibleRows.map(async ({ _tier, _intra, voice_intro_audio_urls, created_at, ...rest }) => {
       const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<
         Record<VoiceIntroSlotLanguage, string | null>
       >;
@@ -654,6 +661,28 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
 
   res.json(results);
 });
+
+// 유료화 ON 의 카드 나누기. rows 는 정렬된 상태로 받는다.
+// 공개했지만 아직 안 넘긴 카드 → 맨 앞 카드(무료 또는 잠긴 카드) → 무료 카드가 있으면
+// 다음 잠긴 카드 순서다. 맨 앞 카드는 고정돼서(like_card_pins) 열릴 때까지 바뀌지 않는다.
+// 다음 카드는 앞 카드를 넘길 때 POST /swipe 의 next_card_id 로 고정된다 — 공개한 카드가
+// 남아 있으면 여기서는 pin 을 null 로 돌려 고르지 않는다. 무료로 열든 별사탕으로 열든 같다.
+export function splitLikeCards<T extends { id: string }>(
+  rows: T[],
+  revealed: Set<string>,
+  freeAvailable: boolean,
+  pinnedId: string | null,
+): { visible: T[]; locked: T | null; pin: string | null } {
+  const opened = rows.filter((r) => revealed.has(r.id));
+  const unrevealed = rows.filter((r) => !revealed.has(r.id));
+  const front = unrevealed.find((r) => r.id === pinnedId) ?? unrevealed[0];
+  const next = unrevealed.find((r) => r !== front);
+  return {
+    visible: freeAvailable && front ? [...opened, front] : opened,
+    locked: (freeAvailable ? next : front) ?? null,
+    pin: opened.length === 0 ? (front?.id ?? null) : null,
+  };
+}
 
 // 받은 좋아요 푸시 게이트 — 이 like 가 수신자의 받은 좋아요 탭에 실제로 노출되는가.
 // 위 GET /likes-received 의 visible 필터(이미 스와이프함 / is_active / 성별·연령
@@ -803,7 +832,7 @@ async function getCardAllowance(
   return { used: count ?? 0, limit };
 }
 
-// 다음 무료 공개 가능 시각. null = 지금 무료 공개 가능.
+// 다음 무료 카드 시각. null = 지금 무료 카드 사용 가능.
 async function getNextFreeRevealAt(userId: string): Promise<string | null> {
   const { data, error } = await supabase
     .from('like_reveals')
@@ -924,7 +953,7 @@ router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, r
 });
 
 // quota 응답의 유료화 필드. FE 는 카드 수를 화면에 표시하지 않지만 잠긴 카드 판단과
-// 타이머(다음 자정 / 다음 무료 공개)에 쓴다.
+// 타이머(다음 자정 / 다음 무료 카드)에 쓴다.
 async function getMonetizationQuota(userId: string, tzOffsetMinutes: number) {
   const [stars, cards, nextFreeRevealAt, adsRemaining] = await Promise.all([
     getStarBalance(userId),
@@ -956,15 +985,37 @@ router.post('/card-reset', requireNotFrozen, validateBody(cardResetBodySchema), 
   }
 });
 
-// 받은 좋아요 1명 공개. 마지막 무료 공개 후 24시간이 지났으면 무료, 아니면
-// 사용자가 확인(pay_with_stars)했을 때만 별사탕 REVEAL_STAR_COST 개.
+// 상대와 정상적으로 상호작용할 수 없는 상태인가 — 탈퇴·정지·숨김, 또는 어느 쪽이든 차단.
+// 카드를 받은 뒤에 이렇게 바뀔 수 있어(받아둔 덱) 차감·기록·매치 전에 확인한다.
+// 사유는 응답에 넣지 않는다 — 차단·정지 여부가 상대에게 드러나면 안 된다.
+async function isUserUnavailable(viewerId: string, targetId: string): Promise<boolean> {
+  if (env.discover.hiddenUserIds.includes(targetId)) return true;
+  const [profileResult, blockResult] = await Promise.all([
+    supabase.from('profiles').select('is_active, frozen_at').eq('id', targetId).maybeSingle(),
+    supabase
+      .from('blocks')
+      .select('blocker_id')
+      .or(
+        `and(blocker_id.eq.${viewerId},blocked_id.eq.${targetId}),and(blocker_id.eq.${targetId},blocked_id.eq.${viewerId})`,
+      )
+      .limit(1),
+  ]);
+  if (profileResult.error) throw new Error(`profiles: ${profileResult.error.message}`);
+  if (blockResult.error) throw new Error(`blocks: ${blockResult.error.message}`);
+  const profile = profileResult.data;
+  return !profile?.is_active || !!profile.frozen_at || (blockResult.data ?? []).length > 0;
+}
+
+// 잠긴 받은 좋아요 카드 1명 공개 — 별사탕 REVEAL_STAR_COST 개. 무료 카드는 공개
+// 절차 없이 GET /likes-received 에 일반 카드로 내려오고, 넘길 때 POST /swipe 가 기록한다.
+// 상대가 그사이 탈퇴·정지·차단됐으면 차감 없이 revealed=false.
 router.post(
   '/likes-received/reveal',
   requireNotFrozen,
   validateBody(revealBodySchema),
   async (req: AuthRequest, res: Response) => {
     if (monetizationOff(res)) return;
-    const { liker_id, pay_with_stars } = req.body;
+    const { liker_id } = req.body;
     const me = req.userId!;
 
     const [likeResult, revealResult] = await Promise.all([
@@ -981,50 +1032,37 @@ router.post(
       res.status(500).json({ error: (likeResult.error ?? revealResult.error)!.message });
       return;
     }
-    if (!likeResult.data) {
-      res.status(404).json({ error: 'No like from this user', code: 'like_not_found' });
+    if (!likeResult.data || (await isUserUnavailable(me, liker_id))) {
+      res.json({ revealed: false });
       return;
     }
     if (revealResult.data) {
-      res.json({ revealed: true, next_free_reveal_at: await getNextFreeRevealAt(me) });
+      res.json({ revealed: true });
       return;
     }
 
-    // ponytail: 동시에 두 명을 무료 공개하면 둘 다 통과할 수 있다 (락 없음).
-    // 하루 1명 정책의 연타 경합뿐이라 허용 — 막으려면 spend_stars 같은 DB 함수로 옮긴다.
-    const nextFree = await getNextFreeRevealAt(me);
-    const paid = nextFree !== null;
-    if (paid && !pay_with_stars) {
-      res.status(402).json({ error: 'Reveal requires stars', code: 'reveal_requires_stars', next_free_reveal_at: nextFree });
-      return;
-    }
-    if (paid) {
-      try {
-        await spendStars(me, REVEAL_STAR_COST, 'like_reveal');
-      } catch (e) {
-        if (e instanceof InsufficientStarsError) {
-          res.status(402).json({ error: 'Not enough stars', code: 'insufficient_stars' });
-          return;
-        }
-        throw e;
+    try {
+      await spendStars(me, REVEAL_STAR_COST, 'like_reveal');
+    } catch (e) {
+      if (e instanceof InsufficientStarsError) {
+        res.status(402).json({ error: 'Not enough stars', code: 'insufficient_stars' });
+        return;
       }
+      throw e;
     }
 
     const { error: insertErr } = await supabase
       .from('like_reveals')
-      .insert({ viewer_id: me, liker_id, paid });
+      .insert({ viewer_id: me, liker_id, paid: true });
     if (insertErr && insertErr.code !== '23505') {
       res.status(500).json({ error: insertErr.message });
       return;
     }
     // 23505 = 연타로 이미 공개됨. 방금 낸 별사탕은 돌려준다.
     // ponytail: 환급은 무료분으로 쌓인다 (유료분에서 빠졌어도). 연타 경합에서만 생김.
-    if (insertErr && paid) await grantStars(me, REVEAL_STAR_COST, false, 'refund', null);
+    if (insertErr) await grantStars(me, REVEAL_STAR_COST, false, 'refund', null);
 
-    res.json({
-      revealed: true,
-      next_free_reveal_at: paid ? nextFree : new Date(Date.now() + REVEAL_FREE_INTERVAL_MS).toISOString(),
-    });
+    res.json({ revealed: true });
   },
 );
 
@@ -1088,6 +1126,13 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
   const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
   const monetized = env.monetization.enabled;
 
+  // 받아둔 카드의 상대가 그사이 탈퇴·정지·차단됐으면 아무것도 기록·차감하지 않고 넘긴다.
+  // 무료 카드도 쓰지 않고 매치도 만들지 않는다. 오류가 아니라 카드가 자연스럽게 지나간다.
+  if (!isCampaignBot(swiped_id) && (await isUserUnavailable(req.userId!, swiped_id))) {
+    res.json({ direction, match: null, skipped: true });
+    return;
+  }
+
   // 0) 기존 스와이프. 다시보기(reset_at)로 풀에 돌아온 사람이면 이 스와이프는 기존
   //    행을 갱신하고 새 카드로 세지 않는다. 그 외 기존 행은 이미 스와이프함 → 409.
   const { data: existing, error: existingErr } = await supabase
@@ -1136,11 +1181,13 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
   }
 
   // 2) 출처 (mig 059). 받은 좋아요 탭 좋아요는 유료화 ON 에서 카드·좋아요 면제라,
-  //    클라이언트 주장만 믿지 않고 (상대가 나를 like) AND (내가 공개함) 을 확인한다.
-  //    안 그러면 탐색 좋아요를 "받은 좋아요에서 보냄" 으로 속여 공짜로 보낼 수 있다.
+  //    클라이언트 주장만 믿지 않고 (상대가 나를 like) AND (공개함 OR 무료 카드 사용 가능)
+  //    을 확인한다. 안 그러면 탐색 좋아요를 "받은 좋아요에서 보냄" 으로 속여 공짜로
+  //    보낼 수 있다. 공개 기록이 없는 카드를 넘기면(패스 포함) 무료 카드를 쓴 것이다.
   let source: 'discover' | 'likes' | 'recycled' = recycled ? 'recycled' : 'discover';
+  let usesFreeCard = false;
   if (req.body.source === 'likes') {
-    if (monetized && direction === 'like') {
+    if (monetized) {
       const { data: reveal, error: revealErr } = await supabase
         .from('like_reveals')
         .select('liker_id')
@@ -1151,7 +1198,8 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
         res.status(500).json({ error: revealErr.message });
         return;
       }
-      if (!reciprocal || !reveal) {
+      usesFreeCard = !reveal && (await getNextFreeRevealAt(req.userId!)) === null;
+      if (direction === 'like' && (!reciprocal || (!reveal && !usesFreeCard))) {
         res.status(403).json({ error: 'Like is not revealed', code: 'like_not_revealed' });
         return;
       }
@@ -1248,6 +1296,26 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
     }
     res.status(500).json({ error: swipeError.message });
     return;
+  }
+
+  // 무료 카드 사용 기록 — 다음 무료 카드는 이 시각부터 24시간 뒤. 스와이프는 이미
+  // 저장됐으니 실패해도 응답은 막지 않는다 (무료 카드를 한 번 더 쓰게 될 뿐).
+  // ponytail: 연타 경합이면 무료 카드 2장이 나갈 수 있다 (락 없음). 24시간 1장 정책의
+  // 경합뿐이라 허용 — 막으려면 spend_stars 같은 DB 함수로 옮긴다.
+  if (usesFreeCard) {
+    const { error: freeErr } = await supabase
+      .from('like_reveals')
+      .insert({ viewer_id: req.userId!, liker_id: swiped_id, paid: false });
+    if (freeErr && freeErr.code !== '23505') console.error('[swipe] free card record failed:', freeErr);
+  }
+
+  // 넘긴 직후 화면에 나오는 잠긴 카드를 그대로 고정 — 그사이 점수가 더 높은 좋아요가
+  // 왔어도 보이던 카드가 바뀌지 않게 한다.
+  if (monetized && source === 'likes' && req.body.next_card_id) {
+    const { error: pinErr } = await supabase
+      .from('like_card_pins')
+      .upsert({ viewer_id: req.userId!, liker_id: req.body.next_card_id, pinned_at: new Date().toISOString() });
+    if (pinErr) console.error('[swipe] pin failed:', pinErr);
   }
 
   // 8) 매치 생성 — reciprocal 은 위 1)에서 이미 조회됨(재조회 제거). reciprocal 은

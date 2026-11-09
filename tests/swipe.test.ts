@@ -1,8 +1,9 @@
-// discover-pass-reset + discover-like-limit sprint 회귀.
+// 탐색·받은 좋아요 스와이프 회귀.
 //
-// (1) DELETE /api/discover/passes — pass 스와이프 리셋 (기존 6케이스).
-// (2) POST /api/discover/swipe — 하루 like 예산 캡 + 매치완성 like/pass 면제 (신규).
-// (3) GET  /api/discover/quota — 오늘 소모한 like 예산 카운트 (신규).
+// (1) POST /api/discover/swipe — 플레이리스트 대화 신청 / 받은 좋아요 탭 / 상대 소멸.
+// (2) GET  /api/discover/quota — 유료화 필드만.
+// (3) POST /api/discover/likes-received/reveal — 무료 카드.
+// (4) splitLikeCards — 받은 좋아요 카드 순서.
 //
 // 라이브 DB(live integration) 대신 모듈 경계 mock 패턴 — voiceIntroModeration.test.ts
 // 와 동일. supabase / env / pushNotifications 를 hoisted mock 으로 잡아
@@ -95,7 +96,9 @@ const captured = vi.hoisted(() => ({
 
   // POST /swipe
   existing: { data: null as null | { id: string; reset_at: string | null }, error: null as null | { message: string } },
-  cardCount: { count: 0, error: null as null | { message: string } },
+  // 오늘 플레이리스트 + 멤버십 (source=playlist 대화 신청)
+  todayPlaylists: { data: [{ id: 1, idx: 0 }] as Array<{ id: number; idx: number }>, error: null as null | { message: string } },
+  member: { data: [{ candidate_id: '22222222-2222-4222-8222-222222222222' }] as Array<{ candidate_id: string }>, error: null as null | { message: string } },
   reveal: { data: null as null | { liker_id: string }, error: null as null | { message: string } },
   lastFree: { data: [] as Array<{ revealed_at: string }>, error: null as null | { message: string } }, // 마지막 무료 카드 사용
   revealInsertPayload: null as null | Record<string, unknown>,
@@ -126,6 +129,8 @@ vi.mock('../src/config/supabase', () => {
   function resolveTerminal(b: any): any {
     const t = b._table;
     if (t === 'blocks') return captured.blocks;
+    if (t === 'discover_playlists') return captured.todayPlaylists;
+    if (t === 'discover_playlist_items') return captured.member;
     if (t === 'profiles') {
       if (b._eqs.some((e: any) => e.col === 'id' && e.val === '22222222-2222-4222-8222-222222222222')) {
         return { data: captured.target, error: null };
@@ -147,8 +152,6 @@ vi.mock('../src/config/supabase', () => {
         if (b._eqs.some((e: any) => e.col === 'direction' && e.val === 'pass')) {
           return captured.passCount;
         }
-        // 탐색 카드 count (유료화 ON 카드 한도)
-        if (b._eqs.some((e: any) => e.col === 'source')) return captured.cardCount;
         // counts_toward_limit=true 예산 count (POST 캡 + GET quota-like 공유)
         captured.budgetCountEqs = b._eqs;
         return captured.budgetCount;
@@ -279,7 +282,8 @@ beforeEach(() => {
   captured.frozen = { is_active: true, frozen_at: null };
   captured.referral = { data: null, error: null };
   captured.existing = { data: null, error: null };
-  captured.cardCount = { count: 0, error: null };
+  captured.todayPlaylists = { data: [{ id: 1, idx: 0 }], error: null };
+  captured.member = { data: [{ candidate_id: SWIPED }], error: null };
   captured.reveal = { data: null, error: null };
   captured.lastFree = { data: [], error: null };
   captured.revealInsertPayload = null;
@@ -303,75 +307,9 @@ beforeEach(() => {
   captured.deleteOptions = null;
 });
 
-describe('DELETE /api/discover/passes — pass 스와이프 리셋', () => {
-  it('(a) 정상 삭제 + reset_count 반환', async () => {
-    captured.deleteResult = { count: 7, error: null };
-    const res = await request(app)
-      .delete('/api/discover/passes')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`);
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ reset_count: 7 });
-    // { count: 'exact' } 옵션이 delete 에 전달됐는지
-    expect(captured.deleteOptions).toEqual({ count: 'exact' });
-  });
-
-  it('(b) 비인증 → 401', async () => {
-    const res = await request(app).delete('/api/discover/passes');
-    expect(res.status).toBe(401);
-  });
-
-  it('(c) env 비활성 → 403 pass_reset_disabled', async () => {
-    envState.passResetEnabled = false;
-    const res = await request(app)
-      .delete('/api/discover/passes')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`);
-
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('pass_reset_disabled');
-    // 비활성 시 delete 쿼리 자체가 실행되지 않아야 함 (라우트 진입 전 차단)
-    expect(captured.deleteEqCalls).toHaveLength(0);
-  });
-
-  it('(d) like 행/매치 미삭제 보장 — delete 쿼리에 direction=pass eq 가 걸린다', async () => {
-    captured.deleteResult = { count: 3, error: null };
-    await request(app)
-      .delete('/api/discover/passes')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`);
-
-    const directionEq = captured.deleteEqCalls.find((c) => c.col === 'direction');
-    expect(directionEq).toBeDefined();
-    expect(directionEq!.val).toBe('pass');
-    // like 를 타겟하는 eq 는 절대 없어야 함
-    expect(captured.deleteEqCalls.some((c) => c.val === 'like')).toBe(false);
-  });
-
-  it('(e) IDOR 차단 — 본인 swiper_id 만 삭제', async () => {
-    captured.deleteResult = { count: 1, error: null };
-    await request(app)
-      .delete('/api/discover/passes')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`);
-
-    const swiperEq = captured.deleteEqCalls.find((c) => c.col === 'swiper_id');
-    expect(swiperEq).toBeDefined();
-    expect(swiperEq!.val).toBe(VIEWER);
-  });
-
-  it('(f) supabase delete error → 500 가시화 (silent-success 금지)', async () => {
-    captured.deleteResult = { count: 0, error: { message: 'db down' } };
-    const res = await request(app)
-      .delete('/api/discover/passes')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`);
-
-    expect(res.status).toBe(500);
-    expect(res.body.error).toBe('db down');
-  });
-});
-
-describe('POST /api/discover/swipe — 하루 like 예산 캡 + 면제', () => {
-  it('(1) non-reciprocal like → counts_toward_limit=true 저장 + 예산<15 통과', async () => {
+describe('POST /api/discover/swipe — 플레이리스트 대화 신청', () => {
+  it('like → source=playlist 로 기록, 한도 없음', async () => {
     captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
-    captured.budgetCount = { count: 5, error: null };
 
     const res = await request(app)
       .post('/api/discover/swipe?tz_offset_minutes=0')
@@ -380,20 +318,12 @@ describe('POST /api/discover/swipe — 하루 like 예산 캡 + 면제', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ direction: 'like', match: null });
-    // 예산 소모 like 는 swipe 시점에 counts_toward_limit=true 확정 저장.
-    expect(captured.swipeInsertPayload).not.toBeNull();
-    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(true);
-    // 캡 count 쿼리가 실제로 실행됐는지 (예산 소모 경로)
-    expect(captured.budgetCountEqs.length).toBeGreaterThan(0);
+    expect(captured.swipeInsertPayload).toMatchObject({ direction: 'like', source: 'playlist' });
   });
 
-  it('(2) reciprocal like → 캡 스킵 + counts_toward_limit=false + 매치 생성 (면제)', async () => {
+  it('상대가 이미 나를 like 했으면 매치 생성', async () => {
     captured.reciprocal = { data: { id: 'recip-1' }, error: null };
-    captured.budgetCount = { count: 99, error: null }; // 초과값 — 스킵돼야 함
-    captured.matchInsert = {
-      data: { id: 'match-1', user1_id: VIEWER, user2_id: SWIPED },
-      error: null,
-    };
+    captured.matchInsert = { data: { id: 'match-1', user1_id: VIEWER, user2_id: SWIPED }, error: null };
 
     const res = await request(app)
       .post('/api/discover/swipe?tz_offset_minutes=0')
@@ -401,158 +331,18 @@ describe('POST /api/discover/swipe — 하루 like 예산 캡 + 면제', () => {
       .send({ swiped_id: SWIPED, direction: 'like' });
 
     expect(res.status).toBe(200);
-    expect(res.body.match).toBeTruthy();
     expect(res.body.match.id).toBe('match-1');
-    // 매치 완성 like 는 예산 면제 → counts_toward_limit=false.
-    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(false);
-    // 캡 count 쿼리 자체가 실행되지 않음 (consumesBudget=false → 스킵).
-    expect(captured.budgetCountEqs).toHaveLength(0);
-  });
-
-  it('(3) 예산 소진(15) + non-reciprocal like → 429 daily_limit_reached', async () => {
-    captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
-    captured.budgetCount = { count: 15, error: null };
-
-    const res = await request(app)
-      .post('/api/discover/swipe?tz_offset_minutes=0')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
-      .send({ swiped_id: SWIPED, direction: 'like' });
-
-    expect(res.status).toBe(429);
-    expect(res.body.code).toBe('daily_limit_reached');
-    // 캡 초과 시 INSERT 는 실행되지 않아야 함.
-    expect(captured.swipeInsertPayload).toBeNull();
-  });
-
-  it('(3-1) 예산 소진 + 파트너 코드(화이트리스트) + 가입 30일 이내 → 캡 우회 200', async () => {
-    envState.unlimitedLikeCodes = ['HANIL'];
-    captured.referral = {
-      data: { referral_code: 'HANIL', created_at: new Date(Date.now() - 5 * 86_400_000).toISOString() },
-      error: null,
-    };
-    captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
-    captured.budgetCount = { count: 15, error: null };
-
-    const res = await request(app)
-      .post('/api/discover/swipe?tz_offset_minutes=0')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
-      .send({ swiped_id: SWIPED, direction: 'like' });
-
-    expect(res.status).toBe(200);
-    // 면제라도 non-reciprocal like 는 예산 카운트에 계속 기록된다 (계측 보존).
-    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(true);
-  });
-
-  it('(3-1a) 예산 소진 + 계정 화이트리스트 → 코드/기간 무관 캡 우회 200', async () => {
-    envState.unlimitedLikeUserIds = [VIEWER];
-    // referral_code 없음 + 가입 1년 경과라도 계정 면제가 우선.
-    captured.referral = {
-      data: { referral_code: null, created_at: new Date(Date.now() - 365 * 86_400_000).toISOString() },
-      error: null,
-    };
-    captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
-    captured.budgetCount = { count: 15, error: null };
-
-    const res = await request(app)
-      .post('/api/discover/swipe?tz_offset_minutes=0')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
-      .send({ swiped_id: SWIPED, direction: 'like' });
-
-    expect(res.status).toBe(200);
-    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(true);
-  });
-
-  it('(3-2) 화이트리스트 밖 코드는 면제 없음 → 429', async () => {
-    envState.unlimitedLikeCodes = ['HANIL'];
-    captured.referral = {
-      data: { referral_code: 'AAA', created_at: new Date().toISOString() }, // 임의 입력 코드
-      error: null,
-    };
-    captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
-    captured.budgetCount = { count: 15, error: null };
-
-    const res = await request(app)
-      .post('/api/discover/swipe?tz_offset_minutes=0')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
-      .send({ swiped_id: SWIPED, direction: 'like' });
-
-    expect(res.status).toBe(429);
-    expect(res.body.code).toBe('daily_limit_reached');
-  });
-
-  it('(3-3) 파트너 코드 보유라도 가입 30일 초과면 → 유예 종료 429', async () => {
-    envState.unlimitedLikeCodes = ['HANIL'];
-    captured.referral = {
-      data: { referral_code: 'HANIL', created_at: new Date(Date.now() - 31 * 86_400_000).toISOString() },
-      error: null,
-    };
-    captured.reciprocal = { data: null, error: { code: 'PGRST116', message: 'no rows' } };
-    captured.budgetCount = { count: 15, error: null };
-
-    const res = await request(app)
-      .post('/api/discover/swipe?tz_offset_minutes=0')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
-      .send({ swiped_id: SWIPED, direction: 'like' });
-
-    expect(res.status).toBe(429);
-    expect(res.body.code).toBe('daily_limit_reached');
-  });
-
-  it('(4) 예산 소진(15) + reciprocal like → 429 아님, 통과 + 매치 (면제가 캡 우회)', async () => {
-    captured.reciprocal = { data: { id: 'recip-1' }, error: null };
-    captured.budgetCount = { count: 15, error: null }; // 소진이지만 면제라 무관
-    captured.matchInsert = {
-      data: { id: 'match-2', user1_id: VIEWER, user2_id: SWIPED },
-      error: null,
-    };
-
-    const res = await request(app)
-      .post('/api/discover/swipe?tz_offset_minutes=0')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
-      .send({ swiped_id: SWIPED, direction: 'like' });
-
-    expect(res.status).toBe(200);
-    expect(res.body.match).toBeTruthy();
-    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(false);
-    expect(captured.budgetCountEqs).toHaveLength(0);
-  });
-
-  it('(5) pass → 캡 스킵 + counts_toward_limit=false (예산 15여도 통과)', async () => {
-    captured.budgetCount = { count: 15, error: null };
-
-    const res = await request(app)
-      .post('/api/discover/swipe?tz_offset_minutes=0')
-      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
-      .send({ swiped_id: SWIPED, direction: 'pass' });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ direction: 'pass', match: null });
-    expect(captured.swipeInsertPayload!.counts_toward_limit).toBe(false);
-    // pass 는 reciprocal 조회도 캡 count 도 실행 안 함.
-    expect(captured.budgetCountEqs).toHaveLength(0);
   });
 });
 
-describe('GET /api/discover/quota — 오늘 소모한 like 예산', () => {
-  it('(6) count 쿼리에 direction=like + counts_toward_limit=true eq 체인 + limit=env(15)', async () => {
-    captured.budgetCount = { count: 3, error: null };
-    captured.passCount = { count: 2, error: null };
-
+describe('GET /api/discover/quota', () => {
+  it('유료화 OFF 면 monetization_enabled 만', async () => {
     const res = await request(app)
       .get('/api/discover/quota?tz_offset_minutes=0')
       .set('Authorization', `Bearer ${authToken(VIEWER)}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.limit).toBe(15);
-    expect(res.body.count).toBe(3);
-    expect(res.body.remaining).toBe(12);
-
-    // 예산 count 가 캡과 동일 정의(direction='like' AND counts_toward_limit=true)로
-    // 세는지 — 정의 불일치("3/15인데 막힘") 구조적 차단 검증.
-    const eqs = captured.budgetCountEqs;
-    expect(eqs.find((e) => e.col === 'swiper_id')?.val).toBe(VIEWER);
-    expect(eqs.find((e) => e.col === 'direction')?.val).toBe('like');
-    expect(eqs.find((e) => e.col === 'counts_toward_limit')?.val).toBe(true);
+    expect(res.body).toEqual({ monetization_enabled: false });
   });
 });
 
@@ -567,30 +357,22 @@ describe('POST /api/discover/swipe — 별사탕 유료화 ON (mig 059)', () => 
     envState.monetizationEnabled = true;
   });
 
-  it('탐색 탭 좋아요는 즉시 매치여도 좋아요 예산을 쓴다 (탭 기준)', async () => {
-    captured.reciprocal = { data: { id: 'recip-1' }, error: null };
-    captured.matchInsert = { data: { id: 'm1', user1_id: VIEWER, user2_id: SWIPED }, error: null };
+  it.each([
+    ['오늘 플레이리스트에 없는 상대', () => { captured.member = { data: [], error: null }; }],
+    ['오늘 연 플레이리스트가 없음 (자정 지남)', () => { captured.todayPlaylists = { data: [], error: null }; }],
+  ])('%s → 403 not_in_playlist, 기록 없음', async (_label, arrange) => {
+    arrange();
 
     const res = await swipe({ direction: 'like' });
 
-    expect(res.status).toBe(200);
-    expect(captured.swipeInsertPayload).toMatchObject({ counts_toward_limit: true, source: 'discover' });
-  });
-
-  it('탐색 카드 10장을 다 쓰면 429 daily_card_limit', async () => {
-    captured.cardCount = { count: 10, error: null };
-
-    const res = await swipe({ direction: 'pass' });
-
-    expect(res.status).toBe(429);
-    expect(res.body.code).toBe('daily_card_limit');
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('not_in_playlist');
     expect(captured.swipeInsertPayload).toBeNull();
   });
 
-  it('받은 좋아요 탭 좋아요 — 미공개 + 무료 카드도 없으면 403 like_not_revealed', async () => {
+  it('받은 좋아요 탭 좋아요 — 공개 안 했으면 403 like_not_revealed (무료 카드가 있어도)', async () => {
     captured.reciprocal = { data: { id: 'recip-1' }, error: null };
     captured.reveal = { data: null, error: null };
-    captured.lastFree = { data: [{ revealed_at: new Date(Date.now() - 3600_000).toISOString() }], error: null };
 
     const res = await swipe({ direction: 'like', source: 'likes' });
 
@@ -598,30 +380,17 @@ describe('POST /api/discover/swipe — 별사탕 유료화 ON (mig 059)', () => 
     expect(res.body.code).toBe('like_not_revealed');
   });
 
-  it('받은 좋아요 탭 좋아요 — 공개했으면 카드·좋아요 면제 (카드 한도 초과여도 통과)', async () => {
+  it('받은 좋아요 탭 좋아요 — 공개했으면 매치', async () => {
     captured.reciprocal = { data: { id: 'recip-1' }, error: null };
     captured.reveal = { data: { liker_id: SWIPED }, error: null };
-    captured.cardCount = { count: 99, error: null };
-    captured.budgetCount = { count: 99, error: null };
     captured.matchInsert = { data: { id: 'm1', user1_id: VIEWER, user2_id: SWIPED }, error: null };
 
     const res = await swipe({ direction: 'like', source: 'likes' });
 
     expect(res.status).toBe(200);
-    expect(captured.swipeInsertPayload).toMatchObject({ counts_toward_limit: false, source: 'likes' });
+    expect(res.body.match.id).toBe('m1');
+    expect(captured.swipeInsertPayload).toMatchObject({ source: 'likes' });
     expect(captured.revealInsertPayload).toBeNull();
-  });
-
-  it.each(['like', 'pass'] as const)('받은 좋아요 탭 무료 카드 — %s 로 넘기는 순간 사용 기록', async (direction) => {
-    if (direction === 'like') {
-      captured.reciprocal = { data: { id: 'recip-1' }, error: null };
-      captured.matchInsert = { data: { id: 'm1', user1_id: VIEWER, user2_id: SWIPED }, error: null };
-    }
-
-    const res = await swipe({ direction, source: 'likes' });
-
-    expect(res.status).toBe(200);
-    expect(captured.revealInsertPayload).toEqual({ viewer_id: VIEWER, liker_id: SWIPED, paid: false });
   });
 
   it.each([
@@ -630,10 +399,9 @@ describe('POST /api/discover/swipe — 별사탕 유료화 ON (mig 059)', () => 
     ['차단', () => { captured.blocks = { data: [{ blocker_id: SWIPED }], error: null }; }],
   ])('%s 상대 — 기록·차감·매치·무료 카드 사용 없이 넘어간다', async (_label, arrange) => {
     arrange();
-    captured.budgetCount = { count: 99, error: null };
     captured.reciprocal = { data: { id: 'recip-1' }, error: null };
 
-    const res = await swipe({ direction: 'like', source: 'likes', pay_with_stars: true });
+    const res = await swipe({ direction: 'like', source: 'likes' });
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ direction: 'like', match: null, skipped: true });
@@ -642,63 +410,14 @@ describe('POST /api/discover/swipe — 별사탕 유료화 ON (mig 059)', () => 
     expect(captured.rpcCalls.some((c) => c.name === 'spend_stars')).toBe(false);
   });
 
-  it('받은 좋아요 탭에서 넘기면 next_card_id 를 맨 앞 카드로 고정', async () => {
-    const next = '33333333-3333-4333-8333-333333333333';
-
-    const res = await swipe({ direction: 'pass', source: 'likes', next_card_id: next });
-
-    expect(res.status).toBe(200);
-    expect(captured.pinUpsertPayload).toMatchObject({ viewer_id: VIEWER, liker_id: next });
-  });
-
-  it('무료 카드는 넘기고 24시간이 지나야 다시 쓸 수 있다', async () => {
-    captured.reciprocal = { data: { id: 'recip-1' }, error: null };
-    captured.matchInsert = { data: { id: 'm1', user1_id: VIEWER, user2_id: SWIPED }, error: null };
-    captured.lastFree = { data: [{ revealed_at: new Date(Date.now() - 25 * 3600_000).toISOString() }], error: null };
-
-    const res = await swipe({ direction: 'like', source: 'likes' });
-
-    expect(res.status).toBe(200);
-    expect(captured.revealInsertPayload).toMatchObject({ paid: false });
-  });
-
-  it('좋아요 한도 초과 — 별사탕 확인 없으면 429, 확인하면 1개 차감 후 저장', async () => {
-    captured.budgetCount = { count: 15, error: null };
-
-    const blocked = await swipe({ direction: 'like' });
-    expect(blocked.status).toBe(429);
-    expect(blocked.body.code).toBe('daily_limit_reached');
-    expect(captured.rpcCalls.some((c) => c.name === 'spend_stars')).toBe(false);
-
-    const paid = await swipe({ direction: 'like', pay_with_stars: true });
-    expect(paid.status).toBe(200);
-    expect(captured.rpcCalls).toContainEqual({
-      name: 'spend_stars',
-      args: { p_user: VIEWER, p_amount: 1, p_kind: 'like' },
-    });
-    expect(captured.swipeInsertPayload).not.toBeNull();
-  });
-
-  it('별사탕 부족 → 402 insufficient_stars, 스와이프는 기록 안 됨', async () => {
-    captured.budgetCount = { count: 15, error: null };
-    captured.spend = { data: null, error: { message: 'insufficient_stars' } };
-
-    const res = await swipe({ direction: 'like', pay_with_stars: true });
-
-    expect(res.status).toBe(402);
-    expect(res.body.code).toBe('insufficient_stars');
-    expect(captured.swipeInsertPayload).toBeNull();
-  });
-
-  it('다시보기 카드 — 기존 행을 갱신하고 카드 한도를 보지 않는다', async () => {
+  it('다시보기로 돌아온 사람 — 기존 행을 갱신한다', async () => {
     captured.existing = { data: { id: 'row-1', reset_at: '2026-10-01T00:00:00Z' }, error: null };
-    captured.cardCount = { count: 99, error: null };
 
-    const res = await swipe({ direction: 'pass' });
+    const res = await swipe({ direction: 'like' });
 
     expect(res.status).toBe(200);
     expect(captured.swipeInsertPayload).toBeNull();
-    expect(captured.swipeUpdatePayload).toMatchObject({ source: 'recycled', reset_at: null });
+    expect(captured.swipeUpdatePayload).toMatchObject({ source: 'playlist', reset_at: null });
   });
 
   it('이미 스와이프한 사람 (reset 안 됨) → 409', async () => {
@@ -737,46 +456,64 @@ describe('applyPrefFilters — 나이 상한 (FE 라벨 `40+` 정합)', () => {
   });
 });
 
-describe('splitLikeCards — 받은 좋아요 맨 앞 카드 고정', () => {
-  const [a, b, c] = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
-  const ids = (rows: { id: string }[]) => rows.map((r) => r.id);
+describe('POST /api/discover/likes-received/reveal — 무료 카드', () => {
+  const reveal = (body: Record<string, unknown>) =>
+    request(app)
+      .post('/api/discover/likes-received/reveal')
+      .set('Authorization', `Bearer ${authToken(VIEWER)}`)
+      .send({ liker_id: SWIPED, ...body });
 
-  it('고정 없음 + 무료 카드 — 맨 앞이 무료, 다음이 잠김, 맨 앞을 고정', () => {
-    const r = splitLikeCards([a, b, c], new Set(), true, null);
-    expect(ids(r.visible)).toEqual(['a']);
-    expect(r.locked?.id).toBe('b');
-    expect(r.pin).toBe('a');
+  beforeEach(() => {
+    envState.monetizationEnabled = true;
+    captured.reciprocal = { data: { id: 'like-1' }, error: null }; // 상대가 나를 like
   });
 
-  it('점수 높은 새 좋아요가 와도 고정된 잠긴 카드가 맨 앞에 남는다', () => {
-    const r = splitLikeCards([c, a, b], new Set(), false, 'b');
-    expect(r.visible).toEqual([]);
-    expect(r.locked?.id).toBe('b');
-    expect(r.pin).toBe('b');
+  it('무료 기회가 있으면 차감 없이 paid=false 로 공개 기록', async () => {
+    const res = await reveal({ free: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ revealed: true });
+    expect(captured.revealInsertPayload).toEqual({ viewer_id: VIEWER, liker_id: SWIPED, paid: false });
+    expect(captured.rpcCalls.some((c) => c.name === 'reveal_like')).toBe(false);
   });
 
-  it('기다렸다 무료로 열리면 고정된 그 카드가 무료 카드가 된다', () => {
-    const r = splitLikeCards([c, a, b], new Set(), true, 'b');
-    expect(ids(r.visible)).toEqual(['b']);
-    expect(r.locked?.id).toBe('c');
+  it('24시간 안에 무료 카드를 이미 봤으면 409 free_unavailable, 기록 없음', async () => {
+    captured.lastFree = { data: [{ revealed_at: new Date(Date.now() - 3600_000).toISOString() }], error: null };
+
+    const res = await reveal({ free: true });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('free_unavailable');
+    expect(captured.revealInsertPayload).toBeNull();
+  });
+});
+
+describe('splitLikeCards — 받은 좋아요 카드 순서', () => {
+  const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }]; // 점수순
+
+  it('공개한 카드는 공개(본) 시각 순, 맨 끝은 점수 1위 미공개자', () => {
+    const at = new Map([
+      ['c', '2026-11-09T10:00:00Z'],
+      ['a', '2026-11-09T12:00:00Z'],
+    ]);
+    const { visible, locked } = splitLikeCards(rows, at, null);
+    expect(visible.map((r) => r.id)).toEqual(['c', 'a']);
+    expect(locked?.id).toBe('b');
   });
 
-  it('별사탕으로 열고 아직 안 넘겼으면 다음 카드를 고정하지 않는다', () => {
-    const r = splitLikeCards([a, b, c], new Set(['b']), false, 'b');
-    expect(ids(r.visible)).toEqual(['b']);
-    expect(r.locked?.id).toBe('a');
-    expect(r.pin).toBeNull();
+  it('고정된 잠긴 카드는 점수 높은 새 좋아요가 와도 그대로', () => {
+    const { locked } = splitLikeCards(rows, new Map(), 'c');
+    expect(locked?.id).toBe('c');
   });
 
-  it('고정된 카드가 넘겨져 목록에서 빠지면 그때 맨 앞을 새로 고정한다', () => {
-    const r = splitLikeCards([a, c], new Set(), false, 'b');
-    expect(r.locked?.id).toBe('a');
-    expect(r.pin).toBe('a');
+  it('고정된 카드가 공개되면 다음 미공개자가 잠긴 카드', () => {
+    const { visible, locked } = splitLikeCards(rows, new Map([['c', '2026-11-09T10:00:00Z']]), 'c');
+    expect(visible.map((r) => r.id)).toEqual(['c']);
+    expect(locked?.id).toBe('a');
   });
 
-  it('공개한 카드 뒤에 무료 카드는 1장뿐', () => {
-    const r = splitLikeCards([a, b, c], new Set(['a']), true, null);
-    expect(ids(r.visible)).toEqual(['a', 'b']);
-    expect(r.locked?.id).toBe('c');
+  it('모두 공개했으면 잠긴 카드 없음', () => {
+    const all = new Map(rows.map((r, i) => [r.id, `2026-11-09T1${i}:00:00Z`]));
+    expect(splitLikeCards(rows, all, null).locked).toBeNull();
   });
 });

@@ -1,16 +1,13 @@
 // 별사탕 정책 상수 — _workspace/monetization/decisions.md 와 동일하게 유지.
 // FE 표시 문구(i18n)도 이 숫자를 쓰므로 바꿀 때 같이 고친다.
 
-export const CARD_DAILY_FREE = 10;
 export const CARD_RESET_COST = 4;
 export const CARD_RESET_AMOUNT = 10;
 
-// 카드 n장 추가 가격. 10장에 4개 비율로 올림한다 (1~2장 1개, 3~5장 2개, 6~7장 3개, 8~10장 4개).
+// 탐색 플레이리스트 n곡 가격 (첫 플레이리스트는 무료). 10장에 4개 비율로 올림한다 (1~2장 1개, 3~5장 2개, 6~7장 3개, 8~10장 4개).
 export function cardResetCost(cards: number): number {
   return Math.ceil((cards * CARD_RESET_COST) / CARD_RESET_AMOUNT);
 }
-
-export const LIKE_STAR_COST = 1;
 
 export const REVEAL_STAR_COST = 2;
 export const REVEAL_FREE_INTERVAL_MS = 24 * 60 * 60 * 1000;

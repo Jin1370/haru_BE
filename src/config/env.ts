@@ -91,44 +91,7 @@ export const env = {
     companyLocation: process.env.GCP_LOCATION || 'us-central1',
   },
 
-  // 디스커버 "지나친 카드 다시 보기" (pass 스와이프 리셋) 일몰 게이트.
-  // viewer 의 direction='pass' 스와이프 행을 일괄 삭제해 pass 했던 후보를 다시
-  // 디스커버 풀에 등장시키는 베타 풀-고갈 탈출구 (strategist C2). 베타 기본 ON,
-  // 유저 스케일 임계 도달 시 코드 배포 없이 false 로 끈다 — 1000명+ 규모에선
-  // "거절한 상대 재노출" 이 데이팅앱 표준 UX 위반이라 일몰 대상.
-  // 비활성 시 DELETE /api/discover/passes 는 403 + code:'pass_reset_disabled',
-  // GET /quota 의 pass_reset_enabled 플래그도 false → FE 가 버튼을 숨긴다.
-  // admin.dashboardEnabled 게이트 패턴 재사용. 기본값 ON (미설정 시 활성).
   discover: {
-    passResetEnabled: process.env.DISCOVER_PASS_RESET_ENABLED !== 'false',
-    // 하루 non-reciprocal(매치 미완성) like 예산. GET /quota 의 count/limit/remaining
-    // 과 POST /swipe 의 하드 캡이 이 값을 공유한다. 매치를 완성하는 like(받은 좋아요
-    // 수락 / 디스커버 즉시매치)와 pass 는 예산에서 면제 — swipes.counts_toward_limit
-    // 컬럼(mig 041)이 swipe 시점에 소모 여부를 확정 저장한다. 튜닝 가능 (텔레메트리
-    // 수집 후 조정 — strategist 후속 P1). min=1 max=1000 zod 검증.
-    dailyLikeLimit: z.coerce.number().int().min(1).max(1000).default(15)
-      .parse(process.env.DAILY_LIKE_LIMIT),
-    // like 예산 면제 파트너 코드 (한일교류회 등). 가입 시 입력한 profiles.referral_code
-    // 가 이 목록에 있으면 일일 like 캡을 우회한다. `referral_code IS NOT NULL` 로
-    // 열지 않는 이유: 스키마가 임의 영숫자 40자를 통과시켜(화이트리스트 없음) 아무
-    // 문자열이나 입력하면 특권을 얻는다. env 목록이라 파트너 추가는 시크릿 갱신만
-    // (재배포 불필요). 미설정 = 빈 배열 = 아무도 면제 없음(안전 기본값).
-    unlimitedLikeCodes: (process.env.UNLIMITED_LIKE_CODES ?? '')
-      .split(',')
-      .map((c) => c.trim().toUpperCase())
-      .filter(Boolean),
-    // 파트너 코드 면제가 지속되는 기간(일). profiles.created_at(가입 시점) 기준으로
-    // 이 기간이 지나면 일반 사용자와 동일한 캡이 적용된다. 기간 제한을 사실상 없애려면
-    // 큰 값(365)을 넣는다. 코드 미보유자에게는 이 값과 무관하게 항상 캡이 적용된다.
-    unlimitedLikeCodeDays: z.coerce.number().int().min(1).max(365).default(30)
-      .parse(process.env.UNLIMITED_LIKE_CODE_DAYS),
-    // 계정 단위 like 캡 면제 (운영/테스터 계정). profiles.id(UUID) 목록.
-    // 코드 경로와 달리 기간 제한 없음 — 시크릿에서 빼면 즉시 일반 캡으로 복귀.
-    // DB 조회 없이 판정되므로 hasUnlimitedLikes 최상단에서 short-circuit.
-    unlimitedLikeUserIds: (process.env.UNLIMITED_LIKE_USER_IDS ?? '')
-      .split(',')
-      .map((id) => id.trim())
-      .filter(Boolean),
     // 섀도우 숨김 (shadow hide). 이 목록의 profiles.id 는 디스커버/받은 좋아요에서
     // 아무에게도 노출되지 않고, 이들이 보낸 like 는 "좋아요 왔다" 푸시도 발생시키지
     // 않는다. 당사자 쪽은 완전히 평소와 동일 — freeze(403 모달)/is_active=false 와

@@ -763,21 +763,11 @@ export const swaggerDocument = {
     },
 
     // ── Discover / Swipe ──
-    '/api/discover': {
-      get: {
-        tags: ['Discover'],
-        summary: '매칭 후보 목록 (스와이프/차단 유저 제외, 선호도 필터 적용)',
-        parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer', default: 10, maximum: 50 } }],
-        responses: {
-          200: { description: '후보 목록', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/ProfileCandidate' } } } } },
-        },
-      },
-    },
     '/api/discover/likes-received': {
       get: {
         tags: ['Discover'],
         summary: '받은 좋아요 목록 (나를 like 한 사용자 중 미스와이프·비차단 후보)',
-        description: '응답 shape 은 /api/discover 와 동일 (사진 1장, photo_access 잠금, voice intro 시청자 언어 슬롯 미러). 정렬은 (tier ASC, like 시각 DESC). 최신 300 개 좋아요만 스캔(서버측 상한).',
+        description: '응답 shape 은 탐색 플레이리스트 카드와 동일 (사진 1장, photo_access 잠금, voice intro 시청자 언어 슬롯 미러). 정렬은 (tier ASC, like 시각 DESC). 최신 300 개 좋아요만 스캔(서버측 상한).',
         responses: {
           200: { description: '받은 좋아요 목록', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/ProfileCandidate' } } } } },
         },
@@ -787,82 +777,98 @@ export const swaggerDocument = {
       post: {
         tags: ['Discover'],
         summary: '스와이프 (like/pass). 상호 like 시 매치 자동 생성',
-        description: '하루 like 예산 하드 캡 적용 (DAILY_LIKE_LIMIT, 기본 15). 예산은 non-reciprocal(매치 미완성) like 만 소모 — 매치를 완성하는 like(받은 좋아요 수락 / 상대가 이미 나를 like 한 즉시매치)와 pass 는 면제(캡·카운트 both 우회). 예산 소모 여부는 swipes.counts_toward_limit 컬럼(mig 041)에 swipe 시점 확정 저장되어 GET /quota 의 count 와 동일 정의를 공유한다.',
+        description: '좋아요(대화 신청)는 한도 없음. source=playlist(기본): 오늘 내 탐색 플레이리스트에 든 상대만 (아니면 403 not_in_playlist). source=likes: 받은 좋아요 탭 — 유료화 ON 이면 (상대가 나를 like) AND (공개함) 이어야 함 (아니면 403 like_not_revealed). 상대가 탈퇴·정지·숨김·차단이면 기록 없이 skipped=true (별사탕으로 공개한 받은 좋아요 카드에 좋아요했으면 공개에 쓴 별사탕을 refunded_stars 로 돌려줌).',
         parameters: [
           {
             name: 'tz_offset_minutes',
             in: 'query',
             schema: { type: 'integer', minimum: -840, maximum: 840, default: 0 },
-            description: '서버측 like 예산 하드 캡의 로컬 자정 경계 계산용 (Date#getTimezoneOffset() 의미: UTC-local 분). 미전달 시 0(UTC) 폴백.',
+            description: 'source=playlist 의 오늘 플레이리스트 판정용 로컬 자정 경계 (Date#getTimezoneOffset() 의미: UTC-local 분). 미전달 시 0(UTC).',
           },
         ],
         requestBody: {
           required: true,
           content: {
             'application/json': {
-              schema: { type: 'object', required: ['swiped_id', 'direction'], properties: { swiped_id: { type: 'string', format: 'uuid' }, direction: { type: 'string', enum: ['like', 'pass'] }, next_card_id: { type: 'string', format: 'uuid', description: '받은 좋아요 탭: 넘긴 직후 화면에 나올 잠긴 카드. 맨 앞 카드로 고정' }, source: { type: 'string', enum: ['discover', 'likes'], default: 'discover', description: '유료화 ON: likes(받은 좋아요 탭) 면 카드·좋아요 면제 — 서버가 (상대가 나를 like) AND (공개함 OR 무료 카드 사용 가능) 확인, 아니면 403 like_not_revealed. 공개 기록이 없는 카드를 넘기면 무료 카드를 쓴 것으로 기록' }, pay_with_stars: { type: 'boolean', default: false, description: '유료화 ON: 좋아요 한도 초과 시 별사탕 1개로 보내기 (사용자 확인 후에만 true)' } } },
+              schema: { type: 'object', required: ['swiped_id', 'direction'], properties: { swiped_id: { type: 'string', format: 'uuid' }, direction: { type: 'string', enum: ['like', 'pass'] }, source: { type: 'string', enum: ['likes', 'playlist'], default: 'playlist' } } },
             },
           },
         },
         responses: {
-          200: { description: '스와이프 완료', content: { 'application/json': { schema: { type: 'object', properties: { direction: { type: 'string' }, match: { $ref: '#/components/schemas/Match', nullable: true } } } } } },
+          200: { description: '스와이프 완료', content: { 'application/json': { schema: { type: 'object', properties: { direction: { type: 'string' }, match: { $ref: '#/components/schemas/Match', nullable: true }, skipped: { type: 'boolean', description: '상대가 탈퇴·정지·숨김·차단 상태라 기록·차감·매치 없이 넘김' }, refunded_stars: { type: 'integer', description: 'skipped 이고 받은 좋아요 탭에서 별사탕으로 공개한 카드에 좋아요한 경우, 공개에 쓴 별사탕을 쓴 그대로(무료·유료) 돌려준 개수. 공개도 취소된다' } } } } } },
           400: { description: '파라미터 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
           409: { description: '이미 스와이프함', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          429: { description: '일일 like 예산(DAILY_LIKE_LIMIT, 기본 15) 도달 — 서버측 하드 캡. 매치 완성 like·pass 는 미적용(면제). 파트너 초대코드 가입자(profiles.referral_code ∈ UNLIMITED_LIKE_CODES)는 가입 후 UNLIMITED_LIKE_CODE_DAYS(기본 30일) 동안 캡 우회 — 이 기간 중 GET /quota 의 limit 이 999999 로 내려가고, 기간이 지나면 일반 사용자와 동일한 캡으로 복귀한다.', content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string', example: 'Daily like limit reached' }, code: { type: 'string', example: 'daily_limit_reached' } }, required: ['error', 'code'] } } } },
         },
       },
     },
     '/api/discover/quota': {
       get: {
         tags: ['Discover'],
-        summary: '디스커버 일일 like 예산 (오늘 소모한 non-reciprocal like 수)',
-        description: 'swipes 테이블이 source of truth. 기기 간 동기화용. count/limit/remaining = 오늘 소모한 like 예산 / 한도(DAILY_LIKE_LIMIT, 기본 15) / 잔여. 총 스와이프 수가 아니라 counts_toward_limit=true(non-reciprocal) like 만 카운트 — 매치 완성 like·pass 는 면제. POST /swipe 하드 캡과 동일 정의(mig 041 컬럼 공유). pass_reset_enabled 는 "넘긴 사람 다시 보기" 버튼 노출 여부 게이트(DISCOVER_PASS_RESET_ENABLED env).',
-        parameters: [
-          { name: 'tz_offset_minutes', in: 'query', schema: { type: 'integer', minimum: -840, maximum: 840, default: 0 }, description: '로컬 자정 경계 계산용 (Date#getTimezoneOffset() 의미). 미전달 시 0(UTC).' },
-        ],
+        summary: '별사탕 잔액·받은 좋아요 무료 카드 타이머·광고 남은 횟수',
         responses: {
           200: {
-            description: '일일 카운트',
+            description: '유료화 상태',
             content: { 'application/json': { schema: { type: 'object', properties: {
-              count: { type: 'integer', example: 3, description: '오늘 로컬 자정 이후 소모한 like 예산(non-reciprocal like 수)' },
-              limit: { type: 'integer', example: 15, description: 'DAILY_LIKE_LIMIT env 값' },
-              remaining: { type: 'integer', example: 12, description: 'max(0, limit - count)' },
-              date: { type: 'string', example: '2026-06-03' },
-              pass_reset_enabled: { type: 'boolean', description: 'pass 리셋 라우트 활성 여부. false 면 FE 가 "넘긴 사람 다시 보기" 버튼 숨김.' },
-              monetization_enabled: { type: 'boolean', description: 'MONETIZATION_ENABLED. true 일 때만 아래 별사탕 필드가 온다.' },
+              monetization_enabled: { type: 'boolean', description: 'MONETIZATION_ENABLED. true 일 때만 아래 필드가 온다.' },
               stars: { type: 'object', properties: { free: { type: 'integer' }, paid: { type: 'integer' }, total: { type: 'integer' } } },
-              cards: { type: 'object', properties: { used: { type: 'integer' }, limit: { type: 'integer' } }, description: '오늘 탐색 카드 사용/한도 (화면 비표시, 잠금·타이머 판단용)' },
-              next_free_reveal_at: { type: 'string', format: 'date-time', nullable: true, description: 'null = 지금 무료 카드 사용 가능. 무료 카드를 넘긴 시각 + 24시간' },
+              next_free_reveal_at: { type: 'string', format: 'date-time', nullable: true, description: 'null = 지금 무료 카드 사용 가능. 마지막 무료 카드를 본 시각 + 24시간' },
               ads_remaining: { type: 'integer', description: '오늘(KST) 남은 광고 보상 횟수' },
-            }, required: ['count', 'limit', 'remaining', 'date', 'pass_reset_enabled'] } } },
+            }, required: ['monetization_enabled'] } } },
           },
         },
       },
     },
-    '/api/discover/passes': {
-      delete: {
+    '/api/discover/playlists': {
+      get: {
         tags: ['Discover'],
-        summary: '지나친 카드 다시 보기 — 본인 pass 스와이프 행 일괄 삭제',
-        description: 'viewer 의 direction=pass 스와이프 행을 일괄 삭제해 pass 했던 후보를 디스커버 풀에 재등장시킨다. like 행·매치 무변경. 차단 상대는 blocks 양방향 필터로 계속 제외. DISCOVER_PASS_RESET_ENABLED=false 시 403.',
+        summary: '오늘의 탐색 플레이리스트 3칸',
+        description: '하루 3개(사용자 로컬 날짜). 처음 여는 1개 무료, 나머지는 장수 비례 별사탕 (유료화 OFF 면 1개만 — 고른 뒤엔 그 칸만 내려주고, 두 번째 열기는 409 playlist_limit). 지난 날짜 플레이리스트는 이 호출에서 남은 카드를 pass 로 기록하고 지운다. 안 연 칸의 price = 지금 열면 낼 별사탕 (0 = 무료). available_count = 지금 열면 담길 곡 수 (0~10).',
+        parameters: [{ name: 'tz_offset_minutes', in: 'query', required: true, schema: { type: 'integer' } }],
         responses: {
-          200: { description: '리셋 완료', content: { 'application/json': { schema: { type: 'object', properties: { reset_count: { type: 'integer', example: 7, description: '삭제된 pass 행 수' } }, required: ['reset_count'] } } } },
-          401: { description: '미인증', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          403: { description: '계정 freeze 또는 pass 리셋 비활성', content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string' }, code: { type: 'string', enum: ['account_frozen', 'pass_reset_disabled'] } }, required: ['error', 'code'] } } } },
-          500: { description: '삭제 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          200: { description: '플레이리스트 상태', content: { 'application/json': { schema: { type: 'object', properties: { available_count: { type: 'integer' }, playlists: { type: 'array', items: { type: 'object', properties: { idx: { type: 'integer' }, opened: { type: 'boolean' }, count: { type: 'integer', description: '열린 칸의 곡 수' }, price: { type: 'integer', description: '안 연 칸의 가격' } } } } } } } } },
         },
       },
     },
-    '/api/discover/card-reset': {
+    '/api/discover/playlists/{idx}': {
+      get: {
+        tags: ['Discover'],
+        summary: '오늘 연 플레이리스트의 카드',
+        description: '탐색 카드와 같은 모양 + requested(이미 대화 신청함). 그사이 탈퇴·정지·숨김·차단된 사람은 빠진다.',
+        parameters: [
+          { name: 'idx', in: 'path', required: true, schema: { type: 'integer', minimum: 0, maximum: 2 } },
+          { name: 'tz_offset_minutes', in: 'query', required: true, schema: { type: 'integer' } },
+        ],
+        responses: { 200: { description: '{ idx, cards }' }, 404: { description: '오늘 열지 않은 칸 (playlist_not_opened)' } },
+      },
+    },
+    '/api/discover/playlists/{idx}/seen': {
       post: {
         tags: ['Discover'],
-        summary: '[별사탕] 탐색 카드 n장 구매',
-        description: 'MONETIZATION_ENABLED 일 때만. 가격은 10장에 4개 비율로 올림 (1~2장 1개, 3~5장 2개, 6~7장 3개, 8~10장 4개). 오늘 카드 한도 = 무료 10 + 오늘 구매한 장수.',
-        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['cards'], properties: { cards: { type: 'integer', minimum: 1, maximum: 10 } } } } } },
+        summary: '플레이리스트에서 처음 화면에 나온 카드 기록',
+        description: '자정 뒤 처음 조회할 때 본 카드 중 대화 신청 안 한 카드만 pass 로 기록하고, 안 본 카드의 사람은 다시 후보로 돌아간다. 같은 카드를 다시 보내도 결과가 같다.',
+        parameters: [
+          { name: 'idx', in: 'path', required: true, schema: { type: 'integer', minimum: 0, maximum: 2 } },
+          { name: 'tz_offset_minutes', in: 'query', required: true, schema: { type: 'integer' } },
+        ],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['candidate_ids'], properties: { candidate_ids: { type: 'array', items: { type: 'string', format: 'uuid' } } } } } } },
+        responses: { 200: { description: '{ ok: true }' }, 404: { description: '오늘 열지 않은 칸 (playlist_not_opened)' } },
+      },
+    },
+    '/api/discover/playlists/{idx}/open': {
+      post: {
+        tags: ['Discover'],
+        summary: '플레이리스트 열기 (첫 칸 무료, 나머지 별사탕)',
+        description: '점수순 다음 최대 10명(+그날 첫 칸에 캠페인 봇)을 고정한다. 이미 연 칸이면 차감 없이 그 카드를 돌려준다. expected_count 보다 곡 수가 적거나 0이면 차감 없이 409 cards_changed.',
+        parameters: [
+          { name: 'idx', in: 'path', required: true, schema: { type: 'integer', minimum: 0, maximum: 2 } },
+          { name: 'tz_offset_minutes', in: 'query', required: true, schema: { type: 'integer' } },
+        ],
+        requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { expected_count: { type: 'integer', minimum: 1, maximum: 10 } } } } } },
         responses: {
-          200: { description: '차감 완료', content: { 'application/json': { schema: { type: 'object', properties: { stars_total: { type: 'integer' } } } } } },
-          402: { description: '별사탕 부족 (code: insufficient_stars)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
-          403: { description: '유료화 OFF (monetization_disabled) 또는 freeze', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          200: { description: '{ idx, cards }' },
+          402: { description: 'insufficient_stars' },
+          409: { description: 'cards_changed (+available_count) / playlist_changed (다른 기기에서 첫 칸을 열어 무료가 아니게 됨) / playlist_limit (유료화 OFF 에서 두 번째 칸)' },
         },
       },
     },
@@ -870,8 +876,8 @@ export const swaggerDocument = {
       post: {
         tags: ['Discover'],
         summary: '[별사탕] 받은 좋아요 1명 공개',
-        description: '별사탕 2개로 잠긴 카드 공개. 상대가 탈퇴·정지·차단됐거나 좋아요가 없으면 차감 없이 revealed=false. 무료 카드는 이 라우트 없이 일반 카드로 내려온다. 공개 후 GET /likes-received 를 다시 부르면 일반 카드로 내려온다. 유료화 ON 의 GET /likes-received 는 공개한 사람 + 첫 미공개자 1명(locked=true, 블러 사진·가짜 텍스트)만 반환.',
-        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['liker_id'], properties: { liker_id: { type: 'string', format: 'uuid' } } } } } },
+        description: '별사탕 2개로 잠긴 카드 공개, 또는 free=true 면 무료 카드(24시간에 1장 — 없으면 409 free_unavailable). 무료 카드는 FE 가 잠긴 카드를 화면에 띄우는 순간 부른다. 상대가 탈퇴·정지·차단됐거나 좋아요가 없으면 차감 없이 revealed=false. 유료화 ON 의 GET /likes-received 는 공개한 사람(공개 순) + 맨 끝 잠긴 카드 1장(locked=true, 무료 카드가 있으면 free_available=true)만 반환.',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['liker_id'], properties: { liker_id: { type: 'string', format: 'uuid' }, free: { type: 'boolean', default: false } } } } } },
         responses: {
           200: { description: '공개됨', content: { 'application/json': { schema: { type: 'object', properties: { revealed: { type: 'boolean' } } } } } },
           402: { description: 'insufficient_stars', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },

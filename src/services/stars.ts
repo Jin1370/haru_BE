@@ -17,32 +17,54 @@ export async function getStarBalance(userId: string): Promise<StarBalance> {
   return { free: row?.free ?? 0, paid: row?.paid ?? 0 };
 }
 
-// 잔액 확인과 차감을 DB 함수 한 번으로 (advisory lock). 남은 총 잔액 반환.
-export async function spendStars(userId: string, amount: number, kind: string): Promise<number> {
-  const { data, error } = await supabase.rpc('spend_stars', {
-    p_user: userId,
-    p_amount: amount,
-    p_kind: kind,
-  });
-  if (error) {
-    if (error.message.includes('insufficient_stars')) throw new InsufficientStarsError();
-    throw new Error(`spend_stars: ${error.message}`);
-  }
-  return data as number;
-}
-
-// 탐색 카드 구매. 차감과 구매 기록을 한 트랜잭션으로 처리한다 (mig 060).
-export async function buyCards(userId: string, cards: number, stars: number): Promise<number> {
-  const { data, error } = await supabase.rpc('buy_cards', {
-    p_user: userId,
-    p_cards: cards,
+// 받은 좋아요 유료 공개. 차감과 공개 기록(무료·유료 차감 개수 포함)을 한 트랜잭션으로
+// 처리한다 (mig 062). 이미 공개됐으면(연타) 차감 없이 false.
+export async function revealLike(viewerId: string, likerId: string, stars: number): Promise<boolean> {
+  const { error } = await supabase.rpc('reveal_like', {
+    p_viewer: viewerId,
+    p_liker: likerId,
     p_stars: stars,
   });
-  if (error) {
-    if (error.message.includes('insufficient_stars')) throw new InsufficientStarsError();
-    throw new Error(`buy_cards: ${error.message}`);
+  if (!error) return true;
+  if (error.code === '23505') return false;
+  if (error.message.includes('insufficient_stars')) throw new InsufficientStarsError();
+  throw new Error(`reveal_like: ${error.message}`);
+}
+
+// 유료 공개를 쓴 그대로(무료분은 무료, 유료분은 유료) 돌려주고 공개를 취소한다.
+// 원장 ref 유니크로 같은 공개를 두 번 돌려주지 않는다. 돌려준 개수 반환 (없으면 0).
+export async function refundLikeReveal(viewerId: string, likerId: string): Promise<number> {
+  const { data: reveal, error } = await supabase
+    .from('like_reveals')
+    .select('paid, free_spent, paid_spent')
+    .eq('viewer_id', viewerId)
+    .eq('liker_id', likerId)
+    .maybeSingle();
+  if (error) throw new Error(`like_reveals: ${error.message}`);
+  if (!reveal?.paid) return 0;
+
+  const ref = `like_reveal:${viewerId}:${likerId}`;
+  const rows = [
+    { delta: reveal.free_spent as number, paid: false, ref: `${ref}:free` },
+    { delta: reveal.paid_spent as number, paid: true, ref: `${ref}:paid` },
+  ]
+    .filter((r) => r.delta > 0)
+    .map((r) => ({ ...r, user_id: viewerId, kind: 'refund' }));
+  let refunded = 0;
+  if (rows.length > 0) {
+    const { error: insertErr } = await supabase.from('star_ledger').insert(rows);
+    if (insertErr && insertErr.code !== '23505') throw new Error(`star refund: ${insertErr.message}`);
+    if (!insertErr) refunded = rows.reduce((sum, r) => sum + r.delta, 0);
   }
-  return data as number;
+  // 상대가 돌아와도(차단 해제 등) 공짜로 열린 채 남지 않게 공개를 지운다. 실패해도 위
+  // ref 유니크가 재환급을 막는다.
+  const { error: deleteErr } = await supabase
+    .from('like_reveals')
+    .delete()
+    .eq('viewer_id', viewerId)
+    .eq('liker_id', likerId);
+  if (deleteErr) console.error('[refundLikeReveal] reveal delete failed:', deleteErr.message);
+  return refunded;
 }
 
 // 충전. ref(외부 거래 ID)가 이미 있으면 지급하지 않고 false — 웹훅 재시도 대비.

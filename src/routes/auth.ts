@@ -683,7 +683,10 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
     ['like_reveals', 'liker_id'],
     ['like_card_pins', 'viewer_id'],
     ['like_card_pins', 'liker_id'],
-    ['card_purchases', 'user_id'],
+    // 탐색 플레이리스트 (mig 063). 플레이리스트를 지우면 카드 행도 함께 지워지고,
+    // 다른 사람 플레이리스트에 든 내 카드는 candidate_id 로 지운다.
+    ['discover_playlists', 'user_id'],
+    ['discover_playlist_items', 'candidate_id'],
   ] as const) {
     const { error } = await supabase.from(table).delete().eq(column, userId);
     if (error) {

@@ -5,18 +5,17 @@ import { validateBody, validateQuery } from '../middleware/validate';
 import {
   swipeBodySchema,
   swipeQuerySchema,
-  discoverQuerySchema,
   quotaQuerySchema,
   revealBodySchema,
-  cardResetBodySchema,
+  playlistParamsSchema,
+  playlistOpenBodySchema,
+  playlistSeenBodySchema,
 } from '../schemas/swipe';
-import { getStarBalance, spendStars, buyCards, grantStars, sumLedger, InsufficientStarsError } from '../services/stars';
+import { getStarBalance, revealLike, refundLikeReveal, sumLedger, InsufficientStarsError } from '../services/stars';
 import { getBlurredMainPhotos } from '../services/photoBlur';
 import {
-  CARD_DAILY_FREE,
   CARD_RESET_AMOUNT,
   cardResetCost,
-  LIKE_STAR_COST,
   REVEAL_STAR_COST,
   REVEAL_FREE_INTERVAL_MS,
   AD_REWARD_DAILY_MAX,
@@ -168,62 +167,63 @@ export function computeIntraScore(
   return score;
 }
 
-// 매칭 후보 목록 (추천 알고리즘 적용)
-router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res: Response) => {
-  const limit = req.query.limit as unknown as number;
-  const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
+// 탐색 후보 풀 — 제외·선호 필터·점수 정렬까지. 플레이리스트 목록(곡 수)과 열기가 쓴다.
+const poolError = (status: number, error: string): { status: number; error: string } => ({ status, error });
+
+async function loadDiscoverPool(userId: string, limit: number) {
 
   // 조회자 프로필 — mig 009 이후 단일 scalar `language` 컬럼이 source of truth.
   const { data: viewerProfile } = await supabase
     .from('profiles')
     .select('language, interests')
-    .eq('id', req.userId!)
+    .eq('id', userId)
     .single();
 
-  if (!viewerProfile) {
-    res.status(404).json({ error: 'Profile not found' });
-    return;
-  }
+  if (!viewerProfile) return poolError(404, 'Profile not found');
 
   const viewerLanguage = (viewerProfile.language as string | null) ?? '';
   const viewer: Viewer = {
-    id: req.userId!,
+    id: userId,
     interests: (viewerProfile.interests as string[] | null) ?? [],
   };
 
   // 스와이프/차단/선호도/reciprocity 풀을 병렬 조회.
   // reciprocity 풀 = 나를 like 한(direction='like') 사람들. idx_swipes_swiped 가
   // swiped_id 인덱스를 제공하므로 swiped_id=viewer 필터는 인덱스 사용.
-  const [swipedResult, blockedResult, prefsResult, reciprocalResult] = await Promise.all([
-    supabase.from('swipes').select('swiped_id, reset_at, source, created_at').eq('swiper_id', req.userId!),
+  const [swipedResult, blockedResult, prefsResult, reciprocalResult, playlistResult, revealResult] = await Promise.all([
+    supabase.from('swipes').select('swiped_id, reset_at').eq('swiper_id', userId),
     supabase.from('blocks').select('blocker_id, blocked_id')
-      .or(`blocker_id.eq.${req.userId!},blocked_id.eq.${req.userId!}`),
-    supabase.from('user_preferences').select('*').eq('user_id', req.userId!).single(),
+      .or(`blocker_id.eq.${userId},blocked_id.eq.${userId}`),
+    supabase.from('user_preferences').select('*').eq('user_id', userId).single(),
     supabase
       .from('swipes')
       .select('swiper_id')
-      .eq('swiped_id', req.userId!)
+      .eq('swiped_id', userId)
       .eq('direction', 'like'),
+    // 아직 pass 처리 전인 플레이리스트에 이미 든 사람 (mig 063).
+    supabase.from('discover_playlist_items').select('candidate_id').eq('user_id', userId),
+    // 받은 좋아요 탭에서 이미 연 사람 — 플레이리스트 한 칸을 본 사람으로 낭비하지 않게.
+    supabase.from('like_reveals').select('liker_id').eq('viewer_id', userId),
   ]);
+  if (playlistResult.error || revealResult.error) {
+    return poolError(500, (playlistResult.error ?? revealResult.error)!.message);
+  }
 
   const reciprocalLikerIds = new Set<string>(
     (reciprocalResult.data ?? []).map((s: any) => s.swiper_id as string),
   );
 
   const blockedIds = (blockedResult.data || []).map((b: any) =>
-    b.blocker_id === req.userId! ? b.blocked_id : b.blocker_id
+    b.blocker_id === userId ? b.blocked_id : b.blocker_id
   );
 
-  // 다시보기(reset_at)로 풀에 돌아온 사람은 제외하지 않는다 — 카드 한도에서 빠지는
-  // "다시 보는 카드" 라서 아래 페이지 구성에서 따로 구분한다.
-  const recycledIds = new Set<string>(
-    (swipedResult.data ?? []).filter((s: any) => s.reset_at).map((s: any) => s.swiped_id as string),
-  );
-
+  // 다시보기(reset_at)로 풀에 돌아온 사람은 제외하지 않는다.
   const excludeIds = [
-    req.userId!,
+    userId,
     ...(swipedResult.data ?? []).filter((s: any) => !s.reset_at).map((s: any) => s.swiped_id),
     ...blockedIds,
+    ...(playlistResult.data ?? []).map((r: any) => r.candidate_id as string),
+    ...(revealResult.data ?? []).map((r: any) => r.liker_id as string),
     // 섀도우 숨김 (env.discover.hiddenUserIds) — 당사자에게는 아무 신호도 가지
     // 않는다. 같은 목록을 GET /likes-received 와 isLikeVisibleToReceiver 에서도 적용.
     ...env.discover.hiddenUserIds,
@@ -283,10 +283,7 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
 
   const { data, error } = await query;
 
-  if (error) {
-    res.status(500).json({ error: error.message });
-    return;
-  }
+  if (error) return poolError(500, error.message);
 
   const viewerPrefs: ViewerPrefs = {
     preferred_nationalities: (prefs?.preferred_nationalities as string[] | null) ?? [],
@@ -341,112 +338,29 @@ router.get('/', validateQuery(discoverQuerySchema), async (req: AuthRequest, res
     return b._intra - a._intra;
   });
 
-  // 별사탕 유료화: 오늘 남은 카드만큼만 새 카드를 내주고, 다시보기 카드는 한도와
-  // 무관하게 내준다. 한도를 다 썼는데 새 후보가 남아 있으면 첫 후보를 잠긴(블러)
-  // 카드로 덧붙인다 — FE 는 그 카드에 "별사탕으로 10장 더 보기" 를 띄우고,
-  // available_count 로 초기화 확인 모달의 "n장 남음" 을 쓴다.
-  let page = scored.slice(0, limit);
-  let lockedRow: (typeof scored)[number] | null = null;
-  let availableNew = 0;
-  if (env.monetization.enabled) {
-    // 쓴 카드 수는 제외 목록과 같은 스냅샷에서 센다. 따로 읽으면 그 사이 저장된
-    // 스와이프가 제외되지 않은 채 사용량에만 잡혀, 남은 한도를 잠식하고 잠긴 카드가
-    // 일찍 나온다.
-    const { fromIso, toIso } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-    const fromMs = new Date(fromIso).getTime();
-    const toMs = new Date(toIso).getTime();
-    const used = (swipedResult.data ?? []).filter((r: any) => {
-      const at = new Date(r.created_at).getTime();
-      return r.source === 'discover' && at >= fromMs && at < toMs;
-    }).length;
-    let freeNew = Math.max(0, (await getCardLimit(req.userId!, fromIso)) - used);
-    page = [];
-    for (const row of scored) {
-      if (page.length >= limit) break;
-      if (recycledIds.has(row.id)) page.push(row);
-      else if (freeNew > 0) {
-        page.push(row);
-        freeNew--;
-      }
-    }
-    if (freeNew === 0) {
-      const shown = new Set(page.map((r) => r.id));
-      const remaining = scored.filter((r) => !recycledIds.has(r.id) && !shown.has(r.id));
-      availableNew = Math.min(remaining.length, CARD_RESET_AMOUNT);
-      lockedRow = remaining[0] ?? null;
-    }
-  }
+  return { scored, slot, botAlreadyHandled };
+}
 
-  // 프론트에 반환할 때 내부 정렬 키와 created_at 을 제외.
-  // 보안 경계: discover 는 잠금 해제 대상이 아니므로 서버에서 photos 배열을 메인 1장으로 잘라
-  //            본인 프로필 외 추가 사진 URL 노출을 원천 차단한다.
-  //            photo_access 는 정책상 항상 false/false 고정.
-  // mig 034: photos[0] 은 profile_photos.converted_url(메인, position=0). 변환
-  //   미완료 사용자는 위 visible 단계에서 이미 제거됨.
-  // mig 011: voice_intro_audio_urls 에서 시청자 언어 슬롯만 추출해 단일 URL 미러.
-  // (slot 은 visible 필터 직전에 이미 계산됨.)
-  // LAUNCH_CHECKLIST #3: voice-intro-audio 버킷이 private 로 전환되므로, 저장된
-  // public 형식 URL 을 응답 직전 짧은 TTL 서명 URL 로 변환한다 (영구 URL 익명
-  // 대량 수집 차단). 후보 수는 limit (기본 10) 이라 Promise.all 병렬로 충분.
-  const results: Record<string, unknown>[] = await Promise.all(
-    page.map(async ({ _tier, _intra, created_at, voice_intro_audio_urls, ...rest }) => {
-      const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<Record<VoiceIntroSlotLanguage, string | null>>;
-      const photoUrls: string[] = (readyPhotosByUser.get(rest.id as string) ?? []).slice(0, 1);
-      return {
-        ...rest,
-        voice_intro_audio_url: await createSignedUrlFromStored(
-          VOICE_INTRO_BUCKET,
-          slotUrls[slot] as string | null | undefined,
-        ),
-        photos: photoUrls,
-        photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
-        // 이 후보가 이미 viewer 를 like 했는가(=내가 like 하면 즉시 매치 = 매치 완성
-        // like = 예산 면제). FE 는 좋아요 소진 시 이 값으로 사전 게이트를 분기한다:
-        // false 면 카드 안 넘기고 즉시 한도 모달, true 면 통과시켜 즉시 매치.
-        // 카드에 시각 표시는 하지 않음(피드 통합 정책 유지) — 게이팅 로직 전용.
-        // 캠페인 봇은 항상 즉시 매치되므로 true — 일일 좋아요를 다 쓴 사용자도
-        // 하치와레는 잡을 수 있어야 한다.
-        // 유료화 ON 이면 내보내지 않는다 — 응답을 열어보면 누가 나를 좋아요했는지
-        // 공짜로 알 수 있어 받은 좋아요 공개(유료)를 우회한다. ON 에선 탐색 좋아요가
-        // 항상 차감이라 FE 가 이 값을 쓸 일도 없다.
-        ...(env.monetization.enabled
-          ? {}
-          : { liked_you: reciprocalLikerIds.has(rest.id as string) || isCampaignBot(rest.id as string) }),
-        // 카드 수에서 차감되지 않는 카드 (다시보기). FE 가 남은 카드 수를 스와이프마다
-        // 즉시 줄일 때 이 카드는 건너뛴다.
-        ...(env.monetization.enabled && recycledIds.has(rest.id as string) ? { free_card: true } : {}),
-      };
-    }),
-  );
-
-  // 캠페인 봇 주입. 스코어링(선호 성별·나이 필터 + 같은 언어 하드 제외)을 태울 수
-  // 없어 메인 쿼리 밖에서 따로 만들기 때문에 위치를 직접 정해야 한다. 규칙은 하나 —
-  // **항상 배치의 맨 뒤**. 사용자가 일반 프로필을 먼저 보고 나서 만나게 되고, 후보
-  // 수가 몇 명이든 자리가 "맨 뒤" 로 같아 카드가 나타났다 사라지지 않는다.
-  // (옛 구현은 "누적 스와이프 8회 이상 OR 덱이 텅 빔" 을 조건으로 삼고 뒤쪽 절반에
-  //  무작위 삽입했는데, "덱이 텅 빔" 이 호출마다 뒤집혀 봇이 맨 위에 떴다 사라졌다.)
-  // 후보가 0명이면 봇이 유일한 카드가 된다. 결과가 limit+1 장이 되지만 FE 는 배열
-  // 길이에 의존하지 않는다.
-  // 캠페인 대상 언어에만 노출한다 — 응모 링크(CAMPAIGN_POST_URL_*)가 설정된
-  // 언어가 곧 대상. 일본 한정 운영이면 JA 만 설정하면 되고, 확장도 시크릿 추가로
-  // 끝난다 (재배포 불필요). slot 은 viewer 언어 → ko/ja/en 매핑 (th/hi/null = en).
-  if (!botAlreadyHandled && env.campaign.postUrls[slot]) {
-    const botCard = await buildCampaignBotCard(slot);
-    // 캠페인 봇도 카드 한도에서 빠진다 (POST /swipe 4단계) — FE 카운트용 표시.
-    if (botCard) results.push(env.monetization.enabled ? { ...botCard, free_card: true } : botCard);
-  }
-
-  // 잠긴 카드는 봇보다도 뒤 — 넘길 수 있는 카드를 다 본 뒤에 나온다.
-  if (lockedRow) {
-    const blurred = await getBlurredMainPhotos([lockedRow.id]);
-    results.push({
-      ...toLockedCard(lockedRow, blurred.get(lockedRow.id), 'locked'),
-      available_count: availableNew,
-    });
-  }
-
-  res.json(results);
-});
+// 탐색 카드 한 장의 응답 모양. 내부 정렬 키와 created_at 은 뺀다.
+// 보안 경계: 사진은 메인 1장으로 잘라 추가 사진 URL 노출을 막고, photo_access 는 정책상
+// 항상 잠금이다. mig 034: photos[0] = profile_photos.converted_url(메인).
+// mig 011: voice_intro_audio_urls 에서 시청자 언어 슬롯만 단일 URL 로 미러한다.
+// LAUNCH_CHECKLIST #3: voice-intro-audio 버킷이 private 라 저장된 URL 을 응답 직전
+// 짧은 TTL 서명 URL 로 바꾼다 (영구 URL 익명 대량 수집 차단).
+async function toDiscoverCard(
+  row: any,
+  readyPhotosByUser: Map<string, string[]>,
+  slot: VoiceIntroSlotLanguage,
+): Promise<Record<string, unknown> & { id: string }> {
+  const { _tier, _intra, created_at, voice_intro_audio_urls, ...rest } = row;
+  const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<Record<VoiceIntroSlotLanguage, string | null>>;
+  return {
+    ...rest,
+    voice_intro_audio_url: await createSignedUrlFromStored(VOICE_INTRO_BUCKET, slotUrls[slot]),
+    photos: (readyPhotosByUser.get(row.id) ?? []).slice(0, 1),
+    photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
+  };
+}
 
 // 받은 좋아요 목록 — 나를 like 한 사용자 중, 내가 아직 응답 스와이프 하지 않았고
 // 차단 양방향에 걸리지 않은 active 후보. 최신 LIKES_RECEIVED_MAX 개 좋아요만 스캔
@@ -489,7 +403,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   //    likes-received 풀에서 제거할 ID 집합 (이미 응답 끝난 like 는 매치/패스 결과로
   //    별도 추적되므로 받은 좋아요 카드로 다시 노출할 의미 없음).
   // 다시보기(reset_at)된 pass 는 "아직 응답 안 함" 으로 본다 (예전 DELETE 와 동일 결과).
-  const [viewerSwipesResult, blocksResult, viewerProfileResult, prefsResult] = await Promise.all([
+  const [viewerSwipesResult, blocksResult, viewerProfileResult, prefsResult, playlistResult] = await Promise.all([
     supabase.from('swipes').select('swiped_id').eq('swiper_id', req.userId!).is('reset_at', null),
     supabase
       .from('blocks')
@@ -497,11 +411,18 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
       .or(`blocker_id.eq.${req.userId!},blocked_id.eq.${req.userId!}`),
     supabase.from('profiles').select('language, interests').eq('id', req.userId!).single(),
     supabase.from('user_preferences').select('*').eq('user_id', req.userId!).single(),
+    // 오늘 탐색 플레이리스트에 든 사람은 숨긴다 — 같은 사람을 두 탭에서 따로 보지 않게.
+    supabase.from('discover_playlist_items').select('candidate_id').eq('user_id', req.userId!),
   ]);
+  if (playlistResult.error) {
+    res.status(500).json({ error: playlistResult.error.message });
+    return;
+  }
 
-  const swipedSet = new Set<string>(
-    (viewerSwipesResult.data ?? []).map((s: any) => s.swiped_id as string),
-  );
+  const swipedSet = new Set<string>([
+    ...(viewerSwipesResult.data ?? []).map((s: any) => s.swiped_id as string),
+    ...(playlistResult.data ?? []).map((r: any) => r.candidate_id as string),
+  ]);
   const blockedSet = new Set<string>(
     (blocksResult.data ?? []).map((b: any) =>
       b.blocker_id === req.userId! ? (b.blocked_id as string) : (b.blocker_id as string),
@@ -592,16 +513,17 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return b._intra - a._intra;
   });
 
-  // 별사탕 유료화: 공개한 사람 + 무료 카드 1장만 일반 카드로, 그다음 사람은 잠긴(블러)
-  // 카드로, 나머지는 내려주지 않는다 (인원수 비노출 정책). 무료 카드는 넘겨야 쓴 것으로
-  // 기록되므로(POST /swipe), 안 넘기고 며칠이 지나도 무료 카드는 1장뿐이다.
+  // 별사탕 유료화: 공개한 사람(본 순서대로) + 맨 끝 잠긴(블러) 카드 1장만 내려주고,
+  // 나머지는 내려주지 않는다 (인원수 비노출 정책). 무료 카드가 있으면 잠긴 카드에
+  // free_available 을 붙인다 — FE 가 그 카드를 화면에 띄우는 순간 무료로 공개한다.
   let visibleRows = scored;
   let lockedRow: (typeof scored)[number] | null = null;
+  let freeAvailable = false;
   if (env.monetization.enabled && scored.length > 0) {
     const [revealsResult, pinResult, nextFree] = await Promise.all([
       supabase
         .from('like_reveals')
-        .select('liker_id')
+        .select('liker_id, revealed_at')
         .eq('viewer_id', req.userId!)
         .in('liker_id', scored.map((r) => r.id)),
       supabase.from('like_card_pins').select('liker_id').eq('viewer_id', req.userId!).maybeSingle(),
@@ -611,15 +533,18 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
       res.status(500).json({ error: (revealsResult.error ?? pinResult.error)!.message });
       return;
     }
-    const revealed = new Set((revealsResult.data ?? []).map((r: any) => r.liker_id as string));
+    const revealedAt = new Map<string, string>(
+      (revealsResult.data ?? []).map((r: any) => [r.liker_id as string, r.revealed_at as string]),
+    );
     const pinnedId = (pinResult.data?.liker_id as string | undefined) ?? null;
-    const split = splitLikeCards(scored, revealed, nextFree === null, pinnedId);
+    const split = splitLikeCards(scored, revealedAt, pinnedId);
     visibleRows = split.visible;
     lockedRow = split.locked;
-    if (split.pin && split.pin !== pinnedId) {
+    freeAvailable = nextFree === null;
+    if (lockedRow && lockedRow.id !== pinnedId) {
       const { error: pinErr } = await supabase
         .from('like_card_pins')
-        .upsert({ viewer_id: req.userId!, liker_id: split.pin, pinned_at: new Date().toISOString() });
+        .upsert({ viewer_id: req.userId!, liker_id: lockedRow.id, pinned_at: new Date().toISOString() });
       if (pinErr) console.error('[likes-received] pin failed:', pinErr);
     }
   }
@@ -644,10 +569,6 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
         ),
         photos: photoUrls,
         photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
-        // 받은 좋아요 풀의 후보는 정의상 모두 이미 viewer 를 like 함 → 항상 매치
-        // 완성 like(면제). FE 가 디스커버와 동일한 게이팅 분기를 쓰도록 shape 통일.
-        // (유료화 ON 에선 탭 기준 면제라 불필요 — 탐색 응답과 같이 뺀다.)
-        ...(env.monetization.enabled ? {} : { liked_you: true }),
       };
     }),
   );
@@ -656,32 +577,29 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   // UUID 만으로는 다른 정보를 조회할 경로가 없다.
   if (lockedRow) {
     const blurred = await getBlurredMainPhotos([lockedRow.id]);
-    results.push(toLockedCard(lockedRow, blurred.get(lockedRow.id), lockedRow.id));
+    results.push({
+      ...toLockedCard(lockedRow, blurred.get(lockedRow.id), lockedRow.id),
+      ...(freeAvailable ? { free_available: true } : {}),
+    });
   }
 
   res.json(results);
 });
 
-// 유료화 ON 의 카드 나누기. rows 는 정렬된 상태로 받는다.
-// 공개했지만 아직 안 넘긴 카드 → 맨 앞 카드(무료 또는 잠긴 카드) → 무료 카드가 있으면
-// 다음 잠긴 카드 순서다. 맨 앞 카드는 고정돼서(like_card_pins) 열릴 때까지 바뀌지 않는다.
-// 다음 카드는 앞 카드를 넘길 때 POST /swipe 의 next_card_id 로 고정된다 — 공개한 카드가
-// 남아 있으면 여기서는 pin 을 null 로 돌려 고르지 않는다. 무료로 열든 별사탕으로 열든 같다.
+// 유료화 ON 의 카드 나누기. rows 는 점수순으로 받는다.
+// 공개한 카드(무료든 별사탕이든)는 공개 시각 = 본 시각 순으로 왼쪽부터, 맨 끝에 아직
+// 안 연 사람 1명을 잠긴 카드로 둔다. 잠긴 카드는 고정돼서(like_card_pins) 열릴 때까지
+// 바뀌지 않는다 — 점수가 더 높은 좋아요가 와도 보이던 모자이크가 바뀌지 않게.
 export function splitLikeCards<T extends { id: string }>(
   rows: T[],
-  revealed: Set<string>,
-  freeAvailable: boolean,
+  revealedAt: Map<string, string>,
   pinnedId: string | null,
-): { visible: T[]; locked: T | null; pin: string | null } {
-  const opened = rows.filter((r) => revealed.has(r.id));
-  const unrevealed = rows.filter((r) => !revealed.has(r.id));
-  const front = unrevealed.find((r) => r.id === pinnedId) ?? unrevealed[0];
-  const next = unrevealed.find((r) => r !== front);
-  return {
-    visible: freeAvailable && front ? [...opened, front] : opened,
-    locked: (freeAvailable ? next : front) ?? null,
-    pin: opened.length === 0 ? (front?.id ?? null) : null,
-  };
+): { visible: T[]; locked: T | null } {
+  const at = (r: T) => new Date(revealedAt.get(r.id)!).getTime();
+  const visible = rows.filter((r) => revealedAt.has(r.id)).sort((a, b) => at(a) - at(b));
+  const unrevealed = rows.filter((r) => !revealedAt.has(r.id));
+  const locked = unrevealed.find((r) => r.id === pinnedId) ?? unrevealed[0] ?? null;
+  return { visible, locked };
 }
 
 // 받은 좋아요 푸시 게이트 — 이 like 가 수신자의 받은 좋아요 탭에 실제로 노출되는가.
@@ -757,80 +675,7 @@ function computeLocalDayRangeUtc(nowMs: number, tzOffsetMinutes: number): {
   };
 }
 
-// like 예산 면제 여부 — 파트너 초대코드(한일교류회 등) 가입자의 **가입 후 N일** 동안만
-// 일일 캡을 우회한다. 코드 보유 AND 기간 이내 둘 다 만족해야 하며, 기간이 지나면
-// 일반 사용자와 동일하게 캡이 적용된다.
-//
-// `referral_code IS NOT NULL` 로 열지 않는 이유: 코드 스키마가 임의 영숫자를
-// 통과시키므로(화이트리스트 없음) 아무 문자열이나 입력하면 특권을 얻는다.
-// referral_code 는 최초 프로필 생성 시에만 기록되고 수정 불가(profile.ts !prev
-// 분기)라, 가입 후 코드를 갈아끼워 특권을 얻거나 기간을 리셋하는 경로도 없다.
-//
-// error 시 false(=캡 유지) 로 fail-closed. POST 경로에선 캡에 이미 걸린 순간에만
-// 호출되므로 DB 블립 시 결과는 평소와 같은 429 뿐이다.
-async function hasUnlimitedLikes(userId: string): Promise<boolean> {
-  const { unlimitedLikeCodes, unlimitedLikeCodeDays, unlimitedLikeUserIds } = env.discover;
-  // 계정 단위 면제 — 기간 제한 없음, DB 조회 없음.
-  if (unlimitedLikeUserIds.includes(userId)) return true;
-  if (unlimitedLikeCodes.length === 0) return false;
-
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('referral_code, created_at')
-    .eq('id', userId)
-    .single();
-  if (error) {
-    console.error('[swipe] like exemption lookup failed:', error.message);
-    return false;
-  }
-
-  if (!unlimitedLikeCodes.includes(data?.referral_code ?? '')) return false;
-  // created_at 부재는 기간 판정 불가 → 면제 없음(fail-closed).
-  if (!data?.created_at) return false;
-  const ageMs = Date.now() - new Date(data.created_at).getTime();
-  return ageMs < unlimitedLikeCodeDays * 24 * 60 * 60 * 1000;
-}
-
-// 면제 사용자에게 quota 가 돌려줄 한도. FE 는 limit 을 화면에 렌더링하지 않고
-// dailyLimitReached(count >= limit) 비교와 낙관 카운트 클램프에만 쓰므로, 큰 수
-// 하나로 "무제한" 이 FE 변경 없이 성립한다.
-const UNLIMITED_LIKE_LIMIT = 999_999;
-
 // ── 별사탕 유료화 헬퍼 (env.monetization.enabled 일 때만 호출) ──────────
-
-// 오늘 탐색 카드 사용량/한도. 카드 = 탐색 탭 스와이프(좋아요+넘기기). 받은 좋아요 탭
-// (source='likes')과 다시보기 카드(source='recycled')는 세지 않는다.
-// 한도 = 무료 10 + 오늘 리셋 횟수 × 10. like 면제 계정은 카드도 무제한.
-// 오늘 카드 한도 = 무료 + 오늘 구매한 장수.
-async function getCardLimit(userId: string, fromIso: string): Promise<number> {
-  const [purchases, unlimited] = await Promise.all([
-    supabase.from('card_purchases').select('cards').eq('user_id', userId).gte('created_at', fromIso),
-    hasUnlimitedLikes(userId),
-  ]);
-  if (purchases.error) throw new Error(`card_purchases: ${purchases.error.message}`);
-  if (unlimited) return UNLIMITED_LIKE_LIMIT;
-  const bought = (purchases.data ?? []).reduce((sum: number, r: { cards: number }) => sum + r.cards, 0);
-  return CARD_DAILY_FREE + bought;
-}
-
-async function getCardAllowance(
-  userId: string,
-  tzOffsetMinutes: number,
-): Promise<{ used: number; limit: number }> {
-  const { fromIso, toIso } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-  const [{ count, error }, limit] = await Promise.all([
-    supabase
-      .from('swipes')
-      .select('id', { count: 'exact', head: true })
-      .eq('swiper_id', userId)
-      .eq('source', 'discover')
-      .gte('created_at', fromIso)
-      .lt('created_at', toIso),
-    getCardLimit(userId, fromIso),
-  ]);
-  if (error) throw new Error(`card count: ${error.message}`);
-  return { used: count ?? 0, limit };
-}
 
 // 다음 무료 카드 시각. null = 지금 무료 카드 사용 가능.
 async function getNextFreeRevealAt(userId: string): Promise<string | null> {
@@ -887,103 +732,351 @@ export async function adStarsRemainingToday(userId: string): Promise<number> {
   return Math.max(0, AD_REWARD_DAILY_MAX - Math.floor(granted / AD_REWARD_STARS));
 }
 
-// 디스커버 일일 카드 카운트 (오늘 사용한 스와이프 수). 기기 간 동기화를 위한 endpoint.
-// FE 마운트 시 호출 → in-memory 카운트 기준으로 사용. 스와이프마다 다음 마운트에 동기화.
-router.get('/quota', validateQuery(quotaQuerySchema), async (req: AuthRequest, res: Response) => {
-  const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
-  const { fromIso, toIso, localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-
-  // 오늘 소모한 like 예산(한도용) + viewer 의 pass 행 존재 여부(버튼 게이트용)를
-  // 병렬 조회. has_passes 는 "넘긴 사람이 실제로 있을 때만" 버튼을 노출하기 위한 신호 —
-  // pass 는 서버에 누적되므로(어제 넘긴 것 포함) FE 세션만으론 알 수 없어 서버가 전달.
-  // 예산 count 는 POST /swipe 하드 캡과 *동일 정의* (direction='like' AND
-  // counts_toward_limit=true, 동일 로컬-데이 범위) — mig 041 컬럼을 공유해 정의
-  // 불일치("3/15인데 막힘")를 구조적으로 차단. counts_toward_limit 는 like 에서만
-  // true 로 세팅되므로 direction='like' 는 redundant 하나 인덱스 정합·가독성 위해 명시.
-  const [usedResult, passResult] = await Promise.all([
-    supabase
-      .from('swipes')
-      .select('id', { count: 'exact', head: true })
-      .eq('swiper_id', req.userId!)
-      .eq('direction', 'like')
-      .eq('counts_toward_limit', true)
-      .gte('created_at', fromIso)
-      .lt('created_at', toIso),
-    supabase
-      .from('swipes')
-      .select('id', { count: 'exact', head: true })
-      .eq('swiper_id', req.userId!)
-      .eq('direction', 'pass')
-      .is('reset_at', null),
-  ]);
-
-  if (usedResult.error) {
-    res.status(500).json({ error: usedResult.error.message });
-    return;
-  }
-  // pass count 실패는 quota 본질(오늘 카운트)과 무관한 보조 신호 — 실패 시 가시화
-  // (console.error) + has_passes=false 로 안전 degrade (버튼만 숨김, quota 는 정상).
-  if (passResult.error) {
-    console.error('[quota] pass count failed:', passResult.error.message);
-  }
-
-  const used = usedResult.count ?? 0;
-  // 파트너 코드 면제자는 사실상 무제한 — FE 의 소프트 게이트(dailyLimitReached)가
-  // 절대 참이 되지 않게 큰 한도를 내려준다. POST 의 하드 캡도 동일 조건으로 우회.
-  const dailyLimit = (await hasUnlimitedLikes(req.userId!))
-    ? UNLIMITED_LIKE_LIMIT
-    : env.discover.dailyLikeLimit;
+// 별사탕 잔액·받은 좋아요 무료 카드 타이머·광고 남은 횟수. 두 탭 헤더와 모달이 공유한다.
+router.get('/quota', async (req: AuthRequest, res: Response) => {
   res.json({
-    // count/limit/remaining 의미 = 오늘 소모한 like 예산 / 한도 / 잔여.
-    // (총 스와이프 수가 아니라 non-reciprocal like 만 — 매치 완성 like·pass 는 면제.)
-    count: used,
-    limit: dailyLimit,
-    remaining: Math.max(0, dailyLimit - used),
-    date: localDate,
-    // pass 리셋 일몰 게이트 (strategist C2). FE 가 이 플래그로 빈 화면/한도 화면의
-    // "넘긴 사람 다시 보기" 버튼 노출을 결정한다 — 새 config 엔드포인트 신설 대신
-    // 이미 마운트 시 호출하는 quota 응답에 boolean 1개를 얹어 가장 가볍게 전달.
-    pass_reset_enabled: env.discover.passResetEnabled,
-    // 넘긴 사람 존재 여부. FE 는 pass_reset_enabled && has_passes 일 때만 버튼 노출 —
-    // 애초에 넘긴 적 없는(원래 빈 풀) 사용자에게 버튼이 뜨는 어색함을 제거.
-    has_passes: (passResult.count ?? 0) > 0,
     monetization_enabled: env.monetization.enabled,
-    ...(env.monetization.enabled ? await getMonetizationQuota(req.userId!, tzOffsetMinutes) : {}),
+    ...(env.monetization.enabled ? await getMonetizationQuota(req.userId!) : {}),
   });
 });
 
-// quota 응답의 유료화 필드. FE 는 카드 수를 화면에 표시하지 않지만 잠긴 카드 판단과
-// 타이머(다음 자정 / 다음 무료 카드)에 쓴다.
-async function getMonetizationQuota(userId: string, tzOffsetMinutes: number) {
-  const [stars, cards, nextFreeRevealAt, adsRemaining] = await Promise.all([
+// quota 응답의 유료화 필드 — 별사탕 잔액, 받은 좋아요 무료 카드 타이머, 광고 남은 횟수.
+async function getMonetizationQuota(userId: string) {
+  const [stars, nextFreeRevealAt, adsRemaining] = await Promise.all([
     getStarBalance(userId),
-    getCardAllowance(userId, tzOffsetMinutes),
     getNextFreeRevealAt(userId),
     adStarsRemainingToday(userId),
   ]);
   return {
     stars: { free: stars.free, paid: stars.paid, total: stars.free + stars.paid },
-    cards,
     next_free_reveal_at: nextFreeRevealAt,
     ads_remaining: adsRemaining,
   };
 }
 
-// 탐색 카드 n장 구매. 가격은 서버가 장수로 계산하고, 구매 기록이 곧 오늘 한도 증가다.
-router.post('/card-reset', requireNotFrozen, validateBody(cardResetBodySchema), async (req: AuthRequest, res: Response) => {
-  if (monetizationOff(res)) return;
-  const { cards } = req.body;
-  try {
-    const remaining = await buyCards(req.userId!, cards, cardResetCost(cards));
-    res.json({ stars_total: remaining });
-  } catch (e) {
-    if (e instanceof InsufficientStarsError) {
-      res.status(402).json({ error: 'Not enough stars', code: 'insufficient_stars' });
+// ── 탐색 플레이리스트 (mig 063) ─────────────────────────────────────
+// 하루 3개(사용자 로컬 날짜). 처음 여는 1개는 무료, 나머지는 장수 비례 별사탕
+// (유료화 OFF 면 1개만 고를 수 있다). 여는 순간 점수순 다음 최대 10명을 고정한다.
+// 이름·커버는 FE 장식이라 어느 칸을 먼저 열든 같은 상위 10명이 들어간다.
+// 화면에 나온 카드는 FE 가 처음 볼 때 seen 으로 기록한다. 다음 날 처음 조회할 때 본 카드
+// 중 대화 신청(like) 안 한 카드만 pass 로 기록하고 지난 플레이리스트를 지운다 — 안 본
+// 카드의 사람은 다시 후보로 돌아간다. 남아 있는 행은 항상 "아직 pass 처리 전" 이다.
+
+const PLAYLIST_COUNT = 3;
+
+// 지난 날짜 플레이리스트에서 본 카드를 pass 로 기록하고 지운다. 실패하면 지우지 않고
+// 다음 조회에서 다시 시도한다 — 그동안은 플레이리스트 행이 그 사람들을 후보에서 뺀다.
+async function finalizePastPlaylists(userId: string, localDate: string): Promise<void> {
+  const { data: old, error } = await supabase
+    .from('discover_playlists')
+    .select('id')
+    .eq('user_id', userId)
+    .lt('day', localDate);
+  if (error) {
+    console.error('[playlists] finalize lookup failed:', error.message);
+    return;
+  }
+  if (!old || old.length === 0) return;
+  const oldIds = old.map((p: any) => p.id as number);
+
+  const { data: items, error: itemsErr } = await supabase
+    .from('discover_playlist_items')
+    .select('candidate_id')
+    .in('playlist_id', oldIds)
+    .eq('seen', true);
+  if (itemsErr) {
+    console.error('[playlists] finalize items failed:', itemsErr.message);
+    return;
+  }
+  const ids = [...new Set((items ?? []).map((i: any) => i.candidate_id as string))];
+
+  if (ids.length > 0) {
+    const { data: existing, error: existingErr } = await supabase
+      .from('swipes')
+      .select('swiped_id, reset_at')
+      .eq('swiper_id', userId)
+      .in('swiped_id', ids);
+    if (existingErr) {
+      console.error('[playlists] finalize swipes failed:', existingErr.message);
       return;
     }
-    throw e;
+    const has = new Map((existing ?? []).map((r: any) => [r.swiped_id as string, r.reset_at as string | null]));
+    const missing = ids.filter((id) => !has.has(id));
+    // 다시보기(reset_at)로 풀에 돌아왔던 사람은 기존 행을 다시 pass 로 되돌린다.
+    const recycled = ids.filter((id) => has.get(id));
+    const pass = { direction: 'pass', source: 'playlist' };
+    const [insertResult, updateResult] = await Promise.all([
+      missing.length > 0
+        ? supabase
+            .from('swipes')
+            .upsert(
+              missing.map((swiped_id) => ({ swiper_id: userId, swiped_id, ...pass })),
+              { onConflict: 'swiper_id,swiped_id', ignoreDuplicates: true },
+            )
+        : Promise.resolve({ error: null }),
+      recycled.length > 0
+        ? supabase
+            .from('swipes')
+            .update({ ...pass, reset_at: null })
+            .eq('swiper_id', userId)
+            .in('swiped_id', recycled)
+        : Promise.resolve({ error: null }),
+    ]);
+    if (insertResult.error || updateResult.error) {
+      console.error('[playlists] finalize pass failed:', (insertResult.error ?? updateResult.error)!.message);
+      return;
+    }
   }
+
+  const { error: deleteErr } = await supabase.from('discover_playlists').delete().in('id', oldIds);
+  if (deleteErr) console.error('[playlists] finalize delete failed:', deleteErr.message);
+}
+
+async function getTodayPlaylists(userId: string, localDate: string) {
+  const { data, error } = await supabase
+    .from('discover_playlists')
+    .select('id, idx')
+    .eq('user_id', userId)
+    .eq('day', localDate);
+  if (error) throw new Error(`discover_playlists: ${error.message}`);
+  return (data ?? []) as { id: number; idx: number }[];
+}
+
+// 플레이리스트에 고정된 카드. 그사이 탈퇴·정지·숨김·차단된 사람과 사진이 없어진 사람은
+// 조용히 뺀다. requested = 이미 대화 신청함.
+async function loadPlaylistCards(userId: string, playlistId: number): Promise<Record<string, unknown>[]> {
+  const { data: items, error } = await supabase
+    .from('discover_playlist_items')
+    .select('candidate_id, position')
+    .eq('playlist_id', playlistId)
+    .order('position', { ascending: true });
+  if (error) throw new Error(`discover_playlist_items: ${error.message}`);
+  const ids = (items ?? []).map((i: any) => i.candidate_id as string);
+  if (ids.length === 0) return [];
+
+  const [viewerResult, profilesResult, blocksResult, likedResult, likedYouResult] = await Promise.all([
+    supabase.from('profiles').select('language').eq('id', userId).single(),
+    supabase
+      .from('profiles')
+      .select('id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests')
+      .in('id', ids)
+      .eq('is_active', true)
+      .is('frozen_at', null),
+    supabase
+      .from('blocks')
+      .select('blocker_id, blocked_id')
+      .or(`blocker_id.eq.${userId},blocked_id.eq.${userId}`),
+    supabase.from('swipes').select('swiped_id').eq('swiper_id', userId).eq('direction', 'like').in('swiped_id', ids),
+    supabase.from('swipes').select('swiper_id').eq('swiped_id', userId).eq('direction', 'like').in('swiper_id', ids),
+  ]);
+  const failed = [profilesResult, blocksResult, likedResult, likedYouResult].find((r) => r.error);
+  if (failed?.error) throw new Error(`playlist cards: ${failed.error.message}`);
+
+  const slot = pickViewerSlot(viewerResult.data?.language as string | null);
+  const blocked = new Set(
+    (blocksResult.data ?? []).map((b: any) => (b.blocker_id === userId ? b.blocked_id : b.blocker_id) as string),
+  );
+  const requested = new Set((likedResult.data ?? []).map((r: any) => r.swiped_id as string));
+  const likedYou = new Set((likedYouResult.data ?? []).map((r: any) => r.swiper_id as string));
+  const rows = new Map((profilesResult.data ?? []).map((p: any) => [p.id as string, p]));
+  const photos = await fetchReadyPhotosByUser(ids, 'playlist');
+
+  const cards = await Promise.all(
+    ids.map(async (id) => {
+      let card: Record<string, unknown> | null;
+      if (isCampaignBot(id)) card = await buildCampaignBotCard(slot);
+      else {
+        const row = rows.get(id);
+        if (!row || blocked.has(id) || env.discover.hiddenUserIds.includes(id)) return null;
+        if ((photos.get(id) ?? []).length === 0) return null;
+        card = await toDiscoverCard(row, photos, slot);
+      }
+      if (!card) return null;
+      return {
+        ...card,
+        requested: requested.has(id),
+        // 유료화 OFF 의 좋아요 한도 사전 게이트용 (GET / 와 같은 의미). ON 에선 받은 좋아요
+        // 공개를 우회하므로 내보내지 않는다.
+        ...(env.monetization.enabled ? {} : { liked_you: likedYou.has(id) || isCampaignBot(id) }),
+      };
+    }),
+  );
+  return cards.filter((c): c is NonNullable<typeof c> => c !== null);
+}
+
+// 오늘의 플레이리스트 3칸. 안 연 칸의 price 는 지금 열면 낼 별사탕 (0 = 무료).
+router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthRequest, res: Response) => {
+  const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
+  const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
+  await finalizePastPlaylists(req.userId!, localDate);
+
+  const [today, pool] = await Promise.all([
+    getTodayPlaylists(req.userId!, localDate),
+    loadDiscoverPool(req.userId!, CARD_RESET_AMOUNT),
+  ]);
+  if ('error' in pool) {
+    res.status(pool.status).json({ error: pool.error });
+    return;
+  }
+
+  const counts = new Map<number, number>();
+  if (today.length > 0) {
+    const { data: items, error } = await supabase
+      .from('discover_playlist_items')
+      .select('playlist_id')
+      .in('playlist_id', today.map((p) => p.id));
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    for (const i of items ?? []) counts.set(i.playlist_id, (counts.get(i.playlist_id) ?? 0) + 1);
+  }
+
+  const available = Math.min(pool.scored.length, CARD_RESET_AMOUNT);
+  const free = today.length === 0;
+  const playlists = Array.from({ length: PLAYLIST_COUNT }, (_, idx) => {
+    const opened = today.find((p) => p.idx === idx);
+    return opened
+      ? { idx, opened: true, count: counts.get(opened.id) ?? 0 }
+      : { idx, opened: false, price: free ? 0 : cardResetCost(available) };
+  });
+  res.json({
+    available_count: available,
+    // 유료화 OFF 는 하루 1개 — 고른 뒤엔 그 칸만 보여준다.
+    playlists: !env.monetization.enabled && !free ? playlists.filter((p) => p.opened) : playlists,
+  });
 });
+
+router.get('/playlists/:idx', validateQuery(quotaQuerySchema), async (req: AuthRequest, res: Response) => {
+  const params = playlistParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: 'Invalid playlist' });
+    return;
+  }
+  const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
+  const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
+  const playlist = (await getTodayPlaylists(req.userId!, localDate)).find((p) => p.idx === params.data.idx);
+  if (!playlist) {
+    res.status(404).json({ error: 'Playlist not opened', code: 'playlist_not_opened' });
+    return;
+  }
+  res.json({ idx: playlist.idx, cards: await loadPlaylistCards(req.userId!, playlist.id) });
+});
+
+// 처음 화면에 나온 카드 기록. 같은 카드를 다시 보내도 결과가 같다 (앱이 화면을 나갈 때
+// 실패한 기록을 한 번 더 보낸다).
+router.post(
+  '/playlists/:idx/seen',
+  validateQuery(quotaQuerySchema),
+  validateBody(playlistSeenBodySchema),
+  async (req: AuthRequest, res: Response) => {
+    const params = playlistParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: 'Invalid playlist' });
+      return;
+    }
+    const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
+    const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
+    const playlist = (await getTodayPlaylists(req.userId!, localDate)).find((p) => p.idx === params.data.idx);
+    if (!playlist) {
+      res.status(404).json({ error: 'Playlist not opened', code: 'playlist_not_opened' });
+      return;
+    }
+    const { error } = await supabase
+      .from('discover_playlist_items')
+      .update({ seen: true })
+      .eq('playlist_id', playlist.id)
+      .in('candidate_id', req.body.candidate_ids);
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    res.json({ ok: true });
+  },
+);
+
+// 플레이리스트 열기. 무료 칸이 아니면 차감 전에 곡 수를 다시 세어, 사용자가 확인한
+// 곡 수(expected_count)보다 적으면 차감 없이 409 cards_changed + 현재 곡 수.
+router.post(
+  '/playlists/:idx/open',
+  requireNotFrozen,
+  validateQuery(quotaQuerySchema),
+  validateBody(playlistOpenBodySchema),
+  async (req: AuthRequest, res: Response) => {
+    const params = playlistParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: 'Invalid playlist' });
+      return;
+    }
+    const idx = params.data.idx;
+    const userId = req.userId!;
+    const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
+    const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
+    await finalizePastPlaylists(userId, localDate);
+
+    const today = await getTodayPlaylists(userId, localDate);
+    const opened = today.find((p) => p.idx === idx);
+    if (opened) {
+      res.json({ idx, cards: await loadPlaylistCards(userId, opened.id) });
+      return;
+    }
+
+    const pool = await loadDiscoverPool(userId, CARD_RESET_AMOUNT);
+    if ('error' in pool) {
+      res.status(pool.status).json({ error: pool.error });
+      return;
+    }
+    const picks = pool.scored.slice(0, CARD_RESET_AMOUNT).map((r) => r.id as string);
+    const expected = req.body.expected_count as number | undefined;
+    if (picks.length === 0 || (expected !== undefined && picks.length < expected)) {
+      res.status(409).json({ error: 'Available cards changed', code: 'cards_changed', available_count: picks.length });
+      return;
+    }
+
+    const first = today.length === 0;
+    // 유료화 OFF 는 하루 1개다 (FE 도 연 칸 하나만 보여준다).
+    if (!env.monetization.enabled && !first) {
+      res.status(409).json({ error: 'Playlist already chosen today', code: 'playlist_limit' });
+      return;
+    }
+    const stars = first ? 0 : cardResetCost(picks.length);
+    // 캠페인 봇은 그날 첫 플레이리스트 맨 뒤에 붙인다 (카드 한도·곡 수 가격과 무관).
+    if (first && !pool.botAlreadyHandled && env.campaign.postUrls[pool.slot]) {
+      picks.push(env.campaign.botUserId!);
+    }
+
+    const { data: playlistId, error } = await supabase.rpc('open_playlist', {
+      p_user: userId,
+      p_day: localDate,
+      p_idx: idx,
+      p_stars: stars,
+      p_first: env.monetization.enabled && first,
+      p_candidates: picks,
+    });
+    if (error) {
+      if (error.message.includes('insufficient_stars')) {
+        res.status(402).json({ error: 'Not enough stars', code: 'insufficient_stars' });
+        return;
+      }
+      // 그사이 다른 기기에서 오늘 첫 플레이리스트를 열었다 — 무료가 아니게 됐다.
+      if (error.message.includes('not_first')) {
+        res.status(409).json({ error: 'Playlist price changed', code: 'playlist_changed' });
+        return;
+      }
+      // 같은 칸을 동시에 연 경합 — 먼저 열린 쪽을 돌려준다 (이쪽 차감은 함께 취소됨).
+      if (error.code === '23505') {
+        const again = (await getTodayPlaylists(userId, localDate)).find((p) => p.idx === idx);
+        if (again) {
+          res.json({ idx, cards: await loadPlaylistCards(userId, again.id) });
+          return;
+        }
+      }
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    res.json({ idx, cards: await loadPlaylistCards(userId, playlistId as number) });
+  },
+);
 
 // 상대와 정상적으로 상호작용할 수 없는 상태인가 — 탈퇴·정지·숨김, 또는 어느 쪽이든 차단.
 // 카드를 받은 뒤에 이렇게 바뀔 수 있어(받아둔 덱) 차감·기록·매치 전에 확인한다.
@@ -1006,8 +1099,9 @@ async function isUserUnavailable(viewerId: string, targetId: string): Promise<bo
   return !profile?.is_active || !!profile.frozen_at || (blockResult.data ?? []).length > 0;
 }
 
-// 잠긴 받은 좋아요 카드 1명 공개 — 별사탕 REVEAL_STAR_COST 개. 무료 카드는 공개
-// 절차 없이 GET /likes-received 에 일반 카드로 내려오고, 넘길 때 POST /swipe 가 기록한다.
+// 잠긴 받은 좋아요 카드 1명 공개 — 별사탕 REVEAL_STAR_COST 개, 또는 free=true 면 무료
+// 카드(24시간에 1장). 무료 카드는 FE 가 잠긴 카드를 화면에 띄우는 순간 부른다 — 내용을
+// 공개 기록과 함께 내주므로 "봤다" 신고를 빼먹는 변조 앱도 무료로 볼 수 없다.
 // 상대가 그사이 탈퇴·정지·차단됐으면 차감 없이 revealed=false.
 router.post(
   '/likes-received/reveal',
@@ -1015,7 +1109,7 @@ router.post(
   validateBody(revealBodySchema),
   async (req: AuthRequest, res: Response) => {
     if (monetizationOff(res)) return;
-    const { liker_id } = req.body;
+    const { liker_id, free } = req.body;
     const me = req.userId!;
 
     const [likeResult, revealResult] = await Promise.all([
@@ -1041,8 +1135,24 @@ router.post(
       return;
     }
 
+    if (free) {
+      // ponytail: 동시에 다른 카드 2장을 무료로 열면 2장이 나갈 수 있다 (락 없음).
+      if ((await getNextFreeRevealAt(me)) !== null) {
+        res.status(409).json({ error: 'No free card now', code: 'free_unavailable' });
+        return;
+      }
+      const { error } = await supabase.from('like_reveals').insert({ viewer_id: me, liker_id, paid: false });
+      if (error && error.code !== '23505') {
+        res.status(500).json({ error: error.message });
+        return;
+      }
+      res.json({ revealed: true });
+      return;
+    }
+
+    // 연타로 이미 공개됐으면 차감까지 함께 취소된다 — 어느 쪽이든 공개된 상태.
     try {
-      await spendStars(me, REVEAL_STAR_COST, 'like_reveal');
+      await revealLike(me, liker_id, REVEAL_STAR_COST);
     } catch (e) {
       if (e instanceof InsufficientStarsError) {
         res.status(402).json({ error: 'Not enough stars', code: 'insufficient_stars' });
@@ -1051,68 +1161,9 @@ router.post(
       throw e;
     }
 
-    const { error: insertErr } = await supabase
-      .from('like_reveals')
-      .insert({ viewer_id: me, liker_id, paid: true });
-    if (insertErr && insertErr.code !== '23505') {
-      res.status(500).json({ error: insertErr.message });
-      return;
-    }
-    // 23505 = 연타로 이미 공개됨. 방금 낸 별사탕은 돌려준다.
-    // ponytail: 환급은 무료분으로 쌓인다 (유료분에서 빠졌어도). 연타 경합에서만 생김.
-    if (insertErr) await grantStars(me, REVEAL_STAR_COST, false, 'refund', null);
-
     res.json({ revealed: true });
   },
 );
-
-// 디스커버 "지나친 카드 다시 보기" (pass 스와이프 리셋).
-//
-// viewer 의 direction='pass' 스와이프 행에 reset_at 을 찍어 → 다음 디스커버 재조회 시
-// pass 했던 후보가 풀에 다시 등장한다. like 행·매치는 절대 무변경 (direction='pass'
-// eq 로 본인 pass 행만 타겟). 다시 넘길 때는 POST /swipe 가 기존 행을 갱신하고
-// source='recycled' 로 남겨 카드 한도에서 빼준다 (유료화 ON).
-//
-// 차단 상대 재노출 안전 (strategist C3): 디스커버 excludeIds 가 blocks 양방향을
-// swipes 와 별개로 항상 제외하므로(GET / 의 blockedResult), pass 행을 지워도 차단
-// 상대는 계속 제외된다 — 구조적 보장.
-//
-// IDOR 차단: .eq('swiper_id', req.userId!) 로 본인 행만 삭제. authMiddleware 가
-// 검증한 JWT sub 외 다른 사용자의 pass 행은 절대 건드리지 못한다.
-//
-// requireNotFrozen 가드: POST /swipe 와 동일하게 mutating 행위라 freeze 사용자
-// 차단. freeze 된 사용자가 pass 리셋으로 디스커버 풀을 회복시켜 like 시도하는
-// 경로를 사전 차단(POST /swipe 자체도 가드되지만 일관성 차원에서 적용).
-//
-// env 게이트 (strategist C2): env.discover.passResetEnabled=false 면 403 +
-// code:'pass_reset_disabled'. FE 는 quota 의 pass_reset_enabled=false 로 이미
-// 버튼을 숨기지만, 변조 클라이언트의 직접 호출을 라우트 레벨에서도 차단.
-router.delete('/passes', requireNotFrozen, async (req: AuthRequest, res: Response) => {
-  if (!env.discover.passResetEnabled) {
-    res.status(403).json({ error: 'Pass reset is disabled', code: 'pass_reset_disabled' });
-    return;
-  }
-
-  // 본인 pass 행만. like 행·매치 무관 (direction='pass' eq 가 like 행 보호).
-  // mig 059: 삭제 대신 reset_at 표시 — 다시 넘길 때 새 카드로 세지 않으려면 "이미 본
-  // 사람" 기록이 남아 있어야 한다 (POST /swipe 의 recycled 경로). 탐색·받은 좋아요는
-  // reset_at 있는 pass 를 "아직 안 넘긴 사람" 으로 취급해 예전 DELETE 와 같은 결과.
-  // { count: 'exact' } 로 처리 행 수 반환 → FE 가 "N명 다시 보기" 토스트/계측 가능.
-  const { count, error } = await supabase
-    .from('swipes')
-    .update({ reset_at: new Date().toISOString() }, { count: 'exact' })
-    .eq('swiper_id', req.userId!)
-    .eq('direction', 'pass')
-    .is('reset_at', null);
-
-  // 외부 의존성 error 가시화 룰 (CLAUDE.md silent-success 금지).
-  if (error) {
-    res.status(500).json({ error: error.message });
-    return;
-  }
-
-  res.json({ reset_count: count ?? 0 });
-});
 
 // 스와이프
 //
@@ -1122,19 +1173,50 @@ router.delete('/passes', requireNotFrozen, async (req: AuthRequest, res: Respons
 // 본 POST 만 가드 — 본인의 능동 swipe 행위를 막아 reciprocal like 매치 생성 경로
 // 자체를 차단.
 router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validateBody(swipeBodySchema), async (req: AuthRequest, res: Response) => {
-  const { swiped_id, direction, pay_with_stars } = req.body;
+  const { swiped_id, direction } = req.body;
   const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
   const monetized = env.monetization.enabled;
 
   // 받아둔 카드의 상대가 그사이 탈퇴·정지·차단됐으면 아무것도 기록·차감하지 않고 넘긴다.
   // 무료 카드도 쓰지 않고 매치도 만들지 않는다. 오류가 아니라 카드가 자연스럽게 지나간다.
   if (!isCampaignBot(swiped_id) && (await isUserUnavailable(req.userId!, swiped_id))) {
-    res.json({ direction, match: null, skipped: true });
+    // 별사탕으로 공개한 받은 좋아요 카드에 좋아요 — 매치를 기대하고 낸 별사탕을 돌려준다.
+    // 패스는 사용자가 넘기기로 한 것이라 돌려주지 않는다.
+    const refunded =
+      monetized && req.body.source === 'likes' && direction === 'like'
+        ? await refundLikeReveal(req.userId!, swiped_id)
+        : 0;
+    res.json({ direction, match: null, skipped: true, ...(refunded > 0 ? { refunded_stars: refunded } : {}) });
     return;
   }
 
-  // 0) 기존 스와이프. 다시보기(reset_at)로 풀에 돌아온 사람이면 이 스와이프는 기존
-  //    행을 갱신하고 새 카드로 세지 않는다. 그 외 기존 행은 이미 스와이프함 → 409.
+  // 탐색의 대화 신청은 플레이리스트가 곧 카드 한도다 — 오늘 내 플레이리스트에 든
+  // 상대인지 확인한다. 안 그러면 아무 후보에게나 보낼 수 있고, 자정이 지난 플레이리스트
+  // (다음 조회 때 pass 처리될 카드)에도 보낼 수 있다.
+  if (req.body.source === 'playlist') {
+    const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
+    const today = await getTodayPlaylists(req.userId!, localDate);
+    const { data: member, error: memberErr } =
+      today.length > 0
+        ? await supabase
+            .from('discover_playlist_items')
+            .select('candidate_id')
+            .in('playlist_id', today.map((p) => p.id))
+            .eq('candidate_id', swiped_id)
+            .limit(1)
+        : { data: [], error: null };
+    if (memberErr) {
+      res.status(500).json({ error: memberErr.message });
+      return;
+    }
+    if ((member ?? []).length === 0) {
+      res.status(403).json({ error: 'Not in your playlist', code: 'not_in_playlist' });
+      return;
+    }
+  }
+
+  // 0) 기존 스와이프. 예전 다시보기(reset_at)로 풀에 돌아온 사람이면 기존 행을 갱신한다.
+  //    그 외 기존 행은 이미 스와이프함 → 409.
   const { data: existing, error: existingErr } = await supabase
     .from('swipes')
     .select('id, reset_at')
@@ -1151,7 +1233,7 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
   }
   const recycled = !!existing;
 
-  // 1) reciprocal(=상대가 나를 이미 like) 판정을 먼저 — 예산 분류·매치 생성의 공유 레버.
+  // 1) reciprocal(=상대가 나를 이미 like) 판정 — 매치 생성과 받은 좋아요 탭 검증에 쓴다.
   //    like 일 때만 조회. silent-success 룰 (CLAUDE.md): PGRST116(no rows)=상대가
   //    아직 like 안 함=정상, 그 외 error 는 가시화. silent 통과 시 reciprocal 매치
   //    trigger 가 안 일어나는 회귀 가능.
@@ -1171,111 +1253,35 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
     reciprocal = data ?? null;
 
     // 캠페인 봇은 스와이프를 하지 않으므로 reciprocal 행이 존재할 수 없다. 봇을
-    // like 하면 항상 매치가 성사되도록 여기서 강제한다. reciprocal 이 아래의
-    // (a) 예산 소모 판정 (b) 매치 생성 두 곳을 모두 좌우하므로, 이 한 줄로
-    // "즉시 매치 + like 예산 면제"가 동시에 성립한다 — 매치를 완성하는 like 는
-    // 원래 예산에서 빠지는 기존 규칙과 정합.
+    // like 하면 항상 매치가 성사되도록 여기서 강제한다.
     if (!reciprocal && isCampaignBot(swiped_id)) {
       reciprocal = { id: 'campaign-bot' };
     }
   }
 
-  // 2) 출처 (mig 059). 받은 좋아요 탭 좋아요는 유료화 ON 에서 카드·좋아요 면제라,
-  //    클라이언트 주장만 믿지 않고 (상대가 나를 like) AND (공개함 OR 무료 카드 사용 가능)
-  //    을 확인한다. 안 그러면 탐색 좋아요를 "받은 좋아요에서 보냄" 으로 속여 공짜로
-  //    보낼 수 있다. 공개 기록이 없는 카드를 넘기면(패스 포함) 무료 카드를 쓴 것이다.
-  let source: 'discover' | 'likes' | 'recycled' = recycled ? 'recycled' : 'discover';
-  let usesFreeCard = false;
-  if (req.body.source === 'likes') {
-    if (monetized) {
-      const { data: reveal, error: revealErr } = await supabase
-        .from('like_reveals')
-        .select('liker_id')
-        .eq('viewer_id', req.userId!)
-        .eq('liker_id', swiped_id)
-        .maybeSingle();
-      if (revealErr) {
-        res.status(500).json({ error: revealErr.message });
-        return;
-      }
-      usesFreeCard = !reveal && (await getNextFreeRevealAt(req.userId!)) === null;
-      if (direction === 'like' && (!reciprocal || (!reveal && !usesFreeCard))) {
-        res.status(403).json({ error: 'Like is not revealed', code: 'like_not_revealed' });
-        return;
-      }
+  // 2) 받은 좋아요 탭 대화 신청 (유료화 ON). 클라이언트 주장만 믿지 않고 (상대가 나를
+  //    like) AND (공개함) 을 확인한다 — 안 그러면 공개 안 한 상대에게 보내 매치 여부로
+  //    누가 날 좋아했는지 알아낼 수 있다. 무료 카드도 화면에 나올 때 공개로 기록된다.
+  const source: 'likes' | 'playlist' = req.body.source === 'likes' ? 'likes' : 'playlist';
+  if (source === 'likes' && monetized && direction === 'like') {
+    const { data: reveal, error: revealErr } = await supabase
+      .from('like_reveals')
+      .select('liker_id')
+      .eq('viewer_id', req.userId!)
+      .eq('liker_id', swiped_id)
+      .maybeSingle();
+    if (revealErr) {
+      res.status(500).json({ error: revealErr.message });
+      return;
     }
-    source = 'likes';
-  }
-
-  // 3) 좋아요 예산 소모 여부. 이 값이 캡 검사·INSERT 플래그·quota count 를 하나로
-  //    묶는다 (mig 041 counts_toward_limit).
-  //    - 유료화 OFF: like AND non-reciprocal — 매치를 완성하는 like 는 면제.
-  //    - 유료화 ON : 탭 기준 — 받은 좋아요 탭이면 면제, 탐색에선 즉시 매치여도 차감.
-  //    캠페인 봇은 어느 쪽이든 면제 (캠페인 참여를 한도가 막으면 안 됨).
-  const consumesBudget =
-    direction === 'like' && !isCampaignBot(swiped_id) && (monetized ? source !== 'likes' : !reciprocal);
-
-  // 4) 탐색 카드 한도 (유료화 ON, 탐색 탭 새 카드만). 다시보기 카드·받은 좋아요 탭·
-  //    캠페인 봇은 세지 않는다.
-  if (monetized && source === 'discover' && !isCampaignBot(swiped_id)) {
-    const { used, limit } = await getCardAllowance(req.userId!, tzOffsetMinutes);
-    if (used >= limit) {
-      res.status(429).json({ error: 'Daily card limit reached', code: 'daily_card_limit' });
+    if (!reciprocal || !reveal) {
+      res.status(403).json({ error: 'Like is not revealed', code: 'like_not_revealed' });
       return;
     }
   }
 
-  // 5) 서버측 하드 캡 — consumesBudget 일 때만. FE 소프트 캡(quota 동기화 + 로컬
-  //    카운트)의 최종 방어선. quota 엔드포인트와 *동일 정의*(direction='like' AND
-  //    counts_toward_limit=true, 동일 로컬-데이 범위)로 세어 소프트 캡과 경계가
-  //    정확히 일치. count→insert 가 원자적이지 않아 동시 요청 시 ±1 오버슈트 가능하나
-  //    남용 차단 목적상 허용 (정확한 결제/한도가 아닌 인게이지먼트 캡).
-  //    유료화 ON 에서 한도를 넘었고 사용자가 별사탕 사용을 확인했으면 차단 대신 차감.
-  let chargeStars = false;
-  if (consumesBudget) {
-    const { fromIso, toIso } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-    const { count: usedToday, error: countError } = await supabase
-      .from('swipes')
-      .select('id', { count: 'exact', head: true })
-      .eq('swiper_id', req.userId!)
-      .eq('direction', 'like')
-      .eq('counts_toward_limit', true)
-      .gte('created_at', fromIso)
-      .lt('created_at', toIso);
-
-    if (countError) {
-      res.status(500).json({ error: countError.message });
-      return;
-    }
-
-    // 캡에 걸린 순간에만 파트너 코드 면제를 조회한다 — 정상 경로(한도 미달)에는
-    // 쿼리가 추가되지 않아 핫패스 비용 0.
-    if ((usedToday ?? 0) >= env.discover.dailyLikeLimit && !(await hasUnlimitedLikes(req.userId!))) {
-      if (!(monetized && pay_with_stars)) {
-        res.status(429).json({ error: 'Daily like limit reached', code: 'daily_limit_reached' });
-        return;
-      }
-      chargeStars = true;
-    }
-  }
-
-  // 6) 별사탕 차감 — 기록 전에 (잔액 부족이면 아무것도 기록하지 않는다).
-  if (chargeStars) {
-    try {
-      await spendStars(req.userId!, LIKE_STAR_COST, 'like');
-    } catch (e) {
-      if (e instanceof InsufficientStarsError) {
-        res.status(402).json({ error: 'Not enough stars', code: 'insufficient_stars' });
-        return;
-      }
-      throw e;
-    }
-  }
-
-  // 7) 기록 — 예산 플래그·출처를 swipe 시점에 확정 저장 (서버 계산, client body 미수용).
-  //    다시보기 카드는 기존 행 갱신. created_at 을 지금으로 바꿔야 오늘 좋아요 예산
-  //    count 에 들어간다 (카드 count 는 source='recycled' 라 제외).
-  const row = { direction, counts_toward_limit: consumesBudget, source };
+  // 3) 기록. 예전 다시보기 카드는 기존 행 갱신.
+  const row = { direction, source };
   const { error: swipeError } = recycled
     ? await supabase
         .from('swipes')
@@ -1284,12 +1290,6 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
     : await supabase.from('swipes').insert({ swiper_id: req.userId!, swiped_id, ...row });
 
   if (swipeError) {
-    // ponytail: 환급은 무료분으로 쌓인다. 연타 경합(23505)에서만 생기는 경로.
-    if (chargeStars) {
-      await grantStars(req.userId!, LIKE_STAR_COST, false, 'refund', null).catch((err) =>
-        console.error('[swipe] star refund failed:', err),
-      );
-    }
     if (swipeError.code === '23505') {
       res.status(409).json({ error: 'Already swiped this user' });
       return;
@@ -1298,27 +1298,7 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
     return;
   }
 
-  // 무료 카드 사용 기록 — 다음 무료 카드는 이 시각부터 24시간 뒤. 스와이프는 이미
-  // 저장됐으니 실패해도 응답은 막지 않는다 (무료 카드를 한 번 더 쓰게 될 뿐).
-  // ponytail: 연타 경합이면 무료 카드 2장이 나갈 수 있다 (락 없음). 24시간 1장 정책의
-  // 경합뿐이라 허용 — 막으려면 spend_stars 같은 DB 함수로 옮긴다.
-  if (usesFreeCard) {
-    const { error: freeErr } = await supabase
-      .from('like_reveals')
-      .insert({ viewer_id: req.userId!, liker_id: swiped_id, paid: false });
-    if (freeErr && freeErr.code !== '23505') console.error('[swipe] free card record failed:', freeErr);
-  }
-
-  // 넘긴 직후 화면에 나오는 잠긴 카드를 그대로 고정 — 그사이 점수가 더 높은 좋아요가
-  // 왔어도 보이던 카드가 바뀌지 않게 한다.
-  if (monetized && source === 'likes' && req.body.next_card_id) {
-    const { error: pinErr } = await supabase
-      .from('like_card_pins')
-      .upsert({ viewer_id: req.userId!, liker_id: req.body.next_card_id, pinned_at: new Date().toISOString() });
-    if (pinErr) console.error('[swipe] pin failed:', pinErr);
-  }
-
-  // 8) 매치 생성 — reciprocal 은 위 1)에서 이미 조회됨(재조회 제거). reciprocal 은
+  // 4) 매치 생성 — reciprocal 은 위 1)에서 이미 조회됨(재조회 제거). reciprocal 은
   //    like AND 상대 like 존재일 때만 non-null 이므로 별도 direction 체크 불필요.
   let match: { id: string; user1_id: string; user2_id: string } | null = null;
   if (reciprocal) {
@@ -1396,7 +1376,7 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
       }
     }
 
-  // 9) 받은 좋아요 푸시 — 매치가 성사되지 않은 like 에만 (성사된 경우는 위 match
+  // 5) 받은 좋아요 푸시 — 매치가 성사되지 않은 like 에만 (성사된 경우는 위 match
   //    푸시가 커버). 익명 문구 + fire-and-forget.
   if (direction === 'like' && !reciprocal) {
     const likerId = req.userId!;

@@ -263,7 +263,7 @@ vi.mock('../src/config/supabase', () => {
 
 // app 은 mock 이 hoist 된 뒤 import (vitest hoisting 으로 vi.mock 이 먼저 평가됨).
 import { app } from '../src/index';
-import { applyPrefFilters, splitLikeCards } from '../src/routes/swipe';
+import { allocatePlaylistTopUp, applyPrefFilters, splitLikeCards } from '../src/routes/swipe';
 
 // supabase.auth.getUser mock 이 토큰 문자열을 그대로 userId 로 반환하므로
 // Bearer 값 = userId.
@@ -515,5 +515,29 @@ describe('splitLikeCards — 받은 좋아요 카드 순서', () => {
   it('모두 공개했으면 잠긴 카드 없음', () => {
     const all = new Map(rows.map((r, i) => [r.id, `2026-11-09T1${i}:00:00Z`]));
     expect(splitLikeCards(rows, all, null).locked).toBeNull();
+  });
+});
+
+describe('allocatePlaylistTopUp — 덜 찬 칸 먼저 채우기', () => {
+  const ids = (n: number, p = 'c') => Array.from({ length: n }, (_, i) => `${p}${i}`);
+
+  it('먼저 연 칸부터 10명까지 채우고 남은 후보만 새 칸 몫', () => {
+    // 3번 칸(1명)과 7번 칸(2명)을 열어 둔 상태에서 후보 20명이 생김. 입력 순서와 무관하게 id 순.
+    const { fills, rest } = allocatePlaylistTopUp([7, 3], new Map([[3, 1], [7, 2]]), ids(20));
+    expect(fills).toEqual([
+      { playlistId: 3, add: ids(9) },
+      { playlistId: 7, add: ids(20).slice(9, 17) },
+    ]);
+    expect(rest).toEqual(ids(20).slice(17));
+  });
+
+  it('꽉 찬 칸은 건너뛰고, 후보가 모자라면 앞 칸만 채운다', () => {
+    const { fills, rest } = allocatePlaylistTopUp([1, 2], new Map([[1, 10], [2, 4]]), ids(3));
+    expect(fills).toEqual([{ playlistId: 2, add: ids(3) }]);
+    expect(rest).toEqual([]);
+  });
+
+  it('연 칸이 없으면 전부 새 칸 몫', () => {
+    expect(allocatePlaylistTopUp([], new Map(), ids(5))).toEqual({ fills: [], rest: ids(5) });
   });
 });

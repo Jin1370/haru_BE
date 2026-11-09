@@ -823,10 +823,10 @@ export const swaggerDocument = {
       get: {
         tags: ['Discover'],
         summary: '오늘의 탐색 플레이리스트 3칸',
-        description: '하루 3개(사용자 로컬 날짜). 처음 여는 1개 무료, 나머지는 장수 비례 별사탕 (유료화 OFF 면 1개만 — 고른 뒤엔 그 칸만 내려주고, 두 번째 열기는 409 playlist_limit). 지난 날짜 플레이리스트는 이 호출에서 남은 카드를 pass 로 기록하고 지운다. 안 연 칸의 price = 지금 열면 낼 별사탕 (0 = 무료). available_count = 지금 열면 담길 곡 수 (0~10).',
+        description: '하루 3개(사용자 로컬 날짜). 처음 여는 1개 무료, 나머지는 장수 비례 별사탕 (유료화 OFF 면 1개만 — 고른 뒤엔 그 칸만 내려주고, 두 번째 열기는 409 playlist_limit). 지난 날짜 플레이리스트는 이 호출에서 남은 카드를 pass 로 기록하고 지운다. 안 연 칸의 price = 지금 열면 낼 별사탕 (0 = 무료). available_count = 지금 열면 담길 곡 수 (0~10). candidate_count = 자르지 않은 남은 후보 수 (보여줄 LP 수 계산용). 오늘 연 칸이 10명 미만이면 이 호출에서 새 후보로 먼저 채운다 (추가 차감 없음).',
         parameters: [{ name: 'tz_offset_minutes', in: 'query', required: true, schema: { type: 'integer' } }],
         responses: {
-          200: { description: '플레이리스트 상태', content: { 'application/json': { schema: { type: 'object', properties: { available_count: { type: 'integer' }, playlists: { type: 'array', items: { type: 'object', properties: { idx: { type: 'integer' }, opened: { type: 'boolean' }, count: { type: 'integer', description: '열린 칸의 곡 수' }, price: { type: 'integer', description: '안 연 칸의 가격' } } } } } } } } },
+          200: { description: '플레이리스트 상태', content: { 'application/json': { schema: { type: 'object', properties: { available_count: { type: 'integer' }, candidate_count: { type: 'integer' }, playlists: { type: 'array', items: { type: 'object', properties: { idx: { type: 'integer' }, opened: { type: 'boolean' }, count: { type: 'integer', description: '열린 칸의 곡 수' }, price: { type: 'integer', description: '안 연 칸의 가격' } } } } } } } } },
         },
       },
     },

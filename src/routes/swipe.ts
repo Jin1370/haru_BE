@@ -904,6 +904,25 @@ async function loadPlaylistCards(userId: string, playlistId: number): Promise<Re
   return cards.filter((c): c is NonNullable<typeof c> => c !== null);
 }
 
+// 오늘 연 칸이 덜 찼으면(열 때 후보가 모자랐음) 그 뒤 생긴 후보를 먼저 채운다 — 먼저 연 칸
+// (id 작은 쪽)부터 칸당 최대 CARD_RESET_AMOUNT 명. 후보가 띄엄띄엄 생길 때 1명짜리 칸이
+// 여러 개로 쪼개져 하루 3칸을 낭비하지 않게 한다. rest = 채우고 남은 후보 (새 칸 몫).
+export function allocatePlaylistTopUp(
+  playlistIds: number[],
+  counts: Map<number, number>,
+  candidates: string[],
+): { fills: { playlistId: number; add: string[] }[]; rest: string[] } {
+  let rest = candidates;
+  const fills: { playlistId: number; add: string[] }[] = [];
+  for (const id of [...playlistIds].sort((a, b) => a - b)) {
+    const room = CARD_RESET_AMOUNT - (counts.get(id) ?? 0);
+    if (room <= 0 || rest.length === 0) continue;
+    fills.push({ playlistId: id, add: rest.slice(0, room) });
+    rest = rest.slice(room);
+  }
+  return { fills, rest };
+}
+
 // 오늘의 플레이리스트 3칸. 안 연 칸의 price 는 지금 열면 낼 별사탕 (0 = 무료).
 router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthRequest, res: Response) => {
   const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
@@ -919,20 +938,52 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
     return;
   }
 
+  // 칸별 인원(캠페인 봇 제외)과 마지막 순서.
   const counts = new Map<number, number>();
+  const lastPosition = new Map<number, number>();
   if (today.length > 0) {
     const { data: items, error } = await supabase
       .from('discover_playlist_items')
-      .select('playlist_id')
+      .select('playlist_id, candidate_id, position')
       .in('playlist_id', today.map((p) => p.id));
     if (error) {
       res.status(500).json({ error: error.message });
       return;
     }
-    for (const i of items ?? []) counts.set(i.playlist_id, (counts.get(i.playlist_id) ?? 0) + 1);
+    for (const i of items ?? []) {
+      lastPosition.set(i.playlist_id, Math.max(lastPosition.get(i.playlist_id) ?? 0, i.position));
+      if (i.candidate_id !== env.campaign.botUserId) {
+        counts.set(i.playlist_id, (counts.get(i.playlist_id) ?? 0) + 1);
+      }
+    }
   }
 
-  const available = Math.min(pool.scored.length, CARD_RESET_AMOUNT);
+  // 같은 요청이 겹쳐도 PK 중복은 무시된다.
+  // ponytail: 동시에 다른 칸을 여는 요청과 겹치면 한 사람이 두 칸에 들어갈 수 있다 — 드물어 허용.
+  const { fills, rest } = allocatePlaylistTopUp(
+    today.map((p) => p.id),
+    counts,
+    pool.scored.map((r) => r.id as string),
+  );
+  for (const { playlistId, add } of fills) {
+    const start = lastPosition.get(playlistId) ?? 0;
+    const { error } = await supabase.from('discover_playlist_items').upsert(
+      add.map((candidateId, i) => ({
+        playlist_id: playlistId,
+        user_id: req.userId!,
+        candidate_id: candidateId,
+        position: start + i + 1,
+      })),
+      { onConflict: 'playlist_id,candidate_id', ignoreDuplicates: true },
+    );
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    counts.set(playlistId, (counts.get(playlistId) ?? 0) + add.length);
+  }
+
+  const available = Math.min(rest.length, CARD_RESET_AMOUNT);
   const free = today.length === 0;
   const playlists = Array.from({ length: PLAYLIST_COUNT }, (_, idx) => {
     const opened = today.find((p) => p.idx === idx);
@@ -942,6 +993,8 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
   });
   res.json({
     available_count: available,
+    // 자르지 않은 남은 후보 수 — FE 가 오늘 채울 수 있는 LP 만 보여주는 데 쓴다 (칸당 최대 CARD_RESET_AMOUNT).
+    candidate_count: rest.length,
     // 유료화 OFF 는 하루 1개 — 고른 뒤엔 그 칸만 보여준다.
     playlists: !env.monetization.enabled && !free ? playlists.filter((p) => p.opened) : playlists,
   });

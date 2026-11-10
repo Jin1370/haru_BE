@@ -513,12 +513,14 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return b._intra - a._intra;
   });
 
-  // 별사탕 유료화: 공개한 사람(본 순서대로) + 맨 끝 잠긴(블러) 카드 1장만 내려주고,
-  // 나머지는 내려주지 않는다 (인원수 비노출 정책). 무료 카드가 있으면 잠긴 카드에
-  // free_available 을 붙인다 — FE 가 그 카드를 화면에 띄우는 순간 무료로 공개한다.
+  // 별사탕 유료화: 공개한 사람(본 순서대로) 뒤에 아직 안 연 사람 전원을 잠긴(블러) 카드로
+  // 내려준다. 잠긴 카드 맨 앞이 다음 무료 카드 — 고정돼서(like_card_pins) 열릴 때까지 바뀌지
+  // 않는다(점수 높은 인사가 새로 와도 타이머가 붙은 카드가 옮겨 가지 않게). 무료 카드를 쓸 수
+  // 있게 되면 여기서 그 카드를 자동으로 연다 — 앱이 꺼져 있었어도 다음에 들어오면 열려 있고,
+  // 앱 조작으로 고를 수 없다. 나머지 잠긴 카드는 별사탕으로만 연다.
   let visibleRows = scored;
-  let lockedRow: (typeof scored)[number] | null = null;
-  let freeAvailable = false;
+  let lockedRows: (typeof scored)[number][] = [];
+  let justRevealedId: string | null = null;
   if (env.monetization.enabled && scored.length > 0) {
     const [revealsResult, pinResult, nextFree] = await Promise.all([
       supabase
@@ -537,14 +539,30 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
       (revealsResult.data ?? []).map((r: any) => [r.liker_id as string, r.revealed_at as string]),
     );
     const pinnedId = (pinResult.data?.liker_id as string | undefined) ?? null;
-    const split = splitLikeCards(scored, revealedAt, pinnedId);
+    let split = splitLikeCards(scored, revealedAt, pinnedId);
+
+    if (nextFree === null && split.locked.length > 0) {
+      const target = split.locked[0].id;
+      // ponytail: 동시에 두 번 불리면 무료 카드가 두 장 나갈 수 있다 (락 없음 — reveal 라우트와 같음).
+      const { error: freeErr } = await supabase
+        .from('like_reveals')
+        .insert({ viewer_id: req.userId!, liker_id: target, paid: false });
+      if (freeErr && freeErr.code !== '23505') {
+        res.status(500).json({ error: freeErr.message });
+        return;
+      }
+      revealedAt.set(target, new Date().toISOString());
+      justRevealedId = target;
+      split = splitLikeCards(scored, revealedAt, null);
+    }
+
     visibleRows = split.visible;
-    lockedRow = split.locked;
-    freeAvailable = nextFree === null;
-    if (lockedRow && lockedRow.id !== pinnedId) {
+    lockedRows = split.locked;
+    const nextTarget = lockedRows[0]?.id ?? null;
+    if (nextTarget && nextTarget !== pinnedId) {
       const { error: pinErr } = await supabase
         .from('like_card_pins')
-        .upsert({ viewer_id: req.userId!, liker_id: lockedRow.id, pinned_at: new Date().toISOString() });
+        .upsert({ viewer_id: req.userId!, liker_id: nextTarget, pinned_at: new Date().toISOString() });
       if (pinErr) console.error('[likes-received] pin failed:', pinErr);
     }
   }
@@ -569,17 +587,22 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
         ),
         photos: photoUrls,
         photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
+        // 방금 무료로 열린 카드 — 앱이 이 카드에서 시작한다.
+        ...(rest.id === justRevealedId ? { just_revealed: true } : {}),
       };
     }),
   );
 
   // 잠긴 카드의 id 는 실제 liker id — 공개 요청(POST /likes-received/reveal)에 쓴다.
   // UUID 만으로는 다른 정보를 조회할 경로가 없다.
-  if (lockedRow) {
-    const blurred = await getBlurredMainPhotos([lockedRow.id]);
-    results.push({
-      ...toLockedCard(lockedRow, blurred.get(lockedRow.id), lockedRow.id),
-      ...(freeAvailable ? { free_available: true } : {}),
+  if (lockedRows.length > 0) {
+    const blurred = await getBlurredMainPhotos(lockedRows.map((r) => r.id));
+    lockedRows.forEach((row, i) => {
+      results.push({
+        ...toLockedCard(row, blurred.get(row.id), row.id),
+        // 다음 무료 카드 — 앱은 이 카드에만 "무료 오픈까지" 타이머를 붙인다.
+        ...(i === 0 ? { free_next: true } : {}),
+      });
     });
   }
 
@@ -587,18 +610,19 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
 });
 
 // 유료화 ON 의 카드 나누기. rows 는 점수순으로 받는다.
-// 공개한 카드(무료든 별사탕이든)는 공개 시각 = 본 시각 순으로 왼쪽부터, 맨 끝에 아직
-// 안 연 사람 1명을 잠긴 카드로 둔다. 잠긴 카드는 고정돼서(like_card_pins) 열릴 때까지
-// 바뀌지 않는다 — 점수가 더 높은 좋아요가 와도 보이던 모자이크가 바뀌지 않게.
+// 공개한 카드(무료든 별사탕이든)는 공개 시각 = 본 시각 순으로 앞에, 그 뒤에 아직 안 연
+// 사람 전원을 잠긴 카드로 둔다. 잠긴 카드 맨 앞은 다음 무료 카드 — 고정된 사람(pinnedId)이
+// 아직 안 열렸으면 그 사람, 아니면 점수 1위. 나머지는 점수순.
 export function splitLikeCards<T extends { id: string }>(
   rows: T[],
   revealedAt: Map<string, string>,
   pinnedId: string | null,
-): { visible: T[]; locked: T | null } {
+): { visible: T[]; locked: T[] } {
   const at = (r: T) => new Date(revealedAt.get(r.id)!).getTime();
   const visible = rows.filter((r) => revealedAt.has(r.id)).sort((a, b) => at(a) - at(b));
   const unrevealed = rows.filter((r) => !revealedAt.has(r.id));
-  const locked = unrevealed.find((r) => r.id === pinnedId) ?? unrevealed[0] ?? null;
+  const pinned = unrevealed.find((r) => r.id === pinnedId);
+  const locked = pinned ? [pinned, ...unrevealed.filter((r) => r !== pinned)] : unrevealed;
   return { visible, locked };
 }
 

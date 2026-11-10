@@ -876,7 +876,7 @@ export const swaggerDocument = {
       post: {
         tags: ['Discover'],
         summary: '[별사탕] 받은 좋아요 1명 공개',
-        description: '별사탕 2개로 잠긴 카드 공개, 또는 free=true 면 무료 카드(24시간에 1장 — 없으면 409 free_unavailable). 무료 카드는 FE 가 잠긴 카드를 화면에 띄우는 순간 부른다. 상대가 탈퇴·정지·차단됐거나 좋아요가 없으면 차감 없이 revealed=false. 유료화 ON 의 GET /likes-received 는 공개한 사람(공개 순) + 맨 끝 잠긴 카드 1장(locked=true, 무료 카드가 있으면 free_available=true)만 반환.',
+        description: '별사탕 2개로 잠긴 카드 공개, 또는 free=true 면 무료 카드(24시간에 1장 — 없으면 409 free_unavailable). 사용자가 고른 잠긴 카드에 부른다. 상대가 탈퇴·정지·차단됐거나 좋아요가 없으면 차감 없이 revealed=false. 유료화 ON 의 GET /likes-received 는 공개한 사람(공개 순) + 아직 안 연 사람 전원(locked=true)을 반환. 잠긴 카드 맨 앞(free_next=true)이 다음 무료 카드로 고정되고, 무료 카드를 쓸 수 있으면 조회 시 서버가 그 카드를 자동으로 연다(just_revealed=true).',
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['liker_id'], properties: { liker_id: { type: 'string', format: 'uuid' }, free: { type: 'boolean', default: false } } } } } },
         responses: {
           200: { description: '공개됨', content: { 'application/json': { schema: { type: 'object', properties: { revealed: { type: 'boolean' } } } } } },

@@ -119,7 +119,7 @@ describe('buildPushBody 개수 표시', () => {
   });
 
   it('메시지 외 타입은 count 를 무시한다', () => {
-    expect(buildPushBody('like', 'ko', '', 5)).toBe('새로운 좋아요가 도착했어요');
+    expect(buildPushBody('like', 'ko', '', 5)).toBe('누군가 인사를 건넸어요');
     expect(buildPushBody('match', 'ko', '콘', 5)).toBe('콘님과 매칭되었어요!');
   });
 });

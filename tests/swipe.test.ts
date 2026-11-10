@@ -491,30 +491,30 @@ describe('POST /api/discover/likes-received/reveal — 무료 카드', () => {
 describe('splitLikeCards — 받은 좋아요 카드 순서', () => {
   const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }]; // 점수순
 
-  it('공개한 카드는 공개(본) 시각 순, 맨 끝은 점수 1위 미공개자', () => {
+  it('공개한 카드는 공개(본) 시각 순, 그 뒤 미공개자 전원이 점수순', () => {
     const at = new Map([
       ['c', '2026-11-09T10:00:00Z'],
       ['a', '2026-11-09T12:00:00Z'],
     ]);
     const { visible, locked } = splitLikeCards(rows, at, null);
     expect(visible.map((r) => r.id)).toEqual(['c', 'a']);
-    expect(locked?.id).toBe('b');
+    expect(locked.map((r) => r.id)).toEqual(['b', 'd']);
   });
 
-  it('고정된 잠긴 카드는 점수 높은 새 좋아요가 와도 그대로', () => {
+  it('고정된 다음 무료 카드는 점수 높은 새 인사가 와도 맨 앞', () => {
     const { locked } = splitLikeCards(rows, new Map(), 'c');
-    expect(locked?.id).toBe('c');
+    expect(locked.map((r) => r.id)).toEqual(['c', 'a', 'b', 'd']);
   });
 
-  it('고정된 카드가 공개되면 다음 미공개자가 잠긴 카드', () => {
+  it('고정된 카드가 열리면 점수 1위가 맨 앞', () => {
     const { visible, locked } = splitLikeCards(rows, new Map([['c', '2026-11-09T10:00:00Z']]), 'c');
     expect(visible.map((r) => r.id)).toEqual(['c']);
-    expect(locked?.id).toBe('a');
+    expect(locked.map((r) => r.id)).toEqual(['a', 'b', 'd']);
   });
 
   it('모두 공개했으면 잠긴 카드 없음', () => {
     const all = new Map(rows.map((r, i) => [r.id, `2026-11-09T1${i}:00:00Z`]));
-    expect(splitLikeCards(rows, all, null).locked).toBeNull();
+    expect(splitLikeCards(rows, all, null).locked).toEqual([]);
   });
 });
 

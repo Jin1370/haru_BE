@@ -32,7 +32,7 @@ Express 5 + Supabase + ElevenLabs 기반 크로스언어 소개팅 API 서버.
 - `/api/auth` — Google OAuth, 토큰 갱신
 - `/api/profile` — 프로필 CRUD, 사진 업로드/삭제 (JPEG/PNG/WebP만 허용, 파일명 UUID화)
 - `/api/voice` — ElevenLabs 음성 클론 관리
-- `/api/discover` — `/playlists` 탐색 플레이리스트(목록·열기·카드·seen), `/swipe` 대화 신청 (동시 like 중복 매치 방지), `/quota` 별사탕 상태, `/likes-received` 받은 좋아요 목록 (나를 like 한 사용자 중 미스와이프·비차단 후보, 유료화 ON 이면 공개 순 + 맨 끝 잠긴 카드 1장) + `/likes-received/reveal` (별사탕 또는 무료 카드)
+- `/api/discover` — `/playlists` 탐색 플레이리스트(목록·열기·카드·seen), `/swipe` 대화 신청 (동시 like 중복 매치 방지), `/quota` 별사탕 상태, `/likes-received` 받은 좋아요 목록 (나를 like 한 사용자 중 미스와이프·비차단 후보, 유료화 ON 이면 공개 순 + 안 연 사람 전원 잠긴 카드, 맨 앞 잠긴 카드는 무료 시각이 되면 조회 때 자동 공개) + `/likes-received/reveal` (별사탕 또는 무료 카드)
 - `/api/matches` — 매치 목록(N+1 해결 RPC, 커서 페이지네이션), 언매치, 메시지 CRUD, 읽음 처리
 - `/api/block` — 유저 차단/해제/목록 (차단 시 매치 자동 soft delete, 해제 시 404 처리)
 - `/api/report` — 유저 신고

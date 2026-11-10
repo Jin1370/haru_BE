@@ -24,6 +24,8 @@ async function makeBlurred(sourceUrl: string): Promise<Buffer> {
 
 // userId → 메인 사진 블러 URL. 실패한 사용자는 맵에서 빠진다 (호출처가 사진 없는
 // 잠긴 카드로 처리).
+const BLUR_CONCURRENCY = 4;
+
 export async function getBlurredMainPhotos(userIds: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (userIds.length === 0) return out;
@@ -39,26 +41,31 @@ export async function getBlurredMainPhotos(userIds: string[]): Promise<Map<strin
     return out;
   }
 
-  await Promise.all(
-    (data ?? []).map(async (row: any) => {
-      if (row.blurred_url) {
-        out.set(row.user_id, row.blurred_url);
-        return;
-      }
-      if (!row.converted_url) return;
-      try {
-        const buffer = await makeBlurred(row.converted_url);
-        const url = await uploadFile('photos', `${row.user_id}/blurred/${row.id}_r${BLUR_RADIUS}.jpg`, buffer, 'image/jpeg');
-        const { error: updErr } = await supabase
-          .from('profile_photos')
-          .update({ blurred_url: url })
-          .eq('id', row.id);
-        if (updErr) console.error('[photoBlur.save_failed]', updErr.message);
-        out.set(row.user_id, url);
-      } catch (e) {
-        console.error('[photoBlur.generate_failed]', row.id, (e as Error).message);
-      }
-    }),
-  );
+  const missing: any[] = [];
+  for (const row of data ?? []) {
+    if (row.blurred_url) out.set(row.user_id, row.blurred_url);
+    else if (row.converted_url) missing.push(row);
+  }
+  // 없는 블러본은 몇 장씩만 동시에 만든다 — 받은 좋아요는 잠긴 카드를 한꺼번에(최대
+  // LIKES_RECEIVED_MAX 명) 내려주므로, 전부 동시에 디코딩하면 서버 메모리가 터진다.
+  // 한 번 만든 블러본은 저장돼 다음부터는 바로 쓴다.
+  for (let i = 0; i < missing.length; i += BLUR_CONCURRENCY) {
+    await Promise.all(
+      missing.slice(i, i + BLUR_CONCURRENCY).map(async (row: any) => {
+        try {
+          const buffer = await makeBlurred(row.converted_url);
+          const url = await uploadFile('photos', `${row.user_id}/blurred/${row.id}_r${BLUR_RADIUS}.jpg`, buffer, 'image/jpeg');
+          const { error: updErr } = await supabase
+            .from('profile_photos')
+            .update({ blurred_url: url })
+            .eq('id', row.id);
+          if (updErr) console.error('[photoBlur.save_failed]', updErr.message);
+          out.set(row.user_id, url);
+        } catch (e) {
+          console.error('[photoBlur.generate_failed]', row.id, (e as Error).message);
+        }
+      }),
+    );
+  }
   return out;
 }

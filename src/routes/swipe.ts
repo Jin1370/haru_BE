@@ -543,16 +543,14 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
 
     if (nextFree === null && split.locked.length > 0) {
       const target = split.locked[0].id;
-      // ponytail: 동시에 두 번 불리면 무료 카드가 두 장 나갈 수 있다 (락 없음 — reveal 라우트와 같음).
-      const { error: freeErr } = await supabase
-        .from('like_reveals')
-        .insert({ viewer_id: req.userId!, liker_id: target, paid: false });
-      if (freeErr && freeErr.code !== '23505') {
-        res.status(500).json({ error: freeErr.message });
+      const won = await claimFreeReveal(req.userId!, target);
+      if (won === null) {
+        res.status(500).json({ error: 'free reveal failed' });
         return;
       }
-      revealedAt.set(target, new Date().toISOString());
-      justRevealedId = target;
+      // 동시에 온 다른 요청이 먼저 연 카드가 있으면 그 카드를 연 것으로 본다.
+      revealedAt.set(won, new Date().toISOString());
+      justRevealedId = won;
       split = splitLikeCards(scored, revealedAt, null);
     }
 
@@ -608,6 +606,44 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
 
   res.json(results);
 });
+
+// 무료 카드 한 장 열기 — 받은 인사 탭에 들어갈 때 목록 요청이 거의 동시에 두 번 나가면,
+// 둘 다 "무료 카드 있음" 을 보고 각자 다른 카드를 열 수 있다. 일단 넣은 뒤 24시간 안의 무료
+// 공개를 다시 읽어 가장 먼저 들어간 한 장만 남기고 내 것이 아니면 지운다. 남은 카드 id 를
+// 돌려준다 (실패면 null).
+async function claimFreeReveal(viewerId: string, likerId: string): Promise<string | null> {
+  const { error: insErr } = await supabase
+    .from('like_reveals')
+    .insert({ viewer_id: viewerId, liker_id: likerId, paid: false });
+  if (insErr && insErr.code !== '23505') {
+    console.error('[likes-received] free reveal insert failed:', insErr.message);
+    return null;
+  }
+  const since = new Date(Date.now() - REVEAL_FREE_INTERVAL_MS).toISOString();
+  const { data, error } = await supabase
+    .from('like_reveals')
+    .select('liker_id, revealed_at')
+    .eq('viewer_id', viewerId)
+    .eq('paid', false)
+    .gte('revealed_at', since)
+    .order('revealed_at', { ascending: true })
+    .order('liker_id', { ascending: true });
+  if (error || !data?.length) {
+    console.error('[likes-received] free reveal check failed:', error?.message);
+    return likerId;
+  }
+  const winner = data[0].liker_id as string;
+  if (winner !== likerId) {
+    const { error: delErr } = await supabase
+      .from('like_reveals')
+      .delete()
+      .eq('viewer_id', viewerId)
+      .eq('liker_id', likerId)
+      .eq('paid', false);
+    if (delErr) console.error('[likes-received] free reveal rollback failed:', delErr.message);
+  }
+  return winner;
+}
 
 // 유료화 ON 의 카드 나누기. rows 는 점수순으로 받는다.
 // 공개한 카드(무료든 별사탕이든)는 공개 시각 = 본 시각 순으로 앞에, 그 뒤에 아직 안 연
@@ -928,6 +964,74 @@ async function loadPlaylistCards(userId: string, playlistId: number): Promise<Re
   return cards.filter((c): c is NonNullable<typeof c> => c !== null);
 }
 
+// 플레이리스트에 들어간 뒤 나간 사람 — 탈퇴·정지·숨김, 상대가 나를 차단, 보여 줄 사진 없음.
+// 이 자리는 새 후보로 채운다. 내가 차단·신고한 사람은 넣지 않는다 — 내가 고른 것이라,
+// 넣으면 마음에 안 드는 카드를 차단해 새 카드로 바꿔 산 것보다 많이 볼 수 있다.
+async function goneMemberIds(userId: string, ids: string[]): Promise<Set<string>> {
+  const gone = new Set<string>();
+  if (ids.length === 0) return gone;
+  const [profilesResult, blockedMeResult, photos] = await Promise.all([
+    supabase.from('profiles').select('id, is_active, frozen_at').in('id', ids),
+    supabase.from('blocks').select('blocker_id').eq('blocked_id', userId).in('blocker_id', ids),
+    fetchReadyPhotosByUser(ids, 'playlist-gone'),
+  ]);
+  if (profilesResult.error || blockedMeResult.error) {
+    // 못 세면 채우지 않는 쪽(나간 사람 없음)으로 — 잘못 채워 칸이 넘치는 것보다 낫다.
+    console.error('[playlists] gone check failed:', (profilesResult.error ?? blockedMeResult.error)!.message);
+    return gone;
+  }
+  const profiles = new Map((profilesResult.data ?? []).map((p: any) => [p.id as string, p]));
+  const blockedMe = new Set((blockedMeResult.data ?? []).map((b: any) => b.blocker_id as string));
+  for (const id of ids) {
+    const p = profiles.get(id);
+    if (
+      !p?.is_active ||
+      p.frozen_at ||
+      env.discover.hiddenUserIds.includes(id) ||
+      blockedMe.has(id) ||
+      (photos.get(id) ?? []).length === 0
+    ) {
+      gone.add(id);
+    }
+  }
+  return gone;
+}
+
+// 한 플레이리스트의 빈자리(나간 사람 몫 포함)를 지금 바로 새 후보로 채운다 — 카드 화면에서
+// 나간 사람에게 인사한 순간 그 자리를 메워 응답에 실어 보낸다(화면을 나갔다 오지 않아도 된다).
+// 채운 후보 id 를 돌려준다 (후보가 없거나 꽉 찼으면 빈 배열).
+async function refillPlaylist(userId: string, playlistId: number): Promise<string[]> {
+  const { data: items, error } = await supabase
+    .from('discover_playlist_items')
+    .select('candidate_id, position')
+    .eq('playlist_id', playlistId);
+  if (error) throw new Error(`discover_playlist_items: ${error.message}`);
+  const members = (items ?? [])
+    .map((i: any) => i.candidate_id as string)
+    .filter((id) => id !== env.campaign.botUserId);
+  const gone = await goneMemberIds(userId, members);
+  const room = CARD_RESET_AMOUNT - members.filter((id) => !gone.has(id)).length;
+  if (room <= 0) return [];
+
+  const pool = await loadDiscoverPool(userId, CARD_RESET_AMOUNT);
+  if ('error' in pool) throw new Error(`discover pool: ${pool.error}`);
+  const add = pool.scored.slice(0, room).map((r) => r.id as string);
+  if (add.length === 0) return [];
+
+  const last = Math.max(0, ...(items ?? []).map((i: any) => i.position as number));
+  const { error: upsertErr } = await supabase.from('discover_playlist_items').upsert(
+    add.map((candidateId, i) => ({
+      playlist_id: playlistId,
+      user_id: userId,
+      candidate_id: candidateId,
+      position: last + i + 1,
+    })),
+    { onConflict: 'playlist_id,candidate_id', ignoreDuplicates: true },
+  );
+  if (upsertErr) throw new Error(`playlist refill: ${upsertErr.message}`);
+  return add;
+}
+
 // 오늘 연 칸이 덜 찼으면(열 때 후보가 모자랐음) 그 뒤 생긴 후보를 먼저 채운다 — 먼저 연 칸
 // (id 작은 쪽)부터 칸당 최대 CARD_RESET_AMOUNT 명. 후보가 띄엄띄엄 생길 때 1명짜리 칸이
 // 여러 개로 쪼개져 하루 3칸을 낭비하지 않게 한다. rest = 채우고 남은 후보 (새 칸 몫).
@@ -962,7 +1066,8 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
     return;
   }
 
-  // 칸별 인원(캠페인 봇 제외)과 마지막 순서.
+  // 칸별 인원(캠페인 봇·나간 사람 제외)과 마지막 순서. 열고 나서 탈퇴·정지 등으로 나간
+  // 사람은 세지 않아, 그 자리를 아래 채우기가 새 후보로 메운다 (산 만큼 카드를 본다).
   const counts = new Map<number, number>();
   const lastPosition = new Map<number, number>();
   if (today.length > 0) {
@@ -974,9 +1079,13 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
       res.status(500).json({ error: error.message });
       return;
     }
+    const gone = await goneMemberIds(
+      req.userId!,
+      (items ?? []).map((i: any) => i.candidate_id as string).filter((id) => id !== env.campaign.botUserId),
+    );
     for (const i of items ?? []) {
       lastPosition.set(i.playlist_id, Math.max(lastPosition.get(i.playlist_id) ?? 0, i.position));
-      if (i.candidate_id !== env.campaign.botUserId) {
+      if (i.candidate_id !== env.campaign.botUserId && !gone.has(i.candidate_id)) {
         counts.set(i.playlist_id, (counts.get(i.playlist_id) ?? 0) + 1);
       }
     }
@@ -1073,7 +1182,8 @@ router.post(
 );
 
 // 플레이리스트 열기. 무료 칸이 아니면 차감 전에 곡 수를 다시 세어, 사용자가 확인한
-// 곡 수(expected_count)보다 적으면 차감 없이 409 cards_changed + 현재 곡 수.
+// 곡 수(expected_count)와 다르면(적든 많든) 차감 없이 409 cards_changed + 현재 곡 수 —
+// 가격이 곡 수에 비례해, 늘었을 때 그냥 열면 확인한 것보다 많이 차감된다.
 router.post(
   '/playlists/:idx/open',
   requireNotFrozen,
@@ -1105,7 +1215,7 @@ router.post(
     }
     const picks = pool.scored.slice(0, CARD_RESET_AMOUNT).map((r) => r.id as string);
     const expected = req.body.expected_count as number | undefined;
-    if (picks.length === 0 || (expected !== undefined && picks.length < expected)) {
+    if (picks.length === 0 || (expected !== undefined && picks.length !== expected)) {
       res.status(409).json({ error: 'Available cards changed', code: 'cards_changed', available_count: picks.length });
       return;
     }
@@ -1133,6 +1243,12 @@ router.post(
     if (error) {
       if (error.message.includes('insufficient_stars')) {
         res.status(402).json({ error: 'Not enough stars', code: 'insufficient_stars' });
+        return;
+      }
+      // 고른 사람 일부가 그사이 다른 칸에 들어갔다(두 기기에서 거의 동시에 연 경우) — mig 066 이
+      // 차감까지 취소했다. 인원이 바뀐 것과 같으니 다시 묻는다.
+      if (error.message.includes('cards_changed')) {
+        res.status(409).json({ error: 'Available cards changed', code: 'cards_changed' });
         return;
       }
       // 그사이 다른 기기에서 오늘 첫 플레이리스트를 열었다 — 무료가 아니게 됐다.
@@ -1263,7 +1379,40 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
       monetized && req.body.source === 'likes' && direction === 'like'
         ? await refundLikeReveal(req.userId!, swiped_id)
         : 0;
-    res.json({ direction, match: null, skipped: true, ...(refunded > 0 ? { refunded_stars: refunded } : {}) });
+    // 플레이리스트 카드였으면 그 자리를 바로 새 후보로 채워 카드를 함께 보낸다 — 산 만큼 본다.
+    // 실패해도 건너뛰기 자체는 성공이다 (다음에 탐색 탭을 열 때 다시 채운다).
+    let replacements: Record<string, unknown>[] = [];
+    if (req.body.source === 'playlist') {
+      try {
+        const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
+        const today = await getTodayPlaylists(req.userId!, localDate);
+        const { data: holder } = today.length
+          ? await supabase
+              .from('discover_playlist_items')
+              .select('playlist_id')
+              .in('playlist_id', today.map((p) => p.id))
+              .eq('candidate_id', swiped_id)
+              .limit(1)
+          : { data: [] };
+        const playlistId = (holder ?? [])[0]?.playlist_id as number | undefined;
+        if (playlistId !== undefined) {
+          const added = await refillPlaylist(req.userId!, playlistId);
+          if (added.length > 0) {
+            const cards = await loadPlaylistCards(req.userId!, playlistId);
+            replacements = cards.filter((c) => added.includes(c.id as string));
+          }
+        }
+      } catch (e) {
+        console.error('[swipe] playlist refill failed:', (e as Error).message);
+      }
+    }
+    res.json({
+      direction,
+      match: null,
+      skipped: true,
+      ...(refunded > 0 ? { refunded_stars: refunded } : {}),
+      ...(replacements.length > 0 ? { replacements } : {}),
+    });
     return;
   }
 

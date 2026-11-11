@@ -859,7 +859,7 @@ export const swaggerDocument = {
       post: {
         tags: ['Discover'],
         summary: '플레이리스트 열기 (첫 칸 무료, 나머지 별사탕)',
-        description: '점수순 다음 최대 10명(+그날 첫 칸에 캠페인 봇)을 고정한다. 이미 연 칸이면 차감 없이 그 카드를 돌려준다. expected_count 보다 곡 수가 적거나 0이면 차감 없이 409 cards_changed.',
+        description: '점수순 다음 최대 10명(+그날 첫 칸에 캠페인 봇)을 고정한다. 이미 연 칸이면 차감 없이 그 카드를 돌려준다. expected_count 와 곡 수가 다르거나(적든 많든) 0이면 차감 없이 409 cards_changed.',
         parameters: [
           { name: 'idx', in: 'path', required: true, schema: { type: 'integer', minimum: 0, maximum: 2 } },
           { name: 'tz_offset_minutes', in: 'query', required: true, schema: { type: 'integer' } },

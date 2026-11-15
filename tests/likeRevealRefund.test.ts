@@ -48,7 +48,7 @@ beforeEach(() => {
 describe('refundLikeReveal', () => {
   it('무료 1 + 유료 1 로 공개했으면 같은 구성으로 돌려주고 공개를 지운다', async () => {
     state.reveal = { paid: true, free_spent: 1, paid_spent: 1 };
-    expect(await refundLikeReveal('me', 'liker')).toBe(2);
+    expect((await refundLikeReveal('me', 'liker')).stars).toBe(2);
     expect(state.inserted.map((r) => [r.delta, r.paid, r.kind])).toEqual([
       [1, false, 'refund'],
       [1, true, 'refund'],
@@ -58,7 +58,7 @@ describe('refundLikeReveal', () => {
 
   it('유료로만 썼으면 유료 줄 하나만', async () => {
     state.reveal = { paid: true, free_spent: 0, paid_spent: 2 };
-    expect(await refundLikeReveal('me', 'liker')).toBe(2);
+    expect((await refundLikeReveal('me', 'liker')).stars).toBe(2);
     expect(state.inserted).toHaveLength(1);
     expect(state.inserted[0]).toMatchObject({ delta: 2, paid: true });
   });
@@ -66,15 +66,21 @@ describe('refundLikeReveal', () => {
   it('같은 공개는 두 번 돌려주지 않는다', async () => {
     state.reveal = { paid: true, free_spent: 2, paid_spent: 0 };
     await refundLikeReveal('me', 'liker');
-    expect(await refundLikeReveal('me', 'liker')).toBe(0);
+    expect((await refundLikeReveal('me', 'liker')).stars).toBe(0);
     expect(state.inserted).toHaveLength(1);
   });
 
-  it('무료 카드(paid=false)나 공개 기록이 없으면 돌려주지 않는다', async () => {
+  it('무료 카드(paid=false)는 별사탕 대신 공개를 지워 무료 카드를 돌려준다', async () => {
     state.reveal = { paid: false, free_spent: 0, paid_spent: 0 };
-    expect(await refundLikeReveal('me', 'liker')).toBe(0);
+    expect(await refundLikeReveal('me', 'liker')).toEqual({ stars: 0, freeRestored: true });
+    expect(state.deleted).toBe(true);
+    expect(state.inserted).toHaveLength(0);
+  });
+
+  it('공개 기록이 없으면 아무것도 돌려주지 않는다', async () => {
     state.reveal = null;
-    expect(await refundLikeReveal('me', 'liker')).toBe(0);
+    expect(await refundLikeReveal('me', 'liker')).toEqual({ stars: 0, freeRestored: false });
+    expect(state.deleted).toBe(false);
     expect(state.inserted).toHaveLength(0);
   });
 });

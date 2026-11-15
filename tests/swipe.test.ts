@@ -263,7 +263,7 @@ vi.mock('../src/config/supabase', () => {
 
 // app 은 mock 이 hoist 된 뒤 import (vitest hoisting 으로 vi.mock 이 먼저 평가됨).
 import { app } from '../src/index';
-import { allocatePlaylistTopUp, applyPrefFilters, splitLikeCards } from '../src/routes/swipe';
+import { allocatePlaylistTopUp, splitLikeCards } from '../src/routes/swipe';
 
 // supabase.auth.getUser mock 이 토큰 문자열을 그대로 userId 로 반환하므로
 // Bearer 값 = userId.
@@ -426,33 +426,6 @@ describe('POST /api/discover/swipe — 별사탕 유료화 ON (mig 059)', () => 
     const res = await swipe({ direction: 'like' });
 
     expect(res.status).toBe(409);
-  });
-});
-
-describe('applyPrefFilters — 나이 상한 (FE 라벨 `40+` 정합)', () => {
-  // gte/lte 호출만 기록하는 최소 stub 쿼리.
-  function recorder() {
-    const calls: { fn: string; col: string; val: any }[] = [];
-    const q: any = {
-      in(col: string, val: any) { calls.push({ fn: 'in', col, val }); return q; },
-      lte(col: string, val: any) { calls.push({ fn: 'lte', col, val }); return q; },
-      gte(col: string, val: any) { calls.push({ fn: 'gte', col, val }); return q; },
-    };
-    return { q, calls };
-  }
-
-  it('max_age=40 (슬라이더 상한) 이면 상한 필터를 걸지 않는다 — 41세+ 도 노출', () => {
-    const { q, calls } = recorder();
-    applyPrefFilters(q, { min_age: 18, max_age: 40 });
-    expect(calls.find((c) => c.fn === 'gte')).toBeUndefined();
-    // 하한(18세 이상)은 그대로 유지.
-    expect(calls.find((c) => c.fn === 'lte')?.col).toBe('birth_date');
-  });
-
-  it('max_age=39 이면 상한 필터를 적용한다', () => {
-    const { q, calls } = recorder();
-    applyPrefFilters(q, { min_age: 18, max_age: 39 });
-    expect(calls.find((c) => c.fn === 'gte')?.col).toBe('birth_date');
   });
 });
 

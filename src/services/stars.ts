@@ -33,7 +33,12 @@ export async function revealLike(viewerId: string, likerId: string, stars: numbe
 
 // 유료 공개를 쓴 그대로(무료분은 무료, 유료분은 유료) 돌려주고 공개를 취소한다.
 // 원장 ref 유니크로 같은 공개를 두 번 돌려주지 않는다. 돌려준 개수 반환 (없으면 0).
-export async function refundLikeReveal(viewerId: string, likerId: string): Promise<number> {
+// 무료 카드로 연 공개면 기록만 지워 24시간 무료 타이머를 되돌린다 (다음 목록 조회 때 서버가
+// 다음 카드를 무료로 연다) — freeRestored=true.
+export async function refundLikeReveal(
+  viewerId: string,
+  likerId: string,
+): Promise<{ stars: number; freeRestored: boolean }> {
   const { data: reveal, error } = await supabase
     .from('like_reveals')
     .select('paid, free_spent, paid_spent')
@@ -41,7 +46,19 @@ export async function refundLikeReveal(viewerId: string, likerId: string): Promi
     .eq('liker_id', likerId)
     .maybeSingle();
   if (error) throw new Error(`like_reveals: ${error.message}`);
-  if (!reveal?.paid) return 0;
+  if (!reveal) return { stars: 0, freeRestored: false };
+  if (!reveal.paid) {
+    const { error: delErr } = await supabase
+      .from('like_reveals')
+      .delete()
+      .eq('viewer_id', viewerId)
+      .eq('liker_id', likerId);
+    if (delErr) {
+      console.error('[refundLikeReveal] free reveal delete failed:', delErr.message);
+      return { stars: 0, freeRestored: false };
+    }
+    return { stars: 0, freeRestored: true };
+  }
 
   const ref = `like_reveal:${viewerId}:${likerId}`;
   const rows = [
@@ -64,7 +81,7 @@ export async function refundLikeReveal(viewerId: string, likerId: string): Promi
     .eq('viewer_id', viewerId)
     .eq('liker_id', likerId);
   if (deleteErr) console.error('[refundLikeReveal] reveal delete failed:', deleteErr.message);
-  return refunded;
+  return { stars: refunded, freeRestored: false };
 }
 
 // 충전. ref(외부 거래 ID)가 이미 있으면 지급하지 않고 false — 웹훅 재시도 대비.

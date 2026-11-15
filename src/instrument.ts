@@ -17,7 +17,16 @@ if (process.env.NODE_ENV !== 'test' && process.env.SENTRY_DSN) {
     // "외부 의존성 실패 시 console.error 가시화" 컨벤션(CLAUDE.md)을 그대로 Sentry
     // 이벤트로 승격 — catch 마다 captureException 을 심는 대신 로그 한 곳만 계측.
     // warn 은 운영 신호(모더레이션 등)라 제외, error 만.
-    integrations: [Sentry.captureConsoleIntegration({ levels: ['error'] })],
+    //
+    // Google_GenAI 통합은 뺀다 — 호출 지점에서 에러를 먼저 보고해서, 회사 키 429 처럼
+    // translation.ts 가 폴백으로 복구한 실패까지 `Handled: No` 이슈로 올라온다.
+    // beforeSend 로 버리면 안 된다: 보고 시도만으로 에러 객체에 "이미 보고됨" 표시가
+    // 남아, 전 경로 실패 시 호출처의 captureException 까지 조용히 무시된다.
+    // 최종 실패는 message.ts / voiceIntro.ts 의 catch 가 보고한다.
+    integrations: (defaults) => [
+      ...defaults.filter((integration) => integration.name !== 'Google_GenAI'),
+      Sentry.captureConsoleIntegration({ levels: ['error'] }),
+    ],
     ignoreErrors: [
       // 클라이언트 연결 끊김(multer upload abort)은 서버 버그가 아니라 정상 클라이언트 동작.
       'Request aborted',

@@ -65,39 +65,6 @@ type Viewer = {
   interests: string[];
 };
 
-type ViewerPrefs = {
-  preferred_nationalities: string[];
-};
-
-// 사전 SQL 필터: 성별/연령만 (디스커버 / 받은좋아요 공용). 언어·국가 선호는
-// 티어 정렬 신호로 사용되므로 여기서 IN 필터로 후보를 제거하지 않는다
-// (미부합 후보는 하위 티어로 밀려나 노출만 후순위).
-export function applyPrefFilters<Q>(query: Q, prefs: any): Q {
-  if (!prefs) return query;
-  let q: any = query;
-  if (prefs.preferred_genders && prefs.preferred_genders.length > 0) {
-    q = q.in('gender', prefs.preferred_genders);
-  }
-  const now = new Date();
-  if (prefs.min_age) {
-    const maxBirthDate = new Date(now.getFullYear() - prefs.min_age, now.getMonth(), now.getDate())
-      .toISOString().split('T')[0];
-    q = q.lte('birth_date', maxBirthDate);
-  }
-  // max_age 가 슬라이더 상한이면 "그 나이 이상 전부" 의미 — FE 라벨이 `40+` 로
-  // 표시하므로(haru_FE/src/components/ui/AgeRangeSlider.tsx:106-107) 상한 필터를
-  // 걸지 않는다. 안 그러면 41세 이상은 누구의 디스커버에도 안 뜬다(FE 슬라이더가
-  // 40 초과를 저장할 수 없어 모든 계정이 max_age=40).
-  // 이 값은 haru_FE/src/utils/preferences.ts 의 MAX_AGE 와 동일해야 한다.
-  const OPEN_ENDED_MAX_AGE = 40;
-  if (prefs.max_age && prefs.max_age < OPEN_ENDED_MAX_AGE) {
-    const minBirthDate = new Date(now.getFullYear() - prefs.max_age - 1, now.getMonth(), now.getDate())
-      .toISOString().split('T')[0];
-    q = q.gte('birth_date', minBirthDate);
-  }
-  return q as Q;
-}
-
 // 결정적 해시 기반 jitter (같은 viewer-candidate 쌍에 대해 동일 값 반환)
 function hashJitter(candidateId: string, viewerId: string, max: number): number {
   let hash = 0;
@@ -109,27 +76,10 @@ function hashJitter(candidateId: string, viewerId: string, max: number): number 
   return (Math.abs(hash) % (max * 100)) / 100;
 }
 
-// 선호 부합 판정. 선호가 비어있으면 무조건 부합(=제약 없음).
-export function matchesNationality(candidate: Candidate, prefs: ViewerPrefs): boolean {
-  return prefs.preferred_nationalities.length === 0
-    || prefs.preferred_nationalities.includes(candidate.nationality);
-}
-
-// 2-단계 티어. 작을수록 상위 노출. 언어가 국적에서 파생되면서 선호 언어 차원은
-// 제거됐다 (선호 국적이 동일 신호를 커버). 국적 부합 여부만으로 가른다.
-//   1: 선호 국가 부합 (선호가 비어있으면 항상 부합)
-//   2: 선호 국가 미부합
-// 참고: viewer 본인 언어와 같은 후보는 여기 도달 전에 SQL 사전 필터에서 이미 제외됨
-// (크로스언어 차별점 — preferred_languages 와 무관한 별도 메커니즘).
-export function computeTier(candidate: Candidate, prefs: ViewerPrefs): number {
-  return matchesNationality(candidate, prefs) ? 1 : 2;
-}
-
-// 동일 티어 안에서의 2차 정렬 점수.
+// 후보 정렬 점수 (높을수록 먼저). 매칭 선호 설정(성별·나이·국적)은 사용자가 적은 지금은
+// 쓰지 않는다 — 규모가 커지면 다시 넣는다 (user_preferences 데이터는 남아 있다).
 // - 기본 신호(관심사·사진·신규·jitter) 합산 상한은 70.
 // - reciprocity: 후보가 이미 viewer 를 like 한 경우. 유료화 OFF 는 +50, ON 은 -15.
-// 티어 경계 보호는 정렬 키 우선순위 (tier ASC > intra DESC) 가 담당 —
-// reciprocity 가 합산을 얼마나 바꿔도 다른 티어 후보를 넘지 못한다.
 export function computeIntraScore(
   candidate: Candidate,
   viewer: Viewer,
@@ -157,7 +107,7 @@ export function computeIntraScore(
   score += hashJitter(candidate.id, viewer.id, 15);
 
   // reciprocity boost: 후보가 이미 viewer 를 like 한 경우.
-  // 유료화 OFF: +50 — 같은 티어 안에서 1순위로 노출해 양방향 마주칠 확률을 높인다.
+  // 유료화 OFF: +50 — 1순위로 노출해 양방향 마주칠 확률을 높인다.
   // 유료화 ON : -15 — 받은 좋아요 공개가 유료라, 탐색에서 앞에 나오면 공개할 이유가
   // 사라진다.
   if (reciprocalLikerIds.has(candidate.id)) {
@@ -167,7 +117,7 @@ export function computeIntraScore(
   return score;
 }
 
-// 탐색 후보 풀 — 제외·선호 필터·점수 정렬까지. 플레이리스트 목록(곡 수)과 열기가 쓴다.
+// 탐색 후보 풀 — 제외 필터·점수 정렬까지. 플레이리스트 목록(곡 수)과 열기가 쓴다.
 const poolError = (status: number, error: string): { status: number; error: string } => ({ status, error });
 
 async function loadDiscoverPool(userId: string, limit: number) {
@@ -187,14 +137,13 @@ async function loadDiscoverPool(userId: string, limit: number) {
     interests: (viewerProfile.interests as string[] | null) ?? [],
   };
 
-  // 스와이프/차단/선호도/reciprocity 풀을 병렬 조회.
+  // 스와이프/차단/reciprocity 풀을 병렬 조회.
   // reciprocity 풀 = 나를 like 한(direction='like') 사람들. idx_swipes_swiped 가
   // swiped_id 인덱스를 제공하므로 swiped_id=viewer 필터는 인덱스 사용.
-  const [swipedResult, blockedResult, prefsResult, reciprocalResult, playlistResult, revealResult] = await Promise.all([
+  const [swipedResult, blockedResult, reciprocalResult, playlistResult, revealResult] = await Promise.all([
     supabase.from('swipes').select('swiped_id, reset_at').eq('swiper_id', userId),
     supabase.from('blocks').select('blocker_id, blocked_id')
       .or(`blocker_id.eq.${userId},blocked_id.eq.${userId}`),
-    supabase.from('user_preferences').select('*').eq('user_id', userId).single(),
     supabase
       .from('swipes')
       .select('swiper_id')
@@ -237,8 +186,6 @@ async function loadDiscoverPool(userId: string, limit: number) {
     ...new Set(env.campaign.botUserId ? [...excludeIds, env.campaign.botUserId] : excludeIds),
   ];
 
-  const prefs = prefsResult.data;
-
   // 점수 계산용 후보 풀 크기. limit 의 5배를 기본으로 하되 최소 200·최대 500 으로
   // 클램프 — JS 스코어링(tier/intra)이 의미 있는 모집단 위에서 동작하도록 한다.
   // (A1: 옛 코드는 min(limit*5,200) 이라 기본 limit=10 에서 풀이 50 에 불과했고,
@@ -279,15 +226,9 @@ async function loadDiscoverPool(userId: string, limit: number) {
     .order('id', { ascending: false })
     .limit(fetchLimit);
 
-  query = applyPrefFilters(query, prefs);
-
   const { data, error } = await query;
 
   if (error) return poolError(500, error.message);
-
-  const viewerPrefs: ViewerPrefs = {
-    preferred_nationalities: (prefs?.preferred_nationalities as string[] | null) ?? [],
-  };
 
   // mig 034: profile_photos 일괄 조회 — status='ready' 변환본 전체를 position ASC
   // 로 모아 user 별 배열로 보관. [0] = main(position=0), length = 스코어링용 ready
@@ -315,7 +256,7 @@ async function loadDiscoverPool(userId: string, limit: number) {
     return true;
   });
 
-  // 티어 + 동일 티어 내 2차 점수 계산 → (tier ASC, intra DESC) 정렬.
+  // 점수 계산 → 높은 순 정렬.
   // mig 034: 스코어링의 "사진 3장+" 신호는 profile_photos ready 사진 수로 판정.
   const scored = visible.map((row: any) => {
     const candidate: Candidate = {
@@ -326,17 +267,10 @@ async function loadDiscoverPool(userId: string, limit: number) {
       photos: readyPhotosByUser.get(row.id) ?? [],
       created_at: row.created_at,
     };
-    return {
-      ...row,
-      _tier: computeTier(candidate, viewerPrefs),
-      _intra: computeIntraScore(candidate, viewer, reciprocalLikerIds),
-    };
+    return { ...row, _intra: computeIntraScore(candidate, viewer, reciprocalLikerIds) };
   });
 
-  scored.sort((a, b) => {
-    if (a._tier !== b._tier) return a._tier - b._tier;
-    return b._intra - a._intra;
-  });
+  scored.sort((a, b) => b._intra - a._intra);
 
   return { scored, slot, botAlreadyHandled };
 }
@@ -352,7 +286,7 @@ async function toDiscoverCard(
   readyPhotosByUser: Map<string, string[]>,
   slot: VoiceIntroSlotLanguage,
 ): Promise<Record<string, unknown> & { id: string }> {
-  const { _tier, _intra, created_at, voice_intro_audio_urls, ...rest } = row;
+  const { _intra, created_at, voice_intro_audio_urls, ...rest } = row;
   const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<Record<VoiceIntroSlotLanguage, string | null>>;
   return {
     ...rest,
@@ -399,18 +333,17 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  // 2) 내가 이미 스와이프한 상대 + 차단 양방향 + viewer 본인 언어 + 선호도를 병렬 조회.
+  // 2) 내가 이미 스와이프한 상대 + 차단 양방향 + viewer 본인 언어를 병렬 조회.
   //    likes-received 풀에서 제거할 ID 집합 (이미 응답 끝난 like 는 매치/패스 결과로
   //    별도 추적되므로 받은 좋아요 카드로 다시 노출할 의미 없음).
   // 다시보기(reset_at)된 pass 는 "아직 응답 안 함" 으로 본다 (예전 DELETE 와 동일 결과).
-  const [viewerSwipesResult, blocksResult, viewerProfileResult, prefsResult, playlistResult] = await Promise.all([
+  const [viewerSwipesResult, blocksResult, viewerProfileResult, playlistResult] = await Promise.all([
     supabase.from('swipes').select('swiped_id').eq('swiper_id', req.userId!).is('reset_at', null),
     supabase
       .from('blocks')
       .select('blocker_id, blocked_id')
       .or(`blocker_id.eq.${req.userId!},blocked_id.eq.${req.userId!}`),
     supabase.from('profiles').select('language, interests').eq('id', req.userId!).single(),
-    supabase.from('user_preferences').select('*').eq('user_id', req.userId!).single(),
     // 오늘 탐색 플레이리스트에 든 사람은 숨긴다 — 같은 사람을 두 탭에서 따로 보지 않게.
     supabase.from('discover_playlist_items').select('candidate_id').eq('user_id', req.userId!),
   ]);
@@ -429,7 +362,6 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     ),
   );
   const viewerLanguage = (viewerProfileResult.data?.language as string | null) ?? '';
-  const prefs = prefsResult.data;
 
   const eligibleIds = likerIds.filter(
     (id) => !swipedSet.has(id) && !blockedSet.has(id) && !env.discover.hiddenUserIds.includes(id),
@@ -439,10 +371,8 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  // 3) 프로필 일괄 조회 — discover hot path 와 동일한 컬럼 집합 + 동일한 사전 필터
-  //    (성별/연령). 언어 선호는 티어 정렬 신호로 사용되므로 SQL 단계 IN 필터에서
-  //    제거하지 않는다 (미부합 후보는 T2/T3 로 밀려나 노출만 후순위).
-  let query = supabase
+  // 3) 프로필 일괄 조회 — discover hot path 와 동일한 컬럼 집합.
+  const query = supabase
     .from('profiles')
     .select(
       'id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, created_at',
@@ -450,8 +380,6 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     .in('id', eligibleIds)
     .eq('is_active', true)
     .is('frozen_at', null);
-
-  query = applyPrefFilters(query, prefs);
 
   const { data: profiles, error: profilesError } = await query;
 
@@ -482,11 +410,8 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return true;
   });
 
-  // 5) 티어 계산 + 정렬: 탐색과 같은 (tier ASC, intra DESC). 이 풀은 전원이 나를
-  //    like 했으므로 reciprocity 는 순서에 영향이 없어 넘기지 않는다.
-  const viewerPrefs: ViewerPrefs = {
-    preferred_nationalities: (prefs?.preferred_nationalities as string[] | null) ?? [],
-  };
+  // 5) 점수 정렬: 탐색과 같은 점수. 이 풀은 전원이 나를 like 했으므로 reciprocity 는
+  //    순서에 영향이 없어 넘기지 않는다.
   const viewer: Viewer = {
     id: req.userId!,
     interests: (viewerProfileResult.data?.interests as string[] | null) ?? [],
@@ -501,17 +426,10 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
       photos: readyPhotosByUser.get(row.id) ?? [],
       created_at: row.created_at,
     };
-    return {
-      ...row,
-      _tier: computeTier(candidate, viewerPrefs),
-      _intra: computeIntraScore(candidate, viewer),
-    };
+    return { ...row, _intra: computeIntraScore(candidate, viewer) };
   });
 
-  scored.sort((a, b) => {
-    if (a._tier !== b._tier) return a._tier - b._tier;
-    return b._intra - a._intra;
-  });
+  scored.sort((a, b) => b._intra - a._intra);
 
   // 별사탕 유료화: 공개한 사람(본 순서대로) 뒤에 아직 안 연 사람 전원을 잠긴(블러) 카드로
   // 내려준다. 잠긴 카드 맨 앞이 다음 무료 카드 — 고정돼서(like_card_pins) 열릴 때까지 바뀌지
@@ -572,7 +490,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   // LAUNCH_CHECKLIST #3: discover 와 동일 — private 버킷 전환에 맞춰 응답 직전
   // voice intro slot URL 을 짧은 TTL 서명 URL 로 변환.
   const results: Record<string, unknown>[] = await Promise.all(
-    visibleRows.map(async ({ _tier, _intra, voice_intro_audio_urls, created_at, ...rest }) => {
+    visibleRows.map(async ({ _intra, voice_intro_audio_urls, created_at, ...rest }) => {
       const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<
         Record<VoiceIntroSlotLanguage, string | null>
       >;
@@ -663,14 +581,13 @@ export function splitLikeCards<T extends { id: string }>(
 }
 
 // 받은 좋아요 푸시 게이트 — 이 like 가 수신자의 받은 좋아요 탭에 실제로 노출되는가.
-// 위 GET /likes-received 의 visible 필터(이미 스와이프함 / is_active / 성별·연령
-// 선호 / 크로스언어 / 사진 / 시청자 언어 보이스 인트로 슬롯)를 한 명분으로 재사용.
+// 위 GET /likes-received 의 visible 필터(이미 스와이프함 / is_active / 크로스언어 /
+// 사진 / 시청자 언어 보이스 인트로 슬롯)를 한 명분으로 재사용.
 // 노출되지 않을 like 까지 푸시하면 "좋아요 왔다" 는 알림을 열었는데 탭이 그대로인
 // 거짓 신호가 된다. 차단·freeze 는 sendPushToUser 가 이미 검사하므로 생략.
 async function isLikeVisibleToReceiver(likerId: string, receiverId: string): Promise<boolean> {
-  const [receiverProfile, prefsResult, receiverSwipe] = await Promise.all([
+  const [receiverProfile, receiverSwipe] = await Promise.all([
     supabase.from('profiles').select('language').eq('id', receiverId).maybeSingle(),
-    supabase.from('user_preferences').select('*').eq('user_id', receiverId).maybeSingle(),
     // 수신자가 이미 이 상대를 스와이프(pass)했으면 받은 좋아요 풀에서 제외됨.
     supabase
       .from('swipes')
@@ -688,15 +605,13 @@ async function isLikeVisibleToReceiver(likerId: string, receiverId: string): Pro
 
   const viewerLanguage = (receiverProfile.data?.language as string | null) ?? '';
 
-  let query = supabase
+  const { data: liker, error } = await supabase
     .from('profiles')
     .select('language, voice_intro_audio_urls')
     .eq('id', likerId)
     .eq('is_active', true)
-    .is('frozen_at', null);
-  query = applyPrefFilters(query, prefsResult.data);
-
-  const { data: liker, error } = await query.maybeSingle();
+    .is('frozen_at', null)
+    .maybeSingle();
   if (error) {
     console.error('[isLikeVisibleToReceiver] liker select error:', error.message);
     return false;
@@ -997,8 +912,9 @@ async function goneMemberIds(userId: string, ids: string[]): Promise<Set<string>
   return gone;
 }
 
-// 한 플레이리스트의 빈자리(나간 사람 몫 포함)를 지금 바로 새 후보로 채운다 — 카드 화면에서
-// 나간 사람에게 인사한 순간 그 자리를 메워 응답에 실어 보낸다(화면을 나갔다 오지 않아도 된다).
+// 카드 화면에서 나간 사람에게 인사한 순간 그 한 자리를 새 후보로 메워 응답에 실어 보낸다
+// (화면을 나갔다 오지 않아도 된다). 한 자리만 — 같은 화면에 인사하지 않은 나간 사람이 더
+// 있어도 그 카드는 화면에 남아 있으므로, 그 몫은 LP 선택 화면(GET /playlists)에서 채운다.
 // 채운 후보 id 를 돌려준다 (후보가 없거나 꽉 찼으면 빈 배열).
 async function refillPlaylist(userId: string, playlistId: number): Promise<string[]> {
   const { data: items, error } = await supabase
@@ -1010,7 +926,7 @@ async function refillPlaylist(userId: string, playlistId: number): Promise<strin
     .map((i: any) => i.candidate_id as string)
     .filter((id) => id !== env.campaign.botUserId);
   const gone = await goneMemberIds(userId, members);
-  const room = CARD_RESET_AMOUNT - members.filter((id) => !gone.has(id)).length;
+  const room = Math.min(1, CARD_RESET_AMOUNT - members.filter((id) => !gone.has(id)).length);
   if (room <= 0) return [];
 
   const pool = await loadDiscoverPool(userId, CARD_RESET_AMOUNT);
@@ -1292,6 +1208,21 @@ async function isUserUnavailable(viewerId: string, targetId: string): Promise<bo
   return !profile?.is_active || !!profile.frozen_at || (blockResult.data ?? []).length > 0;
 }
 
+// 내가 상대를 차단했는가 (신고도 자동 차단). 실패하면 차단으로 본다 — 환불을 막는 쪽이 안전.
+async function viewerBlocked(viewerId: string, targetId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('blocks')
+    .select('blocker_id')
+    .eq('blocker_id', viewerId)
+    .eq('blocked_id', targetId)
+    .limit(1);
+  if (error) {
+    console.error('[swipe] viewer block check failed:', error.message);
+    return true;
+  }
+  return (data ?? []).length > 0;
+}
+
 // 잠긴 받은 좋아요 카드 1명 공개 — 별사탕 REVEAL_STAR_COST 개, 또는 free=true 면 무료
 // 카드(24시간에 1장). 무료 카드는 FE 가 잠긴 카드를 화면에 띄우는 순간 부른다 — 내용을
 // 공개 기록과 함께 내주므로 "봤다" 신고를 빼먹는 변조 앱도 무료로 볼 수 없다.
@@ -1373,12 +1304,17 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
   // 받아둔 카드의 상대가 그사이 탈퇴·정지·차단됐으면 아무것도 기록·차감하지 않고 넘긴다.
   // 무료 카드도 쓰지 않고 매치도 만들지 않는다. 오류가 아니라 카드가 자연스럽게 지나간다.
   if (!isCampaignBot(swiped_id) && (await isUserUnavailable(req.userId!, swiped_id))) {
-    // 별사탕으로 공개한 받은 좋아요 카드에 좋아요 — 매치를 기대하고 낸 별사탕을 돌려준다.
-    // 패스는 사용자가 넘기기로 한 것이라 돌려주지 않는다.
-    const refunded =
-      monetized && req.body.source === 'likes' && direction === 'like'
+    // 공개한 받은 좋아요 카드에 좋아요 — 매치를 기대하고 쓴 것을 돌려준다: 별사탕으로 열었으면
+    // 별사탕, 무료 카드로 열었으면 무료 카드(24시간 타이머). 패스는 사용자가 넘기기로 한 것이라
+    // 돌려주지 않는다. 내가 차단(=신고)한 상대도 돌려주지 않는다 — 열어 보고 마음에 안 들면
+    // 신고한 뒤 인사를 보내 공개 비용을 되찾는 우회가 된다.
+    const refund =
+      monetized &&
+      req.body.source === 'likes' &&
+      direction === 'like' &&
+      !(await viewerBlocked(req.userId!, swiped_id))
         ? await refundLikeReveal(req.userId!, swiped_id)
-        : 0;
+        : { stars: 0, freeRestored: false };
     // 플레이리스트 카드였으면 그 자리를 바로 새 후보로 채워 카드를 함께 보낸다 — 산 만큼 본다.
     // 실패해도 건너뛰기 자체는 성공이다 (다음에 탐색 탭을 열 때 다시 채운다).
     let replacements: Record<string, unknown>[] = [];
@@ -1410,7 +1346,8 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
       direction,
       match: null,
       skipped: true,
-      ...(refunded > 0 ? { refunded_stars: refunded } : {}),
+      ...(refund.stars > 0 ? { refunded_stars: refund.stars } : {}),
+      ...(refund.freeRestored ? { free_restored: true } : {}),
       ...(replacements.length > 0 ? { replacements } : {}),
     });
     return;

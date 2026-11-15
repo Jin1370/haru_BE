@@ -777,7 +777,7 @@ export const swaggerDocument = {
       post: {
         tags: ['Discover'],
         summary: '스와이프 (like/pass). 상호 like 시 매치 자동 생성',
-        description: '좋아요(대화 신청)는 한도 없음. source=playlist(기본): 오늘 내 탐색 플레이리스트에 든 상대만 (아니면 403 not_in_playlist). source=likes: 받은 좋아요 탭 — 유료화 ON 이면 (상대가 나를 like) AND (공개함) 이어야 함 (아니면 403 like_not_revealed). 상대가 탈퇴·정지·숨김·차단이면 기록 없이 skipped=true (별사탕으로 공개한 받은 좋아요 카드에 좋아요했으면 공개에 쓴 별사탕을 refunded_stars 로 돌려줌).',
+        description: '좋아요(대화 신청)는 한도 없음. source=playlist(기본): 오늘 내 탐색 플레이리스트에 든 상대만 (아니면 403 not_in_playlist). source=likes: 받은 좋아요 탭 — 유료화 ON 이면 (상대가 나를 like) AND (공개함) 이어야 함 (아니면 403 like_not_revealed). 상대가 탈퇴·정지·숨김·차단이면 기록 없이 skipped=true (별사탕으로 공개한 받은 좋아요 카드에 좋아요했으면 공개에 쓴 별사탕을 refunded_stars 로, 무료 카드로 공개했으면 무료 카드를 free_restored 로 돌려줌. 내가 차단·신고한 상대는 돌려주지 않음).',
         parameters: [
           {
             name: 'tz_offset_minutes',
@@ -795,7 +795,7 @@ export const swaggerDocument = {
           },
         },
         responses: {
-          200: { description: '스와이프 완료', content: { 'application/json': { schema: { type: 'object', properties: { direction: { type: 'string' }, match: { $ref: '#/components/schemas/Match', nullable: true }, skipped: { type: 'boolean', description: '상대가 탈퇴·정지·숨김·차단 상태라 기록·차감·매치 없이 넘김' }, refunded_stars: { type: 'integer', description: 'skipped 이고 받은 좋아요 탭에서 별사탕으로 공개한 카드에 좋아요한 경우, 공개에 쓴 별사탕을 쓴 그대로(무료·유료) 돌려준 개수. 공개도 취소된다' } } } } } },
+          200: { description: '스와이프 완료', content: { 'application/json': { schema: { type: 'object', properties: { direction: { type: 'string' }, match: { $ref: '#/components/schemas/Match', nullable: true }, skipped: { type: 'boolean', description: '상대가 탈퇴·정지·숨김·차단 상태라 기록·차감·매치 없이 넘김' }, refunded_stars: { type: 'integer', description: 'skipped 이고 받은 좋아요 탭에서 별사탕으로 공개한 카드에 좋아요한 경우, 공개에 쓴 별사탕을 쓴 그대로(무료·유료) 돌려준 개수. 공개도 취소된다' }, free_restored: { type: 'boolean', description: 'skipped 이고 무료 카드로 공개한 카드에 좋아요한 경우 true — 공개를 취소해 24시간 무료 타이머를 되돌림 (다음 목록 조회 때 다음 카드가 무료로 열림)' } } } } } },
           400: { description: '파라미터 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
           409: { description: '이미 스와이프함', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },

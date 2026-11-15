@@ -103,16 +103,17 @@ export function freeNewSlots(freshCount: number): number {
   return Math.min(freshCount, CARD_RESET_AMOUNT, Math.round(4 + freshCount / 8));
 }
 
-// 넘겼던 사람 — 넘긴 지 오래된 순.
-function recycledOldestFirst(pool: PoolCandidate[]): PoolCandidate[] {
-  return pool.filter((c) => c.passed_at).sort((a, b) => (a.passed_at! < b.passed_at! ? -1 : 1));
+// 넘겼던 사람 — 점수 순. DB 가 대기 기간(3일 × 2^(넘긴 횟수-1))이 지난 사람만 주고, 점수는 넘긴
+// 횟수 × 10 만큼 깎아 둔다 (같은 사람이 반복될수록 드물게·뒤로).
+function recycledBestFirst(pool: PoolCandidate[]): PoolCandidate[] {
+  return pool.filter((c) => c.passed_at).sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1));
 }
 
 // 무료 칸: 새 카드 freeNewSlots 장 (점수 순·인사한 사람 칸당 2명) + 나머지는 다시 보기.
 export function pickFreePlaylist(pool: PoolCandidate[]): string[] {
   const fresh = pool.filter((c) => !c.passed_at);
   const picks = pickPlaylistCards(fresh, freeNewSlots(fresh.length));
-  const again = recycledOldestFirst(pool).slice(0, CARD_RESET_AMOUNT - picks.length).map((c) => c.id);
+  const again = recycledBestFirst(pool).slice(0, CARD_RESET_AMOUNT - picks.length).map((c) => c.id);
   return [...picks, ...again];
 }
 
@@ -123,10 +124,10 @@ export function pickPaidPlaylist(pool: PoolCandidate[]): string[] {
   return picks.length === CARD_RESET_AMOUNT ? picks : [];
 }
 
-// 빈자리를 채울 순서 — 새 카드(인사 안 한 사람 점수 순 → 인사한 사람) 다음에 넘겼던 사람(오래된 순).
+// 빈자리를 채울 순서 — 새 카드(인사 안 한 사람 점수 순 → 인사한 사람) 다음에 넘겼던 사람(점수 순).
 function fillOrder(pool: PoolCandidate[]): PoolCandidate[] {
   const fresh = pool.filter((c) => !c.passed_at);
-  return [...fresh.filter((c) => !c.liked_you), ...fresh.filter((c) => c.liked_you), ...recycledOldestFirst(pool)];
+  return [...fresh.filter((c) => !c.liked_you), ...fresh.filter((c) => c.liked_you), ...recycledBestFirst(pool)];
 }
 
 const poolError = (status: number, error: string): { status: number; error: string } => ({ status, error });
@@ -666,7 +667,7 @@ async function finalizePastPlaylists(userId: string, localDate: string): Promise
   if (ids.length > 0) {
     const { data: existing, error: existingErr } = await supabase
       .from('swipes')
-      .select('swiped_id, reset_at, direction')
+      .select('swiped_id, reset_at, direction, pass_count')
       .eq('swiper_id', userId)
       .in('swiped_id', ids);
     if (existingErr) {
@@ -677,11 +678,15 @@ async function finalizePastPlaylists(userId: string, localDate: string): Promise
     const missing = ids.filter((id) => !has.has(id));
     // 다시보기(reset_at)로 풀에 돌아왔던 사람은 기존 행을 다시 pass 로 되돌린다.
     const recycled = ids.filter((id) => has.get(id)?.reset_at);
-    // 넘겼던 카드를 다시 보고 또 넘겼다 — 넘긴 시각을 지금으로 바꿔 다시 보기 순서의 맨 뒤로 보낸다.
-    const passedAgain = ids.filter((id) => {
+    // 넘겼던 카드를 다시 보고 또 넘겼다 — 넘긴 시각을 지금으로, 넘긴 횟수를 +1 (다음 대기 기간이
+    // 두 배로 늘고 다시 보기 순서에서 더 깎인다). 횟수별로 묶어 갱신한다.
+    const againByCount = new Map<number, string[]>();
+    for (const id of ids) {
       const row = has.get(id);
-      return row && !row.reset_at && row.direction === 'pass';
-    });
+      if (!row || row.reset_at || row.direction !== 'pass') continue;
+      const n = (row.pass_count as number | null) ?? 1;
+      againByCount.set(n, [...(againByCount.get(n) ?? []), id]);
+    }
     const pass = { direction: 'pass', source: 'playlist' };
     const [insertResult, updateResult, againResult] = await Promise.all([
       missing.length > 0
@@ -699,13 +704,15 @@ async function finalizePastPlaylists(userId: string, localDate: string): Promise
             .eq('swiper_id', userId)
             .in('swiped_id', recycled)
         : Promise.resolve({ error: null }),
-      passedAgain.length > 0
-        ? supabase
+      Promise.all(
+        [...againByCount].map(([n, list]) =>
+          supabase
             .from('swipes')
-            .update({ created_at: new Date().toISOString() })
+            .update({ created_at: new Date().toISOString(), pass_count: n + 1 })
             .eq('swiper_id', userId)
-            .in('swiped_id', passedAgain)
-        : Promise.resolve({ error: null }),
+            .in('swiped_id', list),
+        ),
+      ).then((rs) => rs.find((r) => r.error) ?? { error: null }),
     ]);
     const finalizeErr = insertResult.error ?? updateResult.error ?? againResult.error;
     if (finalizeErr) {

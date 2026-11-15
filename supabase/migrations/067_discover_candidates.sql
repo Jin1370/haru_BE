@@ -10,8 +10,15 @@
 --   대칭이라 점수가 '거리' 처럼 작동해, 서로의 상위에 함께 뜨는 쌍이 생긴다.
 -- discover_pool: 탐색 후보 전원 + 점수 + 나에게 인사했는지(liked_you) + 내가 넘긴 사람이면
 --   넘긴 시각(passed_at). 인사한 사람은 점수 가산 없이 표시만 한다 — 서버가 플레이리스트당 칸 수를
---   제한해 섞는다. 넘긴 사람(passed_at 있음)은 '다시 보기' 후보 — 새 카드가 모자랄 때 서버가
---   넘긴 지 오래된 순으로 채운다. 인사한(like) 사람은 다시 보여주지 않는다.
+--   제한해 섞는다. 넘긴 사람(passed_at 있음)은 '다시 보기' 후보 — 대기 기간(3일 × 2^(넘긴 횟수-1))이
+--   지난 사람만(최대 3번까지) 돌려주고, score 는 넘긴 횟수 × 10 만큼 깎아 준다. 서버는 이 score 순으로 채운다.
+--   인사한(like) 사람은 다시 보여주지 않는다.
+
+-- 넘긴 횟수 — 다시 보기 카드를 또 넘길 때마다 +1 (자정 정리). 다시 나올 때까지의 대기 기간을
+-- 3일 × 2^(횟수-1) 로 늘리고(3 → 6 → 12 → 24일…), 다시 보기 순서에서 횟수 × 10 점 감점한다 —
+-- 상위권 카드는 금방 돌아와 새 카드가 모자랄 때 질을 받치되, 같은 사람이 반복될수록 드물게 나온다.
+-- 다시 보기는 한 사람당 최대 3번 (넘긴 횟수 4 이상이면 다시 나오지 않는다).
+ALTER TABLE swipes ADD COLUMN IF NOT EXISTS pass_count INTEGER NOT NULL DEFAULT 1;
 
 CREATE OR REPLACE FUNCTION discover_score(p_user UUID, p_ids UUID[])
 RETURNS TABLE (id UUID, score NUMERIC)
@@ -71,7 +78,7 @@ LANGUAGE sql STABLE AS $$
     UNION SELECT unnest(COALESCE(p_exclude, '{}'))
   ),
   passes AS MATERIALIZED (
-    SELECT s.swiped_id AS id, s.created_at FROM swipes s
+    SELECT s.swiped_id AS id, s.created_at, s.pass_count FROM swipes s
     WHERE s.swiper_id = p_user AND s.reset_at IS NULL AND s.direction = 'pass'
   ),
   likers AS MATERIALIZED (
@@ -89,15 +96,22 @@ LANGUAGE sql STABLE AS $$
       -- 보이스 한마디가 내 언어로 없으면 무음 카드라 노출하지 않는다 (차별점 1).
       AND COALESCE(p.voice_intro_audio_urls ->> p_slot, '') <> ''
       AND p.id NOT IN (SELECT e.id FROM excluded e WHERE e.id IS NOT NULL)
+      -- 넘긴 사람은 대기 기간이 지나야 다시 나오고, 다시 보기는 최대 3번 (처음 본 것 포함 4번 넘기면 끝).
+      AND NOT EXISTS (
+        SELECT 1 FROM passes ps
+        WHERE ps.id = p.id
+          AND (ps.pass_count > 3 OR ps.created_at > now() - interval '3 days' * power(2, ps.pass_count - 1))
+      )
       AND EXISTS (
         SELECT 1 FROM profile_photos pp
         WHERE pp.user_id = p.id AND pp.status = 'ready' AND pp.converted_url IS NOT NULL
       )
   )
-  SELECT s.id, s.score, s.id IN (SELECT l.id FROM likers l) AS liked_you, ps.created_at AS passed_at
+  SELECT s.id, s.score - 10 * COALESCE(ps.pass_count, 0), s.id IN (SELECT l.id FROM likers l) AS liked_you,
+    ps.created_at AS passed_at
   FROM discover_score(p_user, ARRAY(SELECT id FROM eligible)) s
   LEFT JOIN passes ps ON ps.id = s.id
-  ORDER BY s.score DESC, s.id
+  ORDER BY 2 DESC, 1
 $$;
 
 REVOKE ALL ON FUNCTION discover_score(UUID, UUID[]) FROM PUBLIC, anon, authenticated;

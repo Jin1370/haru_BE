@@ -568,9 +568,9 @@ describe('다시 보기 — 넘겼던 사람으로 모자란 칸 채우기', () 
     expect([50, 40, 25, 10, 5, 3, 0].map(freeNewSlots)).toEqual([10, 9, 7, 5, 5, 3, 0]);
   });
 
-  it('무료 칸: 새 카드 뒤에 넘긴 지 오래된 사람부터 채운다 (점수와 무관)', () => {
+  it('무료 칸: 새 카드 뒤에 다시 보기 카드를 점수 순으로 채운다', () => {
     const picks = pickFreePlaylist([...passed(5), ...fresh(10)]);
-    expect(picks).toEqual(['n0', 'n1', 'n2', 'n3', 'n4', 'p0', 'p1', 'p2', 'p3', 'p4']);
+    expect(picks).toEqual(['n0', 'n1', 'n2', 'n3', 'n4', 'p4', 'p3', 'p2', 'p1', 'p0']);
   });
 
   it('무료 칸: 새 카드가 없으면 전부 다시 보기', () => {

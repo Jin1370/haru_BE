@@ -257,9 +257,12 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return;
   }
 
+  // 플레이리스트 멤버 숨기기는 유료화 ON 에서만 — OFF 는 받은 인사 탭이 무료라, 보이던 카드가
+  // 플레이리스트를 열었다는 이유로 사라지지 않게 한다 (같은 사람이 두 탭에 함께 보일 수 있다).
+  // 탐색에서 한 번 지나친 사람(자정에 자동 기록된 넘김 포함)도 응답한 것으로 보고 빼낸다 (틴더와 같다).
   const swipedSet = new Set<string>([
     ...(viewerSwipesResult.data ?? []).map((s: any) => s.swiped_id as string),
-    ...(playlistResult.data ?? []).map((r: any) => r.candidate_id as string),
+    ...(env.monetization.enabled ? (playlistResult.data ?? []).map((r: any) => r.candidate_id as string) : []),
   ]);
   const blockedSet = new Set<string>(
     (blocksResult.data ?? []).map((b: any) =>

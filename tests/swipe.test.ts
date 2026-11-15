@@ -403,6 +403,16 @@ describe('POST /api/discover/swipe — 별사탕 유료화 ON (mig 059)', () => 
     expect(captured.revealInsertPayload).toBeNull();
   });
 
+  it('받은 좋아요 탭 — 탐색에서 지나친(넘긴) 상대는 409', async () => {
+    captured.existing = { data: { id: 'row-1', reset_at: null, direction: 'pass' }, error: null };
+    captured.reciprocal = { data: { id: 'recip-1' }, error: null };
+    captured.reveal = { data: { liker_id: SWIPED }, error: null };
+
+    const res = await swipe({ direction: 'like', source: 'likes' });
+
+    expect(res.status).toBe(409);
+  });
+
   it.each([
     ['탈퇴', () => { captured.target = { is_active: false, frozen_at: null }; }],
     ['정지', () => { captured.target = { is_active: false, frozen_at: '2026-11-05T00:00:00Z' }; }],

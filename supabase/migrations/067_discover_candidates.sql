@@ -75,6 +75,9 @@ LANGUAGE sql STABLE AS $$
     -- 아직 pass 처리 전인 플레이리스트에 든 사람 / 받은 인사 탭에서 이미 연 사람.
     UNION SELECT i.candidate_id FROM discover_playlist_items i WHERE i.user_id = p_user
     UNION SELECT r.liker_id FROM like_reveals r WHERE r.viewer_id = p_user
+    -- 받은 인사 탭의 다음 무료 카드(타이머가 붙은 카드) — 플레이리스트에 들어가면 받은 인사 탭에서
+    -- 숨겨져 타이머가 다른 사람에게 안내 없이 옮겨 간다.
+    UNION SELECT c.liker_id FROM like_card_pins c WHERE c.viewer_id = p_user
     UNION SELECT unnest(COALESCE(p_exclude, '{}'))
   ),
   passes AS MATERIALIZED (

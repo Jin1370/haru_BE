@@ -95,7 +95,10 @@ const captured = vi.hoisted(() => ({
   },
 
   // POST /swipe
-  existing: { data: null as null | { id: string; reset_at: string | null }, error: null as null | { message: string } },
+  existing: {
+    data: null as null | { id: string; reset_at: string | null; direction?: string },
+    error: null as null | { message: string },
+  },
   // 오늘 플레이리스트 + 멤버십 (source=playlist 대화 신청)
   todayPlaylists: { data: [{ id: 1, idx: 0 }] as Array<{ id: number; idx: number }>, error: null as null | { message: string } },
   member: { data: [{ candidate_id: '22222222-2222-4222-8222-222222222222' }] as Array<{ candidate_id: string }>, error: null as null | { message: string } },
@@ -157,7 +160,7 @@ vi.mock('../src/config/supabase', () => {
         return captured.budgetCount;
       }
       // 기존 스와이프 조회 (POST /swipe 0단계 — 다시보기 판정)
-      if (b._cols === 'id, reset_at') return captured.existing;
+      if (b._cols === 'id, reset_at, direction') return captured.existing;
       // count 없는 select+single = reciprocal 조회
       return captured.reciprocal;
     }
@@ -263,7 +266,14 @@ vi.mock('../src/config/supabase', () => {
 
 // app 은 mock 이 hoist 된 뒤 import (vitest hoisting 으로 vi.mock 이 먼저 평가됨).
 import { app } from '../src/index';
-import { allocatePlaylistTopUp, pickPlaylistCards, splitLikeCards } from '../src/routes/swipe';
+import {
+  allocatePlaylistTopUp,
+  freeNewSlots,
+  pickFreePlaylist,
+  pickPaidPlaylist,
+  pickPlaylistCards,
+  splitLikeCards,
+} from '../src/routes/swipe';
 
 // supabase.auth.getUser mock 이 토큰 문자열을 그대로 userId 로 반환하므로
 // Bearer 값 = userId.
@@ -420,12 +430,22 @@ describe('POST /api/discover/swipe — 별사탕 유료화 ON (mig 059)', () => 
     expect(captured.swipeUpdatePayload).toMatchObject({ source: 'playlist', reset_at: null });
   });
 
-  it('이미 스와이프한 사람 (reset 안 됨) → 409', async () => {
-    captured.existing = { data: { id: 'row-1', reset_at: null }, error: null };
+  it('이미 인사한 사람 (reset 안 됨) → 409', async () => {
+    captured.existing = { data: { id: 'row-1', reset_at: null, direction: 'like' }, error: null };
 
     const res = await swipe({ direction: 'like' });
 
     expect(res.status).toBe(409);
+  });
+
+  it('플레이리스트의 다시 보기 카드(예전에 넘긴 사람) — 넘김 기록을 인사로 바꾼다', async () => {
+    captured.existing = { data: { id: 'row-1', reset_at: null, direction: 'pass' }, error: null };
+
+    const res = await swipe({ direction: 'like' });
+
+    expect(res.status).toBe(200);
+    expect(captured.swipeInsertPayload).toBeNull();
+    expect(captured.swipeUpdatePayload).toMatchObject({ direction: 'like', source: 'playlist' });
   });
 });
 
@@ -536,5 +556,29 @@ describe('pickPlaylistCards — 점수 순 + 인사한 사람 칸당 최대 2명
   it('인사 안 한 사람이 모자라면 건너뛴 인사한 사람으로 마저 채운다', () => {
     const pool = [c('L1', 50, true), c('L2', 49, true), c('L3', 48, true), c('L4', 47, true), c('a', 1)];
     expect(pickPlaylistCards(pool, 4)).toEqual(['L1', 'L2', 'L3', 'a']);
+  });
+});
+
+describe('다시 보기 — 넘겼던 사람으로 모자란 칸 채우기', () => {
+  const fresh = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `n${i}`, score: 100 - i, liked_you: false, passed_at: null }));
+  const passed = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ id: `p${i}`, score: 100 + i, liked_you: false, passed_at: `2026-01-${String(10 + i).padStart(2, '0')}T00:00:00Z` }));
+
+  it('무료 칸의 새 카드 장수는 남은 새 카드가 줄수록 천천히 준다', () => {
+    expect([50, 40, 25, 10, 5, 3, 0].map(freeNewSlots)).toEqual([10, 9, 7, 5, 5, 3, 0]);
+  });
+
+  it('무료 칸: 새 카드 뒤에 넘긴 지 오래된 사람부터 채운다 (점수와 무관)', () => {
+    const picks = pickFreePlaylist([...passed(5), ...fresh(10)]);
+    expect(picks).toEqual(['n0', 'n1', 'n2', 'n3', 'n4', 'p0', 'p1', 'p2', 'p3', 'p4']);
+  });
+
+  it('무료 칸: 새 카드가 없으면 전부 다시 보기', () => {
+    expect(pickFreePlaylist(passed(12))).toHaveLength(10);
+  });
+
+  it('별사탕 칸: 새 카드 10장일 때만, 다시 보기는 넣지 않는다', () => {
+    expect(pickPaidPlaylist([...fresh(10), ...passed(5)])).toEqual(fresh(10).map((c) => c.id));
+    expect(pickPaidPlaylist([...fresh(9), ...passed(20)])).toEqual([]);
   });
 });

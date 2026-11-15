@@ -51,8 +51,9 @@ export const LIKES_RECEIVED_MAX = 300;
 
 router.use(authMiddleware);
 
-// 탐색 후보 — 점수 높은 순. liked_you = 이 사람이 나에게 이미 인사함.
-type PoolCandidate = { id: string; score: number; liked_you: boolean };
+// 탐색 후보 — 점수 높은 순. liked_you = 이 사람이 나에게 이미 인사함. passed_at = 내가 넘긴
+// 사람이면 넘긴 시각 ('다시 보기' 후보), 새 후보면 null.
+type PoolCandidate = { id: string; score: number; liked_you: boolean; passed_at: string | null };
 
 // 플레이리스트 한 칸에 넣을 나에게 인사한 사람 수 상한. 탐색에서도 매치가 나게 섞되,
 // 전부 넣으면 받은 인사 탭을 열 이유가 사라진다.
@@ -67,14 +68,17 @@ export const LIKED_YOU_PICK_BONUS = 0;
 // 더한 점수로 줄 세워 앞에서부터 담되 칸당 LIKED_YOU_SLOTS 명까지만 (넘는 사람은 건너뜀).
 // 인사 안 한 사람이 모자라 n명이 안 차면 건너뛴 인사한 사람으로 마저 채운다 (빈 칸보다 바로
 // 매치될 카드가 낫다). 카드 순서는 그 점수 순 그대로.
-export function pickPlaylistCards(pool: PoolCandidate[], n: number): string[] {
+export function pickPlaylistCards<T extends { id: string; score: number; liked_you: boolean }>(
+  pool: T[],
+  n: number,
+): string[] {
   const ranked = [...pool].sort(
     (a, b) =>
       b.score + (b.liked_you ? LIKED_YOU_PICK_BONUS : 0) - (a.score + (a.liked_you ? LIKED_YOU_PICK_BONUS : 0)) ||
       (a.id < b.id ? -1 : 1),
   );
-  const out: PoolCandidate[] = [];
-  const skipped: PoolCandidate[] = [];
+  const out: T[] = [];
+  const skipped: T[] = [];
   let likers = 0;
   for (const c of ranked) {
     if (out.length >= n) break;
@@ -92,16 +96,37 @@ export function pickPlaylistCards(pool: PoolCandidate[], n: number): string[] {
   return out.map((c) => c.id);
 }
 
-// 남은 후보로 새 플레이리스트를 몇 칸 열 수 있는지 (칸당 인사한 사람 상한 반영).
-function fillablePlaylists(pool: PoolCandidate[], playlists: number): number {
-  let rest = pool;
-  let k = 0;
-  for (; k < playlists; k++) {
-    const picks = new Set(pickPlaylistCards(rest, CARD_RESET_AMOUNT));
-    if (picks.size === 0) break;
-    rest = rest.filter((c) => !picks.has(c.id));
-  }
-  return k;
+// 무료 칸(그날 처음 여는 칸)에 넣을 새 카드 장수 — 남은 새 카드가 줄수록 천천히 줄이고 나머지를
+// '다시 보기'(넘겼던 사람)로 채운다. 남은 새 카드 50+ → 10장, 40 → 9, 25 → 7, 10 → 5, 3 → 3, 0 → 0.
+// 새 카드를 한 번에 다 쓰지 않고 여러 날에 나눠, 카드가 바닥나지 않게 한다.
+export function freeNewSlots(freshCount: number): number {
+  return Math.min(freshCount, CARD_RESET_AMOUNT, Math.round(4 + freshCount / 8));
+}
+
+// 넘겼던 사람 — 넘긴 지 오래된 순.
+function recycledOldestFirst(pool: PoolCandidate[]): PoolCandidate[] {
+  return pool.filter((c) => c.passed_at).sort((a, b) => (a.passed_at! < b.passed_at! ? -1 : 1));
+}
+
+// 무료 칸: 새 카드 freeNewSlots 장 (점수 순·인사한 사람 칸당 2명) + 나머지는 다시 보기.
+export function pickFreePlaylist(pool: PoolCandidate[]): string[] {
+  const fresh = pool.filter((c) => !c.passed_at);
+  const picks = pickPlaylistCards(fresh, freeNewSlots(fresh.length));
+  const again = recycledOldestFirst(pool).slice(0, CARD_RESET_AMOUNT - picks.length).map((c) => c.id);
+  return [...picks, ...again];
+}
+
+// 별사탕 칸: 새 카드로만 꽉 찬 10장. 새 카드가 10장이 안 되면 열 수 없다 (빈 배열) — 돈을 내고
+// 넘겼던 카드를 받지 않게.
+export function pickPaidPlaylist(pool: PoolCandidate[]): string[] {
+  const picks = pickPlaylistCards(pool.filter((c) => !c.passed_at), CARD_RESET_AMOUNT);
+  return picks.length === CARD_RESET_AMOUNT ? picks : [];
+}
+
+// 빈자리를 채울 순서 — 새 카드(인사 안 한 사람 점수 순 → 인사한 사람) 다음에 넘겼던 사람(오래된 순).
+function fillOrder(pool: PoolCandidate[]): PoolCandidate[] {
+  const fresh = pool.filter((c) => !c.passed_at);
+  return [...fresh.filter((c) => !c.liked_you), ...fresh.filter((c) => c.liked_you), ...recycledOldestFirst(pool)];
 }
 
 const poolError = (status: number, error: string): { status: number; error: string } => ({ status, error });
@@ -127,8 +152,8 @@ async function isBotHandled(userId: string, botId: string | null): Promise<boole
   return results.some((r) => (r.data ?? []).length > 0);
 }
 
-// 탐색 후보 풀 — 노출 가능한 사람 전원을 DB 가 점수순으로 준다 (discover_candidates, mig 067).
-// 제외: 나 / 이미 스와이프 / 차단 / 오늘 플레이리스트 멤버 / 받은 인사 탭에서 연 사람 /
+// 탐색 후보 풀 — 노출 가능한 사람 전원을 DB 가 점수순으로 준다 (discover_pool, mig 067).
+// 내가 넘긴 사람도 passed_at 을 달고 포함된다 (다시 보기 후보). 제외: 나 / 인사함 / 차단 / 오늘 플레이리스트 멤버 / 받은 인사 탭에서 연 사람 /
 // 같은 언어 / 사진 0장 / 내 언어 보이스 한마디 없음 / 섀도우 숨김 / 캠페인 봇(따로 주입).
 async function loadDiscoverPool(userId: string) {
   const { data: viewerProfile } = await supabase.from('profiles').select('language').eq('id', userId).single();
@@ -137,7 +162,7 @@ async function loadDiscoverPool(userId: string) {
   const botId = env.campaign.botUserId;
 
   const [rpcResult, botAlreadyHandled] = await Promise.all([
-    supabase.rpc('discover_candidates', {
+    supabase.rpc('discover_pool', {
       p_user: userId,
       p_slot: slot,
       p_exclude: [...env.discover.hiddenUserIds, ...(botId ? [botId] : [])],
@@ -149,6 +174,7 @@ async function loadDiscoverPool(userId: string) {
     id: r.id as string,
     score: Number(r.score),
     liked_you: !!r.liked_you,
+    passed_at: (r.passed_at as string | null) ?? null,
   }));
   return { scored, slot, botAlreadyHandled };
 }
@@ -640,19 +666,24 @@ async function finalizePastPlaylists(userId: string, localDate: string): Promise
   if (ids.length > 0) {
     const { data: existing, error: existingErr } = await supabase
       .from('swipes')
-      .select('swiped_id, reset_at')
+      .select('swiped_id, reset_at, direction')
       .eq('swiper_id', userId)
       .in('swiped_id', ids);
     if (existingErr) {
       console.error('[playlists] finalize swipes failed:', existingErr.message);
       return;
     }
-    const has = new Map((existing ?? []).map((r: any) => [r.swiped_id as string, r.reset_at as string | null]));
+    const has = new Map((existing ?? []).map((r: any) => [r.swiped_id as string, r]));
     const missing = ids.filter((id) => !has.has(id));
     // 다시보기(reset_at)로 풀에 돌아왔던 사람은 기존 행을 다시 pass 로 되돌린다.
-    const recycled = ids.filter((id) => has.get(id));
+    const recycled = ids.filter((id) => has.get(id)?.reset_at);
+    // 넘겼던 카드를 다시 보고 또 넘겼다 — 넘긴 시각을 지금으로 바꿔 다시 보기 순서의 맨 뒤로 보낸다.
+    const passedAgain = ids.filter((id) => {
+      const row = has.get(id);
+      return row && !row.reset_at && row.direction === 'pass';
+    });
     const pass = { direction: 'pass', source: 'playlist' };
-    const [insertResult, updateResult] = await Promise.all([
+    const [insertResult, updateResult, againResult] = await Promise.all([
       missing.length > 0
         ? supabase
             .from('swipes')
@@ -668,9 +699,17 @@ async function finalizePastPlaylists(userId: string, localDate: string): Promise
             .eq('swiper_id', userId)
             .in('swiped_id', recycled)
         : Promise.resolve({ error: null }),
+      passedAgain.length > 0
+        ? supabase
+            .from('swipes')
+            .update({ created_at: new Date().toISOString() })
+            .eq('swiper_id', userId)
+            .in('swiped_id', passedAgain)
+        : Promise.resolve({ error: null }),
     ]);
-    if (insertResult.error || updateResult.error) {
-      console.error('[playlists] finalize pass failed:', (insertResult.error ?? updateResult.error)!.message);
+    const finalizeErr = insertResult.error ?? updateResult.error ?? againResult.error;
+    if (finalizeErr) {
+      console.error('[playlists] finalize pass failed:', finalizeErr.message);
       return;
     }
   }
@@ -802,11 +841,10 @@ async function refillPlaylist(userId: string, playlistId: number): Promise<strin
   if (room <= 0) return [];
 
   // 인사 안 한 사람부터 — 칸당 인사한 사람 상한은 열 때 섞은 몫으로 충분하다. 인사 안 한
-  // 사람이 없으면 인사한 사람으로라도 채운다.
+  // 사람이 없으면 인사한 사람, 그것도 없으면 넘겼던 사람(오래된 순)으로라도 채운다.
   const pool = await loadDiscoverPool(userId);
   if ('error' in pool) throw new Error(`discover pool: ${pool.error}`);
-  const nonLikers = pool.scored.filter((r) => !r.liked_you);
-  const add = (nonLikers.length > 0 ? nonLikers : pool.scored).slice(0, room).map((r) => r.id);
+  const add = fillOrder(pool.scored).slice(0, room).map((r) => r.id);
   if (add.length === 0) return [];
 
   const last = Math.max(0, ...(items ?? []).map((i: any) => i.position as number));
@@ -884,11 +922,13 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
 
   // 같은 요청이 겹쳐도 PK 중복은 무시된다.
   // ponytail: 동시에 다른 칸을 여는 요청과 겹치면 한 사람이 두 칸에 들어갈 수 있다 — 드물어 허용.
-  // 덜 찬 칸은 인사 안 한 사람부터 채우고, 모자라면 인사한 사람으로 마저 채운다.
+  // 덜 찬 칸은 새 카드(인사 안 한 사람 → 인사한 사람)부터, 모자라면 넘겼던 사람으로 마저 채운다.
+  // ponytail: 별사탕 칸도 넘겼던 사람으로 채워질 수 있다 — 별사탕 칸은 새 카드 10장으로만 열려
+  // 나간 사람 몫만 비고, 새 카드가 바닥났을 때뿐이다.
   const { fills } = allocatePlaylistTopUp(
     today.map((p) => p.id),
     counts,
-    [...pool.scored.filter((r) => !r.liked_you), ...pool.scored.filter((r) => r.liked_you)].map((r) => r.id),
+    fillOrder(pool.scored).map((r) => r.id),
   );
   const filled = new Set(fills.flatMap((f) => f.add));
   const rest = pool.scored.filter((r) => !filled.has(r.id));
@@ -911,8 +951,14 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
   }
 
   // 지금 새 칸을 열면 받을 장수 — 열기(POST /open)와 같은 고르기라 expected_count 와 맞는다.
-  const available = pickPlaylistCards(rest, CARD_RESET_AMOUNT).length;
+  // 첫 칸은 무료(새 카드 + 다시 보기), 그 뒤 칸은 별사탕(새 카드 10장일 때만).
   const free = today.length === 0;
+  const freePicks = free ? pickFreePlaylist(rest) : [];
+  const available = free ? freePicks.length : pickPaidPlaylist(rest).length;
+  // 열 수 있는 별사탕 칸 수 — 무료 칸을 열고 남을 새 카드로 10장씩.
+  const freshLeft = rest.filter((r) => !r.passed_at && !freePicks.includes(r.id)).length;
+  const paidLps = Math.min(PLAYLIST_COUNT - today.length - (free ? 1 : 0), Math.floor(freshLeft / CARD_RESET_AMOUNT));
+  const openableLps = (free && available > 0 ? 1 : 0) + Math.max(0, paidLps);
   const playlists = Array.from({ length: PLAYLIST_COUNT }, (_, idx) => {
     const opened = today.find((p) => p.idx === idx);
     return opened
@@ -921,9 +967,9 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
   });
   res.json({
     available_count: available,
-    // FE 는 ceil(candidate_count / CARD_RESET_AMOUNT) 로 보여줄 안 연 LP 수를 정한다 — 칸당
-    // 인사한 사람 상한 때문에 남은 인원으로는 칸 수가 안 나와, 열 수 있는 칸 수 × 칸 크기로 보낸다.
-    candidate_count: fillablePlaylists(rest, PLAYLIST_COUNT - today.length) * CARD_RESET_AMOUNT,
+    // FE 는 ceil(candidate_count / CARD_RESET_AMOUNT) 로 보여줄 안 연 LP 수를 정한다 — 남은 인원이
+    // 아니라 열 수 있는 칸 수 × 칸 크기로 보낸다 (별사탕 칸은 새 카드 10장이 남아야 보인다).
+    candidate_count: openableLps * CARD_RESET_AMOUNT,
     // 유료화 OFF 는 하루 1개 — 고른 뒤엔 그 칸만 보여준다.
     playlists: !env.monetization.enabled && !free ? playlists.filter((p) => p.opened) : playlists,
   });
@@ -1009,14 +1055,15 @@ router.post(
       res.status(pool.status).json({ error: pool.error });
       return;
     }
-    const picks = pickPlaylistCards(pool.scored, CARD_RESET_AMOUNT);
+    const first = today.length === 0;
+    // 첫 칸은 무료(새 카드 + 다시 보기), 그 뒤 칸은 별사탕(새 카드 10장일 때만).
+    const picks = first ? pickFreePlaylist(pool.scored) : pickPaidPlaylist(pool.scored);
     const expected = req.body.expected_count as number | undefined;
     if (picks.length === 0 || (expected !== undefined && picks.length !== expected)) {
       res.status(409).json({ error: 'Available cards changed', code: 'cards_changed', available_count: picks.length });
       return;
     }
 
-    const first = today.length === 0;
     // 유료화 OFF 는 하루 1개다 (FE 도 연 칸 하나만 보여준다).
     if (!env.monetization.enabled && !first) {
       res.status(409).json({ error: 'Playlist already chosen today', code: 'playlist_limit' });
@@ -1262,7 +1309,7 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
   //    그 외 기존 행은 이미 스와이프함 → 409.
   const { data: existing, error: existingErr } = await supabase
     .from('swipes')
-    .select('id, reset_at')
+    .select('id, reset_at, direction')
     .eq('swiper_id', req.userId!)
     .eq('swiped_id', swiped_id)
     .maybeSingle();
@@ -1270,7 +1317,11 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
     res.status(500).json({ error: existingErr.message });
     return;
   }
-  if (existing && !existing.reset_at) {
+  // 오늘 플레이리스트의 '다시 보기' 카드(예전에 넘긴 사람)는 위에서 멤버임을 확인했다 — 그
+  // 넘김 기록을 인사로 바꾼다.
+  const passedPlaylistCard =
+    !!existing && !existing.reset_at && existing.direction === 'pass' && req.body.source === 'playlist';
+  if (existing && !existing.reset_at && !passedPlaylistCard) {
     res.status(409).json({ error: 'Already swiped this user' });
     return;
   }

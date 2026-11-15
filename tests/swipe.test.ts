@@ -469,6 +469,18 @@ describe('POST /api/discover/likes-received/reveal — 무료 카드', () => {
   beforeEach(() => {
     envState.monetizationEnabled = true;
     captured.reciprocal = { data: { id: 'like-1' }, error: null }; // 상대가 나를 like
+    captured.member = { data: [], error: null }; // 오늘 플레이리스트에 없음
+  });
+
+  it('오늘 탐색 플레이리스트에 든 사람이면 409 card_changed, 차감·기록 없음', async () => {
+    captured.member = { data: [{ candidate_id: SWIPED }], error: null };
+
+    const res = await reveal({});
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('card_changed');
+    expect(captured.revealInsertPayload).toBeNull();
+    expect(captured.rpcCalls.some((c) => c.name === 'reveal_like')).toBe(false);
   });
 
   it('무료 기회가 있으면 차감 없이 paid=false 로 공개 기록', async () => {

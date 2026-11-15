@@ -1195,6 +1195,24 @@ router.post(
       res.json({ revealed: true });
       return;
     }
+    // 오늘 탐색 플레이리스트에 든 사람은 받은 인사 탭에서 숨겨진다 — 갱신 전 화면에서 열면 연
+    // 카드가 숨겨지고, 탐색에서 지나치면 자정에 넘김 처리돼 별사탕을 쓰고도 영영 못 본다. 차감 없이
+    // 거절한다 (앱은 목록을 다시 받는다). 이유는 말하지 않는다 — 플레이리스트의 그 사람이 나에게
+    // 인사했다는 유료 정보가 드러나지 않게.
+    const { data: inPlaylist, error: playlistErr } = await supabase
+      .from('discover_playlist_items')
+      .select('candidate_id')
+      .eq('user_id', me)
+      .eq('candidate_id', liker_id)
+      .limit(1);
+    if (playlistErr) {
+      res.status(500).json({ error: playlistErr.message });
+      return;
+    }
+    if ((inPlaylist ?? []).length > 0) {
+      res.status(409).json({ error: 'Card changed', code: 'card_changed' });
+      return;
+    }
 
     if (free) {
       // ponytail: 동시에 다른 카드 2장을 무료로 열면 2장이 나갈 수 있다 (락 없음).

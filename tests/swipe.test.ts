@@ -263,7 +263,7 @@ vi.mock('../src/config/supabase', () => {
 
 // app 은 mock 이 hoist 된 뒤 import (vitest hoisting 으로 vi.mock 이 먼저 평가됨).
 import { app } from '../src/index';
-import { allocatePlaylistTopUp, splitLikeCards } from '../src/routes/swipe';
+import { allocatePlaylistTopUp, pickPlaylistCards, splitLikeCards } from '../src/routes/swipe';
 
 // supabase.auth.getUser mock 이 토큰 문자열을 그대로 userId 로 반환하므로
 // Bearer 값 = userId.
@@ -512,5 +512,29 @@ describe('allocatePlaylistTopUp — 덜 찬 칸 먼저 채우기', () => {
 
   it('연 칸이 없으면 전부 새 칸 몫', () => {
     expect(allocatePlaylistTopUp([], new Map(), ids(5))).toEqual({ fills: [], rest: ids(5) });
+  });
+});
+
+describe('pickPlaylistCards — 점수 순 + 인사한 사람 칸당 최대 2명', () => {
+  const c = (id: string, score: number, liked_you = false) => ({ id, score, liked_you });
+
+  it('점수 순으로 담되 인사한 사람은 2명까지만, 넘는 사람은 건너뛴다', () => {
+    const pool = [c('L1', 50, true), c('L2', 49, true), c('L3', 48, true), c('a', 40), c('b', 30)];
+    expect(pickPlaylistCards(pool, 4)).toEqual(['L1', 'L2', 'a', 'b']);
+  });
+
+  it('인사한 사람도 가산 없이 점수 순 자리에 선다', () => {
+    const pool = [c('a', 30), c('b', 25), c('L1', 18, true), c('d', 10)];
+    expect(pickPlaylistCards(pool, 3)).toEqual(['a', 'b', 'L1']);
+  });
+
+  it('점수가 낮은 인사한 사람은 이번 칸에 안 들어올 수 있다', () => {
+    const pool = [c('a', 50), c('b', 40), c('L1', 1, true)];
+    expect(pickPlaylistCards(pool, 2)).toEqual(['a', 'b']);
+  });
+
+  it('인사 안 한 사람이 모자라면 건너뛴 인사한 사람으로 마저 채운다', () => {
+    const pool = [c('L1', 50, true), c('L2', 49, true), c('L3', 48, true), c('L4', 47, true), c('a', 1)];
+    expect(pickPlaylistCards(pool, 4)).toEqual(['L1', 'L2', 'L3', 'a']);
   });
 });

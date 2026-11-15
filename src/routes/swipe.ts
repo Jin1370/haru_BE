@@ -51,227 +51,105 @@ export const LIKES_RECEIVED_MAX = 300;
 
 router.use(authMiddleware);
 
-type Candidate = {
-  id: string;
-  language: string;
-  nationality: string;
-  interests: string[];
-  photos: string[];
-  created_at: string;
-};
+// 탐색 후보 — 점수 높은 순. liked_you = 이 사람이 나에게 이미 인사함.
+type PoolCandidate = { id: string; score: number; liked_you: boolean };
 
-type Viewer = {
-  id: string;
-  interests: string[];
-};
+// 플레이리스트 한 칸에 넣을 나에게 인사한 사람 수 상한. 탐색에서도 매치가 나게 섞되,
+// 전부 넣으면 받은 인사 탭을 열 이유가 사라진다.
+export const LIKED_YOU_SLOTS = 2;
+// 칸을 고를 때 나에게 인사한 사람에게 더하는 점수 (조정 손잡이). 0 이 기본 — 인사한 사람은
+// 최근 활동한 사람이라 이미 접속 가산을 받아, 가산 없이도 칸마다 0~2명이 섞인다. prod 실데이터
+// 24명 시뮬레이션: +0 은 1-2-2-1-1-2…, 1-1-1-2-0-1… 처럼 섞이고, +10 은 대부분 2-2-2-2… 로
+// 앞 칸부터 꽉 찼다.
+export const LIKED_YOU_PICK_BONUS = 0;
 
-// 결정적 해시 기반 jitter (같은 viewer-candidate 쌍에 대해 동일 값 반환)
-function hashJitter(candidateId: string, viewerId: string, max: number): number {
-  let hash = 0;
-  const str = candidateId + viewerId;
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) - hash) + str.charCodeAt(i);
-    hash |= 0;
+// 점수 순 후보에서 플레이리스트 한 칸(n명)을 고른다 — 인사한 사람은 LIKED_YOU_PICK_BONUS 를
+// 더한 점수로 줄 세워 앞에서부터 담되 칸당 LIKED_YOU_SLOTS 명까지만 (넘는 사람은 건너뜀).
+// 인사 안 한 사람이 모자라 n명이 안 차면 건너뛴 인사한 사람으로 마저 채운다 (빈 칸보다 바로
+// 매치될 카드가 낫다). 카드 순서는 그 점수 순 그대로.
+export function pickPlaylistCards(pool: PoolCandidate[], n: number): string[] {
+  const ranked = [...pool].sort(
+    (a, b) =>
+      b.score + (b.liked_you ? LIKED_YOU_PICK_BONUS : 0) - (a.score + (a.liked_you ? LIKED_YOU_PICK_BONUS : 0)) ||
+      (a.id < b.id ? -1 : 1),
+  );
+  const out: PoolCandidate[] = [];
+  const skipped: PoolCandidate[] = [];
+  let likers = 0;
+  for (const c of ranked) {
+    if (out.length >= n) break;
+    if (c.liked_you && likers >= LIKED_YOU_SLOTS) {
+      skipped.push(c);
+      continue;
+    }
+    if (c.liked_you) likers++;
+    out.push(c);
   }
-  return (Math.abs(hash) % (max * 100)) / 100;
+  if (out.length < n) {
+    const chosen = new Set([...out, ...skipped.slice(0, n - out.length)].map((c) => c.id));
+    return ranked.filter((c) => chosen.has(c.id)).map((c) => c.id);
+  }
+  return out.map((c) => c.id);
 }
 
-// 후보 정렬 점수 (높을수록 먼저). 매칭 선호 설정(성별·나이·국적)은 사용자가 적은 지금은
-// 쓰지 않는다 — 규모가 커지면 다시 넣는다 (user_preferences 데이터는 남아 있다).
-// - 기본 신호(관심사·사진·신규·jitter) 합산 상한은 70.
-// - reciprocity: 후보가 이미 viewer 를 like 한 경우. 유료화 OFF 는 +50, ON 은 -15.
-export function computeIntraScore(
-  candidate: Candidate,
-  viewer: Viewer,
-  reciprocalLikerIds: Set<string> = new Set(),
-): number {
-  let score = 0;
-
-  // 관심사 겹침 (최대 30점)
-  const viewerInterests = new Set(viewer.interests);
-  const overlap = candidate.interests.filter((i) => viewerInterests.has(i)).length;
-  score += Math.min(overlap * 10, 30);
-
-  // 프로필 완성도(사진 3장 이상)
-  if (candidate.photos.length >= 3) {
-    score += 15;
+// 남은 후보로 새 플레이리스트를 몇 칸 열 수 있는지 (칸당 인사한 사람 상한 반영).
+function fillablePlaylists(pool: PoolCandidate[], playlists: number): number {
+  let rest = pool;
+  let k = 0;
+  for (; k < playlists; k++) {
+    const picks = new Set(pickPlaylistCards(rest, CARD_RESET_AMOUNT));
+    if (picks.size === 0) break;
+    rest = rest.filter((c) => !picks.has(c.id));
   }
-
-  // 신규 유저 부스트 (7일 이내)
-  const daysSinceCreated = (Date.now() - new Date(candidate.created_at).getTime()) / (1000 * 60 * 60 * 24);
-  if (daysSinceCreated <= 7) {
-    score += 10;
-  }
-
-  // 결정적 jitter (다양성 확보, 페이지네이션 안정성)
-  score += hashJitter(candidate.id, viewer.id, 15);
-
-  // reciprocity boost: 후보가 이미 viewer 를 like 한 경우.
-  // 유료화 OFF: +50 — 1순위로 노출해 양방향 마주칠 확률을 높인다.
-  // 유료화 ON : -15 — 받은 좋아요 공개가 유료라, 탐색에서 앞에 나오면 공개할 이유가
-  // 사라진다.
-  if (reciprocalLikerIds.has(candidate.id)) {
-    score += env.monetization.enabled ? -15 : 50;
-  }
-
-  return score;
+  return k;
 }
 
-// 탐색 후보 풀 — 제외 필터·점수 정렬까지. 플레이리스트 목록(곡 수)과 열기가 쓴다.
 const poolError = (status: number, error: string): { status: number; error: string } => ({ status, error });
 
-async function loadDiscoverPool(userId: string, limit: number) {
-
-  // 조회자 프로필 — mig 009 이후 단일 scalar `language` 컬럼이 source of truth.
-  const { data: viewerProfile } = await supabase
-    .from('profiles')
-    .select('language, interests')
-    .eq('id', userId)
-    .single();
-
-  if (!viewerProfile) return poolError(404, 'Profile not found');
-
-  const viewerLanguage = (viewerProfile.language as string | null) ?? '';
-  const viewer: Viewer = {
-    id: userId,
-    interests: (viewerProfile.interests as string[] | null) ?? [],
-  };
-
-  // 스와이프/차단/reciprocity 풀을 병렬 조회.
-  // reciprocity 풀 = 나를 like 한(direction='like') 사람들. idx_swipes_swiped 가
-  // swiped_id 인덱스를 제공하므로 swiped_id=viewer 필터는 인덱스 사용.
-  const [swipedResult, blockedResult, reciprocalResult, playlistResult, revealResult] = await Promise.all([
-    supabase.from('swipes').select('swiped_id, reset_at').eq('swiper_id', userId),
-    supabase.from('blocks').select('blocker_id, blocked_id')
-      .or(`blocker_id.eq.${userId},blocked_id.eq.${userId}`),
+// 캠페인 봇을 이미 처리했는가 (스와이프·차단·오늘 플레이리스트) — 처리했으면 다시 넣지 않는다.
+// 조회 실패면 처리한 것으로 본다 (같은 봇을 두 번 넣는 것보다 안 넣는 쪽이 낫다).
+async function isBotHandled(userId: string, botId: string | null): Promise<boolean> {
+  if (!botId || env.discover.hiddenUserIds.includes(botId)) return true;
+  const results = await Promise.all([
+    supabase.from('swipes').select('id').eq('swiper_id', userId).eq('swiped_id', botId).is('reset_at', null).limit(1),
     supabase
-      .from('swipes')
-      .select('swiper_id')
-      .eq('swiped_id', userId)
-      .eq('direction', 'like'),
-    // 아직 pass 처리 전인 플레이리스트에 이미 든 사람 (mig 063).
-    supabase.from('discover_playlist_items').select('candidate_id').eq('user_id', userId),
-    // 받은 좋아요 탭에서 이미 연 사람 — 플레이리스트 한 칸을 본 사람으로 낭비하지 않게.
-    supabase.from('like_reveals').select('liker_id').eq('viewer_id', userId),
+      .from('blocks')
+      .select('blocker_id')
+      .or(`and(blocker_id.eq.${userId},blocked_id.eq.${botId}),and(blocker_id.eq.${botId},blocked_id.eq.${userId})`)
+      .limit(1),
+    supabase.from('discover_playlist_items').select('candidate_id').eq('user_id', userId).eq('candidate_id', botId).limit(1),
   ]);
-  if (playlistResult.error || revealResult.error) {
-    return poolError(500, (playlistResult.error ?? revealResult.error)!.message);
-  }
-
-  const reciprocalLikerIds = new Set<string>(
-    (reciprocalResult.data ?? []).map((s: any) => s.swiper_id as string),
-  );
-
-  const blockedIds = (blockedResult.data || []).map((b: any) =>
-    b.blocker_id === userId ? b.blocked_id : b.blocker_id
-  );
-
-  // 다시보기(reset_at)로 풀에 돌아온 사람은 제외하지 않는다.
-  const excludeIds = [
-    userId,
-    ...(swipedResult.data ?? []).filter((s: any) => !s.reset_at).map((s: any) => s.swiped_id),
-    ...blockedIds,
-    ...(playlistResult.data ?? []).map((r: any) => r.candidate_id as string),
-    ...(revealResult.data ?? []).map((r: any) => r.liker_id as string),
-    // 섀도우 숨김 (env.discover.hiddenUserIds) — 당사자에게는 아무 신호도 가지
-    // 않는다. 같은 목록을 GET /likes-received 와 isLikeVisibleToReceiver 에서도 적용.
-    ...env.discover.hiddenUserIds,
-  ];
-  // 캠페인 봇은 선호 성별·나이 필터와 "viewer 와 같은 언어 하드 제외" 를 전부
-  // 우회해야 하므로 메인 쿼리에서 빼고 아래에서 직접 주입한다. 단 이미 스와이프
-  // 했거나 차단한 경우엔 주입도 하지 않는다 (일반 후보와 동일한 소진 규칙).
-  const botAlreadyHandled =
-    !env.campaign.botUserId || excludeIds.includes(env.campaign.botUserId);
-  const uniqueExcludeIds = [
-    ...new Set(env.campaign.botUserId ? [...excludeIds, env.campaign.botUserId] : excludeIds),
-  ];
-
-  // 점수 계산용 후보 풀 크기. limit 의 5배를 기본으로 하되 최소 200·최대 500 으로
-  // 클램프 — JS 스코어링(tier/intra)이 의미 있는 모집단 위에서 동작하도록 한다.
-  // (A1: 옛 코드는 min(limit*5,200) 이라 기본 limit=10 에서 풀이 50 에 불과했고,
-  //  ORDER BY 부재로 그 50 도 임의 물리순서 슬라이스였다.)
-  const fetchLimit = Math.min(Math.max(limit * 5, 200), 500);
-
-  // mig 011: voice_intro_audio_urls (jsonb) 가 시청자 언어 슬롯의 source. 단일
-  // voice_intro_audio_url 은 응답에 미러로 출력하기 위해 슬롯에서 추출.
-  // mig 034: profiles.photos 컬럼 폐지. 노출/스코어링용 사진은 모두
-  // profile_photos (status='ready' converted_url) 에서 가져온다.
-  let query = supabase
-    .from('profiles')
-    .select('id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, created_at')
-    .eq('is_active', true)
-    .is('frozen_at', null);
-
-  if (uniqueExcludeIds.length > 0) {
-    query = query.not('id', 'in', `(${uniqueExcludeIds.join(',')})`);
-  }
-
-  // 본인 언어 동일 후보 하드 제외 — 크로스언어 매칭이 본 앱 핵심 정책.
-  // 본인 언어가 비어있으면(=세팅 미완료) 필터 적용 안 함.
-  if (viewerLanguage) {
-    query = query.not('language', 'eq', viewerLanguage);
-  }
-
-  // A1: 결정적 ORDER BY 로 스코어링 풀 윈도우를 안정화. ORDER BY 부재 시 Postgres
-  // 가 호출마다 다른 물리순서 슬라이스를 돌려줘 (a) 같은 viewer 가 호출마다 다른
-  // 후보 셋을 점수 매기는 비일관 (b) 풀 바깥 후보 영구 누락 가능성이 있었다.
-  // created_at DESC 로 "가장 최근 가입한 fetchLimit 명" 을 결정적으로 모집 →
-  // 신규 유저 부스트(intra +10)와도 정합. id 는 동시각 가입 tie-breaker.
-  // 풀 안에서의 최종 노출 순서는 아래 JS 의 (tier ASC, intra DESC) 가 결정하므로
-  // 이 ORDER BY 는 "어떤 후보를 점수 대상에 넣을지" 만 좌우한다.
-  // 인덱스: idx_profiles_active_created (mig 031) 가 is_active=true 부분 +
-  // created_at DESC 정렬을 지원.
-  query = query
-    .order('created_at', { ascending: false })
-    .order('id', { ascending: false })
-    .limit(fetchLimit);
-
-  const { data, error } = await query;
-
-  if (error) return poolError(500, error.message);
-
-  // mig 034: profile_photos 일괄 조회 — status='ready' 변환본 전체를 position ASC
-  // 로 모아 user 별 배열로 보관. [0] = main(position=0), length = 스코어링용 ready
-  // 사진 수. ready 사진이 0장인 사용자는 visible 단계에서 제외 (회원가입 직후 변환
-  // 대기 케이스).
-  const candidateIds = (data ?? []).map((row: any) => row.id as string);
-  const readyPhotosByUser = await fetchReadyPhotosByUser(candidateIds, 'discover');
-
-  // 사진이 한 장도 없는 미완성 프로필 (또는 변환 미완료 사용자) 는 후보에서 제외.
-  // 본인 언어 일치 후보는 SQL 단에서 이미 제거됐지만, 마이그레이션 직후 NULL 인 행이
-  // 일치 비교에서 빠지지 않도록 JS 단에서 빈 language 행도 함께 차단한다.
-  const slot = pickViewerSlot(viewerLanguage);
-  const visible = (data ?? []).filter((row: any) => {
-    if (!row.language) return false;
-    if (viewerLanguage && row.language === viewerLanguage) return false;
-    if ((readyPhotosByUser.get(row.id) ?? []).length === 0) return false;
-    // 차별점 1 강제: voice clone 없거나 voice intro 미작성이면 시청자 언어 슬롯이
-    // 비어있다. voice_intro_audio 는 voice clone 보유 + voice intro 텍스트 작성 시에만
-    // 합성되므로, 슬롯 URL 부재 = 둘 중 하나라도 없음. 무음 카드(SwipeCard 재생
-    // 버튼 disabled)를 디스커버 노출 단계에서 원천 제외한다.
-    const slotUrls = (row.voice_intro_audio_urls ?? {}) as Partial<
-      Record<VoiceIntroSlotLanguage, string | null>
-    >;
-    if (!slotUrls[slot]) return false;
+  const failed = results.find((r) => r.error);
+  if (failed?.error) {
+    console.error('[discover] bot check failed:', failed.error.message);
     return true;
-  });
+  }
+  return results.some((r) => (r.data ?? []).length > 0);
+}
 
-  // 점수 계산 → 높은 순 정렬.
-  // mig 034: 스코어링의 "사진 3장+" 신호는 profile_photos ready 사진 수로 판정.
-  const scored = visible.map((row: any) => {
-    const candidate: Candidate = {
-      id: row.id,
-      language: row.language ?? '',
-      nationality: row.nationality,
-      interests: row.interests ?? [],
-      photos: readyPhotosByUser.get(row.id) ?? [],
-      created_at: row.created_at,
-    };
-    return { ...row, _intra: computeIntraScore(candidate, viewer, reciprocalLikerIds) };
-  });
+// 탐색 후보 풀 — 노출 가능한 사람 전원을 DB 가 점수순으로 준다 (discover_candidates, mig 067).
+// 제외: 나 / 이미 스와이프 / 차단 / 오늘 플레이리스트 멤버 / 받은 인사 탭에서 연 사람 /
+// 같은 언어 / 사진 0장 / 내 언어 보이스 한마디 없음 / 섀도우 숨김 / 캠페인 봇(따로 주입).
+async function loadDiscoverPool(userId: string) {
+  const { data: viewerProfile } = await supabase.from('profiles').select('language').eq('id', userId).single();
+  if (!viewerProfile) return poolError(404, 'Profile not found');
+  const slot = pickViewerSlot(viewerProfile.language as string | null);
+  const botId = env.campaign.botUserId;
 
-  scored.sort((a, b) => b._intra - a._intra);
-
+  const [rpcResult, botAlreadyHandled] = await Promise.all([
+    supabase.rpc('discover_candidates', {
+      p_user: userId,
+      p_slot: slot,
+      p_exclude: [...env.discover.hiddenUserIds, ...(botId ? [botId] : [])],
+    }),
+    isBotHandled(userId, botId),
+  ]);
+  if (rpcResult.error) return poolError(500, rpcResult.error.message);
+  const scored = ((rpcResult.data ?? []) as any[]).map((r) => ({
+    id: r.id as string,
+    score: Number(r.score),
+    liked_you: !!r.liked_you,
+  }));
   return { scored, slot, botAlreadyHandled };
 }
 
@@ -343,7 +221,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
       .from('blocks')
       .select('blocker_id, blocked_id')
       .or(`blocker_id.eq.${req.userId!},blocked_id.eq.${req.userId!}`),
-    supabase.from('profiles').select('language, interests').eq('id', req.userId!).single(),
+    supabase.from('profiles').select('language').eq('id', req.userId!).single(),
     // 오늘 탐색 플레이리스트에 든 사람은 숨긴다 — 같은 사람을 두 탭에서 따로 보지 않게.
     supabase.from('discover_playlist_items').select('candidate_id').eq('user_id', req.userId!),
   ]);
@@ -410,26 +288,20 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return true;
   });
 
-  // 5) 점수 정렬: 탐색과 같은 점수. 이 풀은 전원이 나를 like 했으므로 reciprocity 는
-  //    순서에 영향이 없어 넘기지 않는다.
-  const viewer: Viewer = {
-    id: req.userId!,
-    interests: (viewerProfileResult.data?.interests as string[] | null) ?? [],
-  };
-
-  const scored = visible.map((row: any) => {
-    const candidate: Candidate = {
-      id: row.id,
-      language: row.language ?? '',
-      nationality: row.nationality,
-      interests: row.interests ?? [],
-      photos: readyPhotosByUser.get(row.id) ?? [],
-      created_at: row.created_at,
-    };
-    return { ...row, _intra: computeIntraScore(candidate, viewer) };
+  // 5) 점수 정렬: 탐색과 같은 점수 (DB 함수 discover_score, mig 067 — 관심사·사진·신규·
+  //    최근 접속·대칭 jitter).
+  const { data: scoreRows, error: scoreError } = await supabase.rpc('discover_score', {
+    p_user: req.userId!,
+    p_ids: visible.map((row: any) => row.id as string),
   });
-
-  scored.sort((a, b) => b._intra - a._intra);
+  if (scoreError) {
+    res.status(500).json({ error: scoreError.message });
+    return;
+  }
+  const scoreById = new Map(((scoreRows ?? []) as any[]).map((r) => [r.id as string, Number(r.score)]));
+  const scored = visible
+    .map((row: any) => ({ ...row, _intra: scoreById.get(row.id) ?? 0 }))
+    .sort((a, b) => b._intra - a._intra || (a.id < b.id ? -1 : 1));
 
   // 별사탕 유료화: 공개한 사람(본 순서대로) 뒤에 아직 안 연 사람 전원을 잠긴(블러) 카드로
   // 내려준다. 잠긴 카드 맨 앞이 다음 무료 카드 — 고정돼서(like_card_pins) 열릴 때까지 바뀌지
@@ -929,9 +801,12 @@ async function refillPlaylist(userId: string, playlistId: number): Promise<strin
   const room = Math.min(1, CARD_RESET_AMOUNT - members.filter((id) => !gone.has(id)).length);
   if (room <= 0) return [];
 
-  const pool = await loadDiscoverPool(userId, CARD_RESET_AMOUNT);
+  // 인사 안 한 사람부터 — 칸당 인사한 사람 상한은 열 때 섞은 몫으로 충분하다. 인사 안 한
+  // 사람이 없으면 인사한 사람으로라도 채운다.
+  const pool = await loadDiscoverPool(userId);
   if ('error' in pool) throw new Error(`discover pool: ${pool.error}`);
-  const add = pool.scored.slice(0, room).map((r) => r.id as string);
+  const nonLikers = pool.scored.filter((r) => !r.liked_you);
+  const add = (nonLikers.length > 0 ? nonLikers : pool.scored).slice(0, room).map((r) => r.id);
   if (add.length === 0) return [];
 
   const last = Math.max(0, ...(items ?? []).map((i: any) => i.position as number));
@@ -975,7 +850,7 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
 
   const [today, pool] = await Promise.all([
     getTodayPlaylists(req.userId!, localDate),
-    loadDiscoverPool(req.userId!, CARD_RESET_AMOUNT),
+    loadDiscoverPool(req.userId!),
   ]);
   if ('error' in pool) {
     res.status(pool.status).json({ error: pool.error });
@@ -1009,11 +884,14 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
 
   // 같은 요청이 겹쳐도 PK 중복은 무시된다.
   // ponytail: 동시에 다른 칸을 여는 요청과 겹치면 한 사람이 두 칸에 들어갈 수 있다 — 드물어 허용.
-  const { fills, rest } = allocatePlaylistTopUp(
+  // 덜 찬 칸은 인사 안 한 사람부터 채우고, 모자라면 인사한 사람으로 마저 채운다.
+  const { fills } = allocatePlaylistTopUp(
     today.map((p) => p.id),
     counts,
-    pool.scored.map((r) => r.id as string),
+    [...pool.scored.filter((r) => !r.liked_you), ...pool.scored.filter((r) => r.liked_you)].map((r) => r.id),
   );
+  const filled = new Set(fills.flatMap((f) => f.add));
+  const rest = pool.scored.filter((r) => !filled.has(r.id));
   for (const { playlistId, add } of fills) {
     const start = lastPosition.get(playlistId) ?? 0;
     const { error } = await supabase.from('discover_playlist_items').upsert(
@@ -1032,7 +910,8 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
     counts.set(playlistId, (counts.get(playlistId) ?? 0) + add.length);
   }
 
-  const available = Math.min(rest.length, CARD_RESET_AMOUNT);
+  // 지금 새 칸을 열면 받을 장수 — 열기(POST /open)와 같은 고르기라 expected_count 와 맞는다.
+  const available = pickPlaylistCards(rest, CARD_RESET_AMOUNT).length;
   const free = today.length === 0;
   const playlists = Array.from({ length: PLAYLIST_COUNT }, (_, idx) => {
     const opened = today.find((p) => p.idx === idx);
@@ -1042,8 +921,9 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
   });
   res.json({
     available_count: available,
-    // 자르지 않은 남은 후보 수 — FE 가 오늘 채울 수 있는 LP 만 보여주는 데 쓴다 (칸당 최대 CARD_RESET_AMOUNT).
-    candidate_count: rest.length,
+    // FE 는 ceil(candidate_count / CARD_RESET_AMOUNT) 로 보여줄 안 연 LP 수를 정한다 — 칸당
+    // 인사한 사람 상한 때문에 남은 인원으로는 칸 수가 안 나와, 열 수 있는 칸 수 × 칸 크기로 보낸다.
+    candidate_count: fillablePlaylists(rest, PLAYLIST_COUNT - today.length) * CARD_RESET_AMOUNT,
     // 유료화 OFF 는 하루 1개 — 고른 뒤엔 그 칸만 보여준다.
     playlists: !env.monetization.enabled && !free ? playlists.filter((p) => p.opened) : playlists,
   });
@@ -1124,12 +1004,12 @@ router.post(
       return;
     }
 
-    const pool = await loadDiscoverPool(userId, CARD_RESET_AMOUNT);
+    const pool = await loadDiscoverPool(userId);
     if ('error' in pool) {
       res.status(pool.status).json({ error: pool.error });
       return;
     }
-    const picks = pool.scored.slice(0, CARD_RESET_AMOUNT).map((r) => r.id as string);
+    const picks = pickPlaylistCards(pool.scored, CARD_RESET_AMOUNT);
     const expected = req.body.expected_count as number | undefined;
     if (picks.length === 0 || (expected !== undefined && picks.length !== expected)) {
       res.status(409).json({ error: 'Available cards changed', code: 'cards_changed', available_count: picks.length });

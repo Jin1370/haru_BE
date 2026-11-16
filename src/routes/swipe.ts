@@ -1208,7 +1208,7 @@ router.post(
     const { liker_id, free } = req.body;
     const me = req.userId!;
 
-    const [likeResult, revealResult] = await Promise.all([
+    const [likeResult, revealResult, answeredResult] = await Promise.all([
       supabase
         .from('swipes')
         .select('id')
@@ -1217,9 +1217,13 @@ router.post(
         .eq('direction', 'like')
         .maybeSingle(),
       supabase.from('like_reveals').select('liker_id').eq('viewer_id', me).eq('liker_id', liker_id).maybeSingle(),
+      // 내가 이미 응답한 상대 (탐색에서 넘김·대화 신청) — 받은 인사 목록에서 빠지는 사람이라
+      // 열어도 볼 수 없다.
+      supabase.from('swipes').select('id').eq('swiper_id', me).eq('swiped_id', liker_id).is('reset_at', null).limit(1),
     ]);
-    if (likeResult.error || revealResult.error) {
-      res.status(500).json({ error: (likeResult.error ?? revealResult.error)!.message });
+    const lookupErr = likeResult.error ?? revealResult.error ?? answeredResult.error;
+    if (lookupErr) {
+      res.status(500).json({ error: lookupErr.message });
       return;
     }
     if (!likeResult.data || (await isUserUnavailable(me, liker_id))) {
@@ -1228,6 +1232,11 @@ router.post(
     }
     if (revealResult.data) {
       res.json({ revealed: true });
+      return;
+    }
+    // 갱신 전 목록에서 연 경우 — 차감 없이 거절하고 앱이 목록을 다시 받는다 (아래 플레이리스트와 같은 처리).
+    if ((answeredResult.data ?? []).length > 0) {
+      res.status(409).json({ error: 'Card changed', code: 'card_changed' });
       return;
     }
     // 오늘 탐색 플레이리스트에 든 사람은 받은 인사 탭에서 숨겨진다 — 갱신 전 화면에서 열면 연

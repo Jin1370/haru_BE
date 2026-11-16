@@ -33,31 +33,50 @@ export async function revealLike(viewerId: string, likerId: string, stars: numbe
 
 // 공개한 상대가 사라져 대화 신청이 들어가지 않을 때의 보상. 별사탕은 쓴 그대로(무료분은 무료,
 // 유료분은 유료) 돌려주고, 원장 ref 유니크로 같은 공개를 두 번 돌려주지 않는다. 돌려준 개수 반환.
-// 무료 카드로 연 공개면 24시간 무료 타이머를 되돌린다 (다음 목록 조회 때 서버가 다음 카드를
-// 무료로 연다) — freeRestored=true. 어느 쪽이든 공개 기록은 남긴다 (상대가 돌아오면 열린 카드).
+// 무료 카드로 연 공개면 언제 열었든 무료 카드 한 장을 돌려준다 (다음 목록 조회 때 서버가 다음
+// 카드를 무료로 연다) — freeRestored=true. 어느 쪽이든 공개 기록은 남긴다 (상대가 돌아오면 열린 카드).
 export async function refundLikeReveal(
   viewerId: string,
   likerId: string,
 ): Promise<{ stars: number; freeRestored: boolean }> {
   const { data: reveal, error } = await supabase
     .from('like_reveals')
-    .select('paid, free_spent, paid_spent')
+    .select('paid, free_spent, paid_spent, free_credit, free_refunded')
     .eq('viewer_id', viewerId)
     .eq('liker_id', likerId)
     .maybeSingle();
   if (error) throw new Error(`like_reveals: ${error.message}`);
   if (!reveal) return { stars: 0, freeRestored: false };
-  if (!reveal.paid) {
-    // 기록은 남기고(상대가 돌아와도 열린 카드로 나오게) 무료 타이머 계산에서만 뺀다 —
-    // 타이머는 paid=false 공개만 센다. 차감 0 이라 다시 사라져도 돌려줄 것이 없다.
-    const { error: updErr } = await supabase
+
+  // 무료로 연 카드(24시간 타이머로 연 카드, 또는 돌려받은 무료 카드로 연 카드) — 언제 열었든 무료
+  // 카드 한 장을 쌓는다 (mig 069). 타이머는 건드리지 않는다 — 돌려받은 한 장은 덤이고, 원래 오기로
+  // 한 다음 무료 카드 시각은 그대로. free_refunded 조건부 갱신이라 같은 카드로 두 번 주지 않는다.
+  if (!reveal.paid || reveal.free_credit) {
+    if (reveal.free_refunded) return { stars: 0, freeRestored: false };
+    const { data: changed, error: updErr } = await supabase
       .from('like_reveals')
-      .update({ paid: true })
+      .update({ free_refunded: true })
       .eq('viewer_id', viewerId)
       .eq('liker_id', likerId)
-      .eq('paid', false);
+      .eq('free_refunded', false)
+      .select('liker_id');
     if (updErr) {
-      console.error('[refundLikeReveal] free reveal restore failed:', updErr.message);
+      console.error('[refundLikeReveal] free refund mark failed:', updErr.message);
+      return { stars: 0, freeRestored: false };
+    }
+    if (!changed?.length) return { stars: 0, freeRestored: false };
+    const { error: grantErr } = await supabase.rpc('grant_like_free_credit', { p_viewer: viewerId });
+    if (grantErr) {
+      // 표시는 했는데 못 쌓았다 — 같은 카드로 다시 시도하지 않게 표시를 되돌린다.
+      console.error('[refundLikeReveal] free credit grant failed:', grantErr.message);
+      await supabase
+        .from('like_reveals')
+        .update({ free_refunded: false })
+        .eq('viewer_id', viewerId)
+        .eq('liker_id', likerId)
+        .then(({ error: undoErr }) => {
+          if (undoErr) console.error('[refundLikeReveal] free refund unmark failed:', undoErr.message);
+        });
       return { stars: 0, freeRestored: false };
     }
     return { stars: 0, freeRestored: true };

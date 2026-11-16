@@ -216,6 +216,16 @@ async function toDiscoverCard(
 // 일일 50장 한도와는 무관하게 GET 은 무료(조회는 카운트 안 함). 실제 스와이프
 // 행위(POST /swipe)는 디스커버 swipe 와 동일 엔드포인트를 공유하므로 quota 도 함께 적용됨.
 router.get('/likes-received', async (req: AuthRequest, res: Response) => {
+  // 돌려받은 무료 카드(mig 069 — 무료로 연 카드의 상대가 사라져 인사가 안 들어간 경우). 인사 직후
+  // 앱이 바로 받는 이 조회에서 가져가며 지운다 — 아래에서 열 카드가 없으면 그대로 사라진다
+  // (나중에 새 인사가 와서 저절로 열리지 않게, 사용자 결정).
+  let freeCredits = 0;
+  if (env.monetization.enabled) {
+    const { data: taken, error: takeErr } = await supabase.rpc('take_like_free_credits', { p_viewer: req.userId! });
+    if (takeErr) console.error('[likes-received] free credit take failed:', takeErr.message);
+    else freeCredits = Number(taken) || 0;
+  }
+
   // 1) 나를 like 한 사람들 (시간 역순, 최신 LIKES_RECEIVED_MAX 개로 바운드).
   //    (E) UNIQUE(swiper_id, swiped_id) 라 distinct liker. 인기 사용자가 수천 명에게
   //    좋아요를 받아도 다운스트림(프로필/사진 IN 페치)이 최신 N 명으로 묶인다.
@@ -385,6 +395,22 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
       // 동시에 온 다른 요청이 먼저 연 카드가 있으면 그 카드를 연 것으로 본다.
       revealedAt.set(won, new Date().toISOString());
       justRevealedId = won;
+      split = splitLikeCards(scored, revealedAt, null);
+    }
+
+    // 돌려받은 무료 카드(위에서 가져옴)로 타이머와 상관없이 잠긴 카드 맨 앞을 연다. 위에서 타이머
+    // 카드가 열렸어도 그다음 카드에 쓴다 — 미루면 나중에 저절로 열린다.
+    for (let i = 0; i < freeCredits && split.locked.length > 0; i++) {
+      const target = split.locked[0].id;
+      const { error: openErr } = await supabase
+        .from('like_reveals')
+        .insert({ viewer_id: req.userId!, liker_id: target, paid: true, free_credit: true });
+      if (openErr && openErr.code !== '23505') {
+        console.error('[likes-received] free credit open failed:', openErr.message);
+        break;
+      }
+      revealedAt.set(target, new Date().toISOString());
+      justRevealedId = target;
       split = splitLikeCards(scored, revealedAt, null);
     }
 

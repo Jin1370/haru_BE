@@ -31,10 +31,10 @@ export async function revealLike(viewerId: string, likerId: string, stars: numbe
   throw new Error(`reveal_like: ${error.message}`);
 }
 
-// 유료 공개를 쓴 그대로(무료분은 무료, 유료분은 유료) 돌려주고 공개를 취소한다.
-// 원장 ref 유니크로 같은 공개를 두 번 돌려주지 않는다. 돌려준 개수 반환 (없으면 0).
-// 무료 카드로 연 공개면 기록만 지워 24시간 무료 타이머를 되돌린다 (다음 목록 조회 때 서버가
-// 다음 카드를 무료로 연다) — freeRestored=true.
+// 공개한 상대가 사라져 대화 신청이 들어가지 않을 때의 보상. 별사탕은 쓴 그대로(무료분은 무료,
+// 유료분은 유료) 돌려주고, 원장 ref 유니크로 같은 공개를 두 번 돌려주지 않는다. 돌려준 개수 반환.
+// 무료 카드로 연 공개면 24시간 무료 타이머를 되돌린다 (다음 목록 조회 때 서버가 다음 카드를
+// 무료로 연다) — freeRestored=true. 어느 쪽이든 공개 기록은 남긴다 (상대가 돌아오면 열린 카드).
 export async function refundLikeReveal(
   viewerId: string,
   likerId: string,
@@ -48,13 +48,16 @@ export async function refundLikeReveal(
   if (error) throw new Error(`like_reveals: ${error.message}`);
   if (!reveal) return { stars: 0, freeRestored: false };
   if (!reveal.paid) {
-    const { error: delErr } = await supabase
+    // 기록은 남기고(상대가 돌아와도 열린 카드로 나오게) 무료 타이머 계산에서만 뺀다 —
+    // 타이머는 paid=false 공개만 센다. 차감 0 이라 다시 사라져도 돌려줄 것이 없다.
+    const { error: updErr } = await supabase
       .from('like_reveals')
-      .delete()
+      .update({ paid: true })
       .eq('viewer_id', viewerId)
-      .eq('liker_id', likerId);
-    if (delErr) {
-      console.error('[refundLikeReveal] free reveal delete failed:', delErr.message);
+      .eq('liker_id', likerId)
+      .eq('paid', false);
+    if (updErr) {
+      console.error('[refundLikeReveal] free reveal restore failed:', updErr.message);
       return { stars: 0, freeRestored: false };
     }
     return { stars: 0, freeRestored: true };
@@ -73,14 +76,8 @@ export async function refundLikeReveal(
     if (insertErr && insertErr.code !== '23505') throw new Error(`star refund: ${insertErr.message}`);
     if (!insertErr) refunded = rows.reduce((sum, r) => sum + r.delta, 0);
   }
-  // 상대가 돌아와도(차단 해제 등) 공짜로 열린 채 남지 않게 공개를 지운다. 실패해도 위
-  // ref 유니크가 재환급을 막는다.
-  const { error: deleteErr } = await supabase
-    .from('like_reveals')
-    .delete()
-    .eq('viewer_id', viewerId)
-    .eq('liker_id', likerId);
-  if (deleteErr) console.error('[refundLikeReveal] reveal delete failed:', deleteErr.message);
+  // 공개 기록은 지우지 않는다 — 상대가 돌아오면(정지 해제·차단 해제 등) 열린 카드로 나온다
+  // (사용자 결정 2026-11-16: 연 카드는 다시 잠기지 않는다). 위 ref 유니크가 재환급을 막는다.
   return { stars: refunded, freeRestored: false };
 }
 

@@ -219,20 +219,30 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   // 1) 나를 like 한 사람들 (시간 역순, 최신 LIKES_RECEIVED_MAX 개로 바운드).
   //    (E) UNIQUE(swiper_id, swiped_id) 라 distinct liker. 인기 사용자가 수천 명에게
   //    좋아요를 받아도 다운스트림(프로필/사진 IN 페치)이 최신 N 명으로 묶인다.
-  const { data: likes, error: likesError } = await supabase
-    .from('swipes')
-    .select('swiper_id, created_at')
-    .eq('swiped_id', req.userId!)
-    .eq('direction', 'like')
-    .order('created_at', { ascending: false })
-    .limit(LIKES_RECEIVED_MAX);
-
+  const [likesResult, openedResult] = await Promise.all([
+    supabase
+      .from('swipes')
+      .select('swiper_id, created_at')
+      .eq('swiped_id', req.userId!)
+      .eq('direction', 'like')
+      .order('created_at', { ascending: false })
+      .limit(LIKES_RECEIVED_MAX),
+    // 열어 둔 카드(무료·별사탕) — 최신 N 개 밖으로 밀려나도, 플레이리스트에 함께 들어가도 빠지지
+    // 않게 따로 받는다. 공개 기록은 그 사람이 나를 like 했을 때만 생긴다.
+    env.monetization.enabled
+      ? supabase.from('like_reveals').select('liker_id').eq('viewer_id', req.userId!)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  const likesError = likesResult.error ?? openedResult.error;
   if (likesError) {
     res.status(500).json({ error: likesError.message });
     return;
   }
 
-  const likerIds = (likes ?? []).map((l: any) => l.swiper_id as string);
+  const openedIds = new Set((openedResult.data ?? []).map((r: any) => r.liker_id as string));
+  const likerIds = [
+    ...new Set([...(likesResult.data ?? []).map((l: any) => l.swiper_id as string), ...openedIds]),
+  ];
   if (likerIds.length === 0) {
     res.json([]);
     return;
@@ -262,7 +272,11 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   // 탐색에서 한 번 지나친 사람(자정에 자동 기록된 넘김 포함)도 응답한 것으로 보고 빼낸다 (틴더와 같다).
   const swipedSet = new Set<string>([
     ...(viewerSwipesResult.data ?? []).map((s: any) => s.swiped_id as string),
-    ...(env.monetization.enabled ? (playlistResult.data ?? []).map((r: any) => r.candidate_id as string) : []),
+    // 열어 둔 카드는 플레이리스트에 함께 들어가도 숨기지 않는다 (공개와 플레이리스트 열기가 거의
+    // 동시에 일어난 경우 — 평소엔 공개한 사람은 플레이리스트 후보에서 빠진다).
+    ...(env.monetization.enabled
+      ? (playlistResult.data ?? []).map((r: any) => r.candidate_id as string).filter((id) => !openedIds.has(id))
+      : []),
   ]);
   const blockedSet = new Set<string>(
     (blocksResult.data ?? []).map((b: any) =>
@@ -453,7 +467,9 @@ async function claimFreeReveal(viewerId: string, likerId: string): Promise<strin
     return likerId;
   }
   const winner = data[0].liker_id as string;
-  if (winner !== likerId) {
+  // 내가 방금 넣은 줄만 되돌린다. 이미 있던 줄(23505 — 다른 요청이 열어 이미 화면에 보여 준
+  // 카드)을 지우면 열린 카드가 다시 잠긴다.
+  if (winner !== likerId && !insErr) {
     const { error: delErr } = await supabase
       .from('like_reveals')
       .delete()
@@ -665,7 +681,19 @@ async function finalizePastPlaylists(userId: string): Promise<void> {
     console.error('[playlists] finalize items failed:', itemsErr.message);
     return;
   }
-  const ids = [...new Set((items ?? []).map((i: any) => i.candidate_id as string))];
+  const seenIds = [...new Set((items ?? []).map((i: any) => i.candidate_id as string))];
+  // 받은 인사 탭에서 열어 둔 사람은 넘김으로 기록하지 않는다 — 기록하면 그 탭에서 영영 빠진다
+  // (공개와 플레이리스트 열기가 거의 동시에 일어나 두 곳에 함께 든 경우).
+  const { data: opened, error: openedErr } =
+    seenIds.length > 0
+      ? await supabase.from('like_reveals').select('liker_id').eq('viewer_id', userId).in('liker_id', seenIds)
+      : { data: [], error: null };
+  if (openedErr) {
+    console.error('[playlists] finalize reveals failed:', openedErr.message);
+    return;
+  }
+  const openedSet = new Set((opened ?? []).map((r: any) => r.liker_id as string));
+  const ids = seenIds.filter((id) => !openedSet.has(id));
 
   if (ids.length > 0) {
     const { data: existing, error: existingErr } = await supabase

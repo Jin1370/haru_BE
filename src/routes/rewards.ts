@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { createVerify } from 'crypto';
 import { env } from '../config/env';
 import { grantStars } from '../services/stars';
-import { adStarsRemainingToday } from './swipe';
+import { adStarsRemainingToday, adTzOffset } from './swipe';
 import { AD_REWARD_STARS, STAR_PRODUCTS } from '../constants/stars';
 
 // 별사탕 충전 입구 (mig 059). 둘 다 외부 서버가 호출하므로 authMiddleware 없음 —
@@ -16,7 +16,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // ── AdMob 보상형 광고 서버측 검증 (SSV) ─────────────────────────────
 // https://developers.google.com/admob/android/ssv
 // 구글이 GET 으로 호출. 서명 대상은 쿼리스트링 중 "&signature=" 앞부분 그대로.
-// user_id 는 앱이 광고 로드 시 ServerSideVerificationOptions 로 넣은 우리 userId.
+// user_id 는 앱이 광고 로드 시 ServerSideVerificationOptions 로 넣은 우리 userId,
+// custom_data 는 휴대폰 시간대(getTimezoneOffset) — 하루 한도를 사용자 자정에 초기화한다 (서명 대상).
 const ADMOB_KEYS_URL = 'https://www.gstatic.com/admob/reward/verifier-keys.json';
 const KEY_CACHE_MS = 24 * 60 * 60 * 1000;
 let keyCache: { at: number; keys: Map<string, string> } | null = null;
@@ -76,7 +77,7 @@ router.get('/admob', async (req: Request, res: Response) => {
 
   // ponytail: 한도 확인→지급이 원자적이지 않아 동시 콜백 2개가 한도를 1 넘길 수 있다.
   // 하루 광고 2회 한도라 허용.
-  if ((await adStarsRemainingToday(userId)) <= 0) {
+  if ((await adStarsRemainingToday(userId, adTzOffset(params.get('custom_data')))) <= 0) {
     res.json({ ok: true, granted: false, reason: 'daily_limit' });
     return;
   }

@@ -597,6 +597,14 @@ describe('다시 보기 — 넘겼던 사람으로 모자란 칸 채우기', () 
     expect(picks).toEqual(['n0', 'n1', 'n2', 'n3', 'n4', 'p4', 'p3', 'p2', 'p1', 'p0']);
   });
 
+  it('무료 칸: 다시 보기 카드가 모자라면 새 카드로 마저 채워 10장', () => {
+    // 새 카드 29장 → 원래 새 카드 8장 + 다시 보기 2장. 다시 보기 0장이면 새 카드 10장, 1장이면 9 + 1.
+    expect(pickFreePlaylist(fresh(29))).toHaveLength(10);
+    expect(pickFreePlaylist([...fresh(29), ...passed(1)])).toEqual([...fresh(9).map((c) => c.id), 'p0']);
+    // 새 카드도 모자라면 있는 만큼만.
+    expect(pickFreePlaylist(fresh(6))).toHaveLength(6);
+  });
+
   it('무료 칸: 새 카드가 없으면 전부 다시 보기', () => {
     expect(pickFreePlaylist(passed(12))).toHaveLength(10);
   });

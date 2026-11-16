@@ -46,3 +46,14 @@ describe('verifyAdmobSignature', () => {
     expect(verifyAdmobSignature(query, googlePem)).toBe(true);
   });
 });
+
+// 광고 하루 한도의 시간대 — 앱이 보낸 custom_data / tz_offset_minutes. 없거나 이상하면 KST.
+describe('adTzOffset', async () => {
+  const { adTzOffset } = await import('../src/routes/swipe');
+  it('정상 값은 그대로, 없거나 이상하면 KST(-540)', () => {
+    expect(adTzOffset('-540')).toBe(-540);
+    expect(adTzOffset('420')).toBe(420);
+    expect(adTzOffset('0')).toBe(0);
+    for (const bad of [null, undefined, '', 'abc', '1.5', '9999', ['60']]) expect(adTzOffset(bad)).toBe(-540);
+  });
+});

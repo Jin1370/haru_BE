@@ -813,7 +813,7 @@ export const swaggerDocument = {
               monetization_enabled: { type: 'boolean', description: 'MONETIZATION_ENABLED. true 일 때만 아래 필드가 온다.' },
               stars: { type: 'object', properties: { free: { type: 'integer' }, paid: { type: 'integer' }, total: { type: 'integer' } } },
               next_free_reveal_at: { type: 'string', format: 'date-time', nullable: true, description: 'null = 지금 무료 카드 사용 가능. 마지막 무료 카드를 본 시각 + 24시간' },
-              ads_remaining: { type: 'integer', description: '오늘(KST) 남은 광고 보상 횟수' },
+              ads_remaining: { type: 'integer', description: '오늘(사용자 시간대 자정 기준, tz_offset_minutes 없으면 KST) 남은 광고 보상 횟수' },
             }, required: ['monetization_enabled'] } } },
           },
         },

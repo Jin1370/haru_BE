@@ -110,10 +110,14 @@ function recycledBestFirst(pool: PoolCandidate[]): PoolCandidate[] {
 }
 
 // 무료 칸: 새 카드 freeNewSlots 장 (점수 순·인사한 사람 칸당 2명) + 나머지는 다시 보기.
+// 다시 보기 카드가 모자라면 새 카드로 마저 채워 10장을 맞춘다 (플레이리스트 기본 구성은 10장).
+// 덜 채워 열면 다음 목록 조회의 빈자리 채우기가 새 카드로 채워, 열기 전에 보여 준 LP 수가 줄어든다.
 export function pickFreePlaylist(pool: PoolCandidate[]): string[] {
   const fresh = pool.filter((c) => !c.passed_at);
-  const picks = pickPlaylistCards(fresh, freeNewSlots(fresh.length));
-  const again = recycledBestFirst(pool).slice(0, CARD_RESET_AMOUNT - picks.length).map((c) => c.id);
+  const recycled = recycledBestFirst(pool);
+  const recycledSlots = Math.min(recycled.length, CARD_RESET_AMOUNT - freeNewSlots(fresh.length));
+  const picks = pickPlaylistCards(fresh, CARD_RESET_AMOUNT - recycledSlots);
+  const again = recycled.slice(0, CARD_RESET_AMOUNT - picks.length).map((c) => c.id);
   return [...picks, ...again];
 }
 
@@ -640,14 +644,18 @@ function monetizationOff(res: Response): boolean {
   return true;
 }
 
-// 광고 보상 하루 한도의 "하루" — SSV 콜백에 사용자 타임존이 없어 KST 자정으로
-// 통일한다 (1차 시장 KR/JP 모두 UTC+9). quota 의 ads_remaining 도 같은 경계.
-export function kstDayStartIso(nowMs = Date.now()): string {
-  return computeLocalDayRangeUtc(nowMs, -540).fromIso;
+// 광고 보상 하루 한도의 "하루" — 사용자 휴대폰 시간대의 자정. 광고 콜백(SSV)은 앱이 실어 보낸
+// custom_data, quota 는 tz_offset_minutes 로 받는다. 없거나 이상하면(옛 앱) KST.
+// ponytail: 시간대를 동쪽으로 바꾸면 그날 본 광고가 '오늘' 밖으로 빠져 하루 한도만큼 더 볼 수 있다.
+// 끝까지 본 광고라 허용 — 막으려면 플레이리스트처럼 그날 첫 광고 때 끝나는 시각을 저장한다.
+export function adTzOffset(raw: unknown): number {
+  if (typeof raw !== 'string' || !/^-?\d+$/.test(raw)) return -540;
+  const n = Number(raw);
+  return n >= -840 && n <= 840 ? n : -540;
 }
 
-export async function adStarsRemainingToday(userId: string): Promise<number> {
-  const granted = await sumLedger(userId, 'ad', kstDayStartIso());
+export async function adStarsRemainingToday(userId: string, tzOffsetMinutes = -540): Promise<number> {
+  const granted = await sumLedger(userId, 'ad', computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes).fromIso);
   return Math.max(0, AD_REWARD_DAILY_MAX - Math.floor(granted / AD_REWARD_STARS));
 }
 
@@ -655,16 +663,18 @@ export async function adStarsRemainingToday(userId: string): Promise<number> {
 router.get('/quota', async (req: AuthRequest, res: Response) => {
   res.json({
     monetization_enabled: env.monetization.enabled,
-    ...(env.monetization.enabled ? await getMonetizationQuota(req.userId!) : {}),
+    ...(env.monetization.enabled
+      ? await getMonetizationQuota(req.userId!, adTzOffset(req.query.tz_offset_minutes))
+      : {}),
   });
 });
 
 // quota 응답의 유료화 필드 — 별사탕 잔액, 받은 좋아요 무료 카드 타이머, 광고 남은 횟수.
-async function getMonetizationQuota(userId: string) {
+async function getMonetizationQuota(userId: string, tzOffsetMinutes: number) {
   const [stars, nextFreeRevealAt, adsRemaining] = await Promise.all([
     getStarBalance(userId),
     getNextFreeRevealAt(userId),
-    adStarsRemainingToday(userId),
+    adStarsRemainingToday(userId, tzOffsetMinutes),
   ]);
   return {
     stars: { free: stars.free, paid: stars.paid, total: stars.free + stars.paid },

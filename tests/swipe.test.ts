@@ -223,6 +223,8 @@ vi.mock('../src/config/supabase', () => {
       limit() { return b; },
       gte() { return b; },
       lt() { return b; },
+      gt() { return b; },
+      lte() { return b; },
       in() { b._hasIn = true; return b; },
       or() { return b; },
       order() { return b; },

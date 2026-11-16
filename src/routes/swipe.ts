@@ -641,14 +641,14 @@ async function getMonetizationQuota(userId: string) {
 
 const PLAYLIST_COUNT = 3;
 
-// 지난 날짜 플레이리스트에서 본 카드를 pass 로 기록하고 지운다. 실패하면 지우지 않고
+// 끝난 플레이리스트에서 본 카드를 pass 로 기록하고 지운다. 실패하면 지우지 않고
 // 다음 조회에서 다시 시도한다 — 그동안은 플레이리스트 행이 그 사람들을 후보에서 뺀다.
-async function finalizePastPlaylists(userId: string, localDate: string): Promise<void> {
+async function finalizePastPlaylists(userId: string): Promise<void> {
   const { data: old, error } = await supabase
     .from('discover_playlists')
     .select('id')
     .eq('user_id', userId)
-    .lt('day', localDate);
+    .lte('expires_at', new Date().toISOString());
   if (error) {
     console.error('[playlists] finalize lookup failed:', error.message);
     return;
@@ -728,14 +728,17 @@ async function finalizePastPlaylists(userId: string, localDate: string): Promise
   if (deleteErr) console.error('[playlists] finalize delete failed:', deleteErr.message);
 }
 
-async function getTodayPlaylists(userId: string, localDate: string) {
+// 오늘 플레이리스트 = 아직 끝나지 않은 것 (mig 068). 끝나는 시각은 그날 처음 열 때의 휴대폰
+// 시간대로 정해 저장한다 — 요청마다 시간대로 다시 계산하면 시간대가 바뀐 순간(여행·설정)
+// 연 플레이리스트가 자정 전에 다시 잠기거나 일찍 초기화된다.
+async function getTodayPlaylists(userId: string) {
   const { data, error } = await supabase
     .from('discover_playlists')
-    .select('id, idx')
+    .select('id, idx, day, expires_at')
     .eq('user_id', userId)
-    .eq('day', localDate);
+    .gt('expires_at', new Date().toISOString());
   if (error) throw new Error(`discover_playlists: ${error.message}`);
-  return (data ?? []) as { id: number; idx: number }[];
+  return (data ?? []) as { id: number; idx: number; day: string; expires_at: string }[];
 }
 
 // 플레이리스트에 고정된 카드. 그사이 탈퇴·정지·숨김·차단된 사람과 사진이 없어진 사람은
@@ -892,12 +895,10 @@ export function allocatePlaylistTopUp(
 
 // 오늘의 플레이리스트 3칸. 안 연 칸의 price 는 지금 열면 낼 별사탕 (0 = 무료).
 router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthRequest, res: Response) => {
-  const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
-  const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-  await finalizePastPlaylists(req.userId!, localDate);
+  await finalizePastPlaylists(req.userId!);
 
   const [today, pool] = await Promise.all([
-    getTodayPlaylists(req.userId!, localDate),
+    getTodayPlaylists(req.userId!),
     loadDiscoverPool(req.userId!),
   ]);
   if ('error' in pool) {
@@ -977,6 +978,11 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
   });
   res.json({
     available_count: available,
+    // 초기화 시각 — 연 칸이 있으면 그 칸이 끝나는 시각, 없으면 지금 열면 끝날 시각(휴대폰
+    // 시간대 자정). 앱의 "초기화까지" 와 자정 처리가 이 값을 쓴다 (시간대가 바뀐 날에도 서버와 일치).
+    resets_at:
+      today[0]?.expires_at ??
+      computeLocalDayRangeUtc(Date.now(), req.query.tz_offset_minutes as unknown as number).toIso,
     // FE 는 ceil(candidate_count / CARD_RESET_AMOUNT) 로 보여줄 안 연 LP 수를 정한다 — 남은 인원이
     // 아니라 열 수 있는 칸 수 × 칸 크기로 보낸다 (별사탕 칸은 새 카드 10장이 남아야 보인다).
     candidate_count: openableLps * CARD_RESET_AMOUNT,
@@ -991,9 +997,7 @@ router.get('/playlists/:idx', validateQuery(quotaQuerySchema), async (req: AuthR
     res.status(400).json({ error: 'Invalid playlist' });
     return;
   }
-  const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
-  const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-  const playlist = (await getTodayPlaylists(req.userId!, localDate)).find((p) => p.idx === params.data.idx);
+  const playlist = (await getTodayPlaylists(req.userId!)).find((p) => p.idx === params.data.idx);
   if (!playlist) {
     res.status(404).json({ error: 'Playlist not opened', code: 'playlist_not_opened' });
     return;
@@ -1013,9 +1017,7 @@ router.post(
       res.status(400).json({ error: 'Invalid playlist' });
       return;
     }
-    const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
-    const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-    const playlist = (await getTodayPlaylists(req.userId!, localDate)).find((p) => p.idx === params.data.idx);
+    const playlist = (await getTodayPlaylists(req.userId!)).find((p) => p.idx === params.data.idx);
     if (!playlist) {
       res.status(404).json({ error: 'Playlist not opened', code: 'playlist_not_opened' });
       return;
@@ -1050,10 +1052,14 @@ router.post(
     const idx = params.data.idx;
     const userId = req.userId!;
     const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
-    const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-    await finalizePastPlaylists(userId, localDate);
+    await finalizePastPlaylists(userId);
 
-    const today = await getTodayPlaylists(userId, localDate);
+    const today = await getTodayPlaylists(userId);
+    // 그날 처음 여는 칸이면 지금 휴대폰 시간대의 자정에 끝나고, 이미 연 칸이 있으면 그 칸과
+    // 함께 끝난다 (세 칸이 같이 초기화).
+    const { localDate, toIso } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
+    const day = today[0]?.day ?? localDate;
+    const expiresAt = today[0]?.expires_at ?? toIso;
     const opened = today.find((p) => p.idx === idx);
     if (opened) {
       res.json({ idx, cards: await loadPlaylistCards(userId, opened.id) });
@@ -1087,7 +1093,8 @@ router.post(
 
     const { data: playlistId, error } = await supabase.rpc('open_playlist', {
       p_user: userId,
-      p_day: localDate,
+      p_day: day,
+      p_expires: expiresAt,
       p_idx: idx,
       p_stars: stars,
       p_first: env.monetization.enabled && first,
@@ -1111,7 +1118,7 @@ router.post(
       }
       // 같은 칸을 동시에 연 경합 — 먼저 열린 쪽을 돌려준다 (이쪽 차감은 함께 취소됨).
       if (error.code === '23505') {
-        const again = (await getTodayPlaylists(userId, localDate)).find((p) => p.idx === idx);
+        const again = (await getTodayPlaylists(userId)).find((p) => p.idx === idx);
         if (again) {
           res.json({ idx, cards: await loadPlaylistCards(userId, again.id) });
           return;
@@ -1253,7 +1260,6 @@ router.post(
 // 자체를 차단.
 router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validateBody(swipeBodySchema), async (req: AuthRequest, res: Response) => {
   const { swiped_id, direction } = req.body;
-  const tzOffsetMinutes = req.query.tz_offset_minutes as unknown as number;
   const monetized = env.monetization.enabled;
 
   // 받아둔 카드의 상대가 그사이 탈퇴·정지·차단됐으면 아무것도 기록·차감하지 않고 넘긴다.
@@ -1275,8 +1281,7 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
     let replacements: Record<string, unknown>[] = [];
     if (req.body.source === 'playlist') {
       try {
-        const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-        const today = await getTodayPlaylists(req.userId!, localDate);
+        const today = await getTodayPlaylists(req.userId!);
         const { data: holder } = today.length
           ? await supabase
               .from('discover_playlist_items')
@@ -1312,8 +1317,7 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
   // 상대인지 확인한다. 안 그러면 아무 후보에게나 보낼 수 있고, 자정이 지난 플레이리스트
   // (다음 조회 때 pass 처리될 카드)에도 보낼 수 있다.
   if (req.body.source === 'playlist') {
-    const { localDate } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
-    const today = await getTodayPlaylists(req.userId!, localDate);
+    const today = await getTodayPlaylists(req.userId!);
     const { data: member, error: memberErr } =
       today.length > 0
         ? await supabase

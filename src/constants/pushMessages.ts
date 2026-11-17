@@ -35,9 +35,9 @@ const PUSH_MESSAGES = {
     en: '{count} new voice messages from {name}',
   },
   match: {
-    ko: '{name}님과 매칭되었어요!',
-    ja: '{name}さんとマッチしました！',
-    en: 'You matched with {name}!',
+    ko: '{name}님과 대화가 연결됐어요!',
+    ja: '{name}さんと会話できるようになりました！',
+    en: 'You and {name} can now chat!',
   },
   // 받은 인사(좋아요)는 익명 — 이름을 넣지 않는다. 트레이에 남는 개인정보 0 + 앱을 열어
   // 확인하게 만드는 동기 유지 (받은 인사 탭에서 누구인지 확인).

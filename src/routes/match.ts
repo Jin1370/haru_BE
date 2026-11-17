@@ -32,16 +32,6 @@ interface MatchSummary {
   last_message_listened_at: string | null;
   unread_count: number;
   round_trip_count: number;
-  main_photo_unlocked: boolean;
-  all_photos_unlocked: boolean;
-}
-
-// mig 014 의 matches 신규 컬럼 (백필 미완/실패 매치는 NULL 가능).
-// `.select('*')` 가 자동으로 끌어오므로 별도 select 추가는 불필요.
-interface MatchRoundtripColumns {
-  round_trip_count: number | null;
-  main_photo_unlocked_at: string | null;
-  all_photos_unlocked_at: string | null;
 }
 
 const router = Router();
@@ -109,7 +99,7 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
   );
 
   // photo-watercolor-pipeline sprint: partner 별 ready 사진 일괄 조회. position ASC.
-  // 디스커버와 동일 패턴 + position 0~4 전체 (매치는 unlock 도달 시 전체 노출).
+  // 디스커버와 동일 패턴 + position 0~4 전체 (매치는 처음부터 전체 노출).
   const readyPhotosByPartner = await fetchReadyPhotosByUser(partnerIds, 'match.list');
 
   // 3. 매치별 마지막 메시지 + 읽지 않은 수 + 라운드트립 기반 unlock 플래그 (RPC v3)
@@ -174,49 +164,18 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
   }
 
   // 4. 조합
-  // 보안 경계: Supabase Storage URL 은 public 이므로 FE 블러는 UX 보호일 뿐.
-  //            all_photos_unlocked=false 인 경우 서버에서 photos 배열을 잘라
-  //            메인 1장만 노출한다 (photos[0] 이 없으면 빈 배열).
-  //
-  // mig 014 이후 photo_access 산출 우선순위:
-  //   1차 = matches.*_unlocked_at IS NOT NULL (트리거가 단조 set 한 컬럼 진실)
-  //   폴백 = get_match_summaries_v3 RPC 의 *_unlocked (rt>=임계치 즉석 계산)
-  //          — 014 백필 실패로 *_unlocked_at 이 NULL 인 매치에 대비.
-  // round_trip_count 도 컬럼 우선, NULL 이면 v3 RPC 결과, 그래도 없으면 0.
+  // 사진 단계적 공개 폐지 (2026-11-17): 매치 상대 사진은 처음부터 전부 노출.
+  // photo_access / round_trip_count 는 옛 앱 호환용으로만 남긴다 (옛 앱은
+  // photo_access 로 사진 넘기기를 열고, round_trip_count 로 게이지를 그린다).
+  const photoAccess = { main_photo_unlocked: true, all_photos_unlocked: true };
   const results = matches.map((match) => {
     const partnerId = match.user1_id === req.userId! ? match.user2_id : match.user1_id;
     const summary = summaryMap.get(match.id);
     const rawPartner = profileMap.get(partnerId);
-
-    const cols = match as unknown as MatchRoundtripColumns;
-    // `!= null` (loose) intentional: 트리거가 적용되기 전 mig 014 윈도우 동안
-    // 컬럼이 응답에 빠져 `undefined` 로 도착할 수 있다. `!== null` 은
-    // undefined 를 통과시켜 모든 매치가 unlock=true 로 응답되는
-    // 사진 노출 사고를 만든다 — null/undefined 둘 다 잠금 의미로 처리.
-    const mainUnlocked =
-      cols.main_photo_unlocked_at != null
-        ? true
-        : Boolean(summary?.main_photo_unlocked);
-    const allUnlocked =
-      cols.all_photos_unlocked_at != null
-        ? true
-        : Boolean(summary?.all_photos_unlocked);
-
-    const photoAccess = {
-      main_photo_unlocked: mainUnlocked,
-      all_photos_unlocked: allUnlocked,
-    };
-
-    // 백필 실패 매치(rt=NULL)는 0 으로 정규화. FE 의 photoAccessStore
-    // downgrade guard 가 잠금 역행을 차단하므로 0 으로 보내도 안전.
     const roundTripCount =
-      cols.round_trip_count != null
-        ? cols.round_trip_count
-        : Number(summary?.round_trip_count ?? 0);
+      (match.round_trip_count as number | null) ?? Number(summary?.round_trip_count ?? 0);
 
-    // mig 034: photos 는 profile_photos.converted_url(status='ready' 사진만,
-    //   position ASC). main_photo_unlocked / all_photos_unlocked 는 v4 로 단일
-    //   unlock 단계 (10회 도달 시 양쪽 동시 true).
+    // mig 034: photos 는 profile_photos.converted_url(status='ready' 사진만, position ASC).
     const sourcePhotos = readyPhotosByPartner.get(partnerId) ?? [];
     const partner = rawPartner
       ? {
@@ -226,9 +185,7 @@ router.get('/', validateQuery(matchListQuerySchema), async (req: AuthRequest, re
           nationality: isCampaignBot(rawPartner.id) ? '' : rawPartner.nationality,
           language: rawPartner.language,
           deleted_at: (rawPartner.deleted_at as string | null) ?? null,
-          photos: photoAccess.all_photos_unlocked
-            ? sourcePhotos
-            : sourcePhotos.slice(0, 1),
+          photos: sourcePhotos,
         }
       : null;
 

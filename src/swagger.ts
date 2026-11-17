@@ -160,7 +160,7 @@ export const swaggerDocument = {
               photos: {
                 type: 'array',
                 items: { type: 'string', format: 'uri' },
-                description: 'all_photos_unlocked=true 이면 전체, 아니면 메인 1장(서버측 필터링).',
+                description: '매치 상대의 ready 사진 전체 (position ASC).',
               },
               nationality: { type: 'string' },
               language: { type: 'string' },

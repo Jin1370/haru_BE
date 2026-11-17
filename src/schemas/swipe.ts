@@ -25,7 +25,7 @@ export const revealBodySchema = z.object({
   free: z.boolean().optional().default(false),
 });
 
-// 플레이리스트에서 처음 화면에 나온 카드. 자정에 본 카드만 pass 로 기록한다.
+// 플레이리스트에서 처음 화면에 나온 카드. 초기화 때 본 카드만 pass 로 기록한다.
 export const playlistSeenBodySchema = z.object({
   candidate_ids: z.array(z.string().uuid()).min(1).max(CARD_RESET_AMOUNT + 1),
 });

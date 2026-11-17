@@ -283,7 +283,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
 
   // 플레이리스트 멤버 숨기기는 유료화 ON 에서만 — OFF 는 받은 인사 탭이 무료라, 보이던 카드가
   // 플레이리스트를 열었다는 이유로 사라지지 않게 한다 (같은 사람이 두 탭에 함께 보일 수 있다).
-  // 탐색에서 한 번 지나친 사람(자정에 자동 기록된 넘김 포함)도 응답한 것으로 보고 빼낸다 (틴더와 같다).
+  // 탐색에서 한 번 지나친 사람(초기화 때 자동 기록된 넘김 포함)도 응답한 것으로 보고 빼낸다 (틴더와 같다).
   const swipedSet = new Set<string>([
     ...(viewerSwipesResult.data ?? []).map((s: any) => s.swiped_id as string),
     // 열어 둔 카드는 플레이리스트에 함께 들어가도 숨기지 않는다 (공개와 플레이리스트 열기가 거의
@@ -577,11 +577,17 @@ async function isLikeVisibleToReceiver(likerId: string, receiverId: string): Pro
   return (photos.get(likerId) ?? []).length > 0;
 }
 
-// 사용자 로컬 자정 기준 [today_start_utc, today_start_utc + 24h) 범위를 계산.
-// tzOffsetMinutes 는 JS Date#getTimezoneOffset() 시맨틱 (UTC - local, 분).
-function computeLocalDayRangeUtc(nowMs: number, tzOffsetMinutes: number): {
+// 하루가 바뀌는 시각 (사용자 현지). 저녁~새벽 1시가 가장 활발해서 자정 대신 사용이 가장 적은
+// 새벽 5시로 둔다 — 밤에 연 플레이리스트가 한창 쓰는 중에 초기화되지 않는다.
+const DAY_START_HOUR = 5;
+
+// 사용자 로컬 하루(새벽 5시 ~ 다음 날 새벽 5시)의 [시작, 끝) UTC 범위와 그 하루의 날짜.
+// tzOffset 은 JS Date#getTimezoneOffset() 시맨틱 (UTC - local, 분).
+function computeLocalDayRangeUtc(nowMs: number, tzOffset: number): {
   fromIso: string; toIso: string; localDate: string;
 } {
+  // 5시간 서쪽 시간대의 자정 = 현지 새벽 5시
+  const tzOffsetMinutes = tzOffset + DAY_START_HOUR * 60;
   // local time 의 timestamp(=UTC 처럼 다루는 가상값) = now - offset
   const localNowAsUtcMs = nowMs - tzOffsetMinutes * 60_000;
   const local = new Date(localNowAsUtcMs);
@@ -644,7 +650,7 @@ function monetizationOff(res: Response): boolean {
   return true;
 }
 
-// 광고 보상 하루 한도의 "하루" — 사용자 휴대폰 시간대의 자정. 광고 콜백(SSV)은 앱이 실어 보낸
+// 광고 보상 하루 한도의 "하루" — 사용자 휴대폰 시간대의 새벽 5시 기준 (플레이리스트와 같다). 광고 콜백(SSV)은 앱이 실어 보낸
 // custom_data, quota 는 tz_offset_minutes 로 받는다. 없거나 이상하면(옛 앱) KST.
 // ponytail: 시간대를 동쪽으로 바꾸면 그날 본 광고가 '오늘' 밖으로 빠져 하루 한도만큼 더 볼 수 있다.
 // 끝까지 본 광고라 허용 — 막으려면 플레이리스트처럼 그날 첫 광고 때 끝나는 시각을 저장한다.
@@ -794,7 +800,7 @@ async function finalizePastPlaylists(userId: string): Promise<void> {
 
 // 오늘 플레이리스트 = 아직 끝나지 않은 것 (mig 068). 끝나는 시각은 그날 처음 열 때의 휴대폰
 // 시간대로 정해 저장한다 — 요청마다 시간대로 다시 계산하면 시간대가 바뀐 순간(여행·설정)
-// 연 플레이리스트가 자정 전에 다시 잠기거나 일찍 초기화된다.
+// 연 플레이리스트가 초기화 전에 다시 잠기거나 일찍 초기화된다.
 async function getTodayPlaylists(userId: string) {
   const { data, error } = await supabase
     .from('discover_playlists')
@@ -1043,7 +1049,7 @@ router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthReques
   res.json({
     available_count: available,
     // 초기화 시각 — 연 칸이 있으면 그 칸이 끝나는 시각, 없으면 지금 열면 끝날 시각(휴대폰
-    // 시간대 자정). 앱의 "초기화까지" 와 자정 처리가 이 값을 쓴다 (시간대가 바뀐 날에도 서버와 일치).
+    // 시간대 다음 새벽 5시). 앱의 "초기화까지" 와 초기화 처리가 이 값을 쓴다 (시간대가 바뀐 날에도 서버와 일치).
     resets_at:
       today[0]?.expires_at ??
       computeLocalDayRangeUtc(Date.now(), req.query.tz_offset_minutes as unknown as number).toIso,
@@ -1119,7 +1125,7 @@ router.post(
     await finalizePastPlaylists(userId);
 
     const today = await getTodayPlaylists(userId);
-    // 그날 처음 여는 칸이면 지금 휴대폰 시간대의 자정에 끝나고, 이미 연 칸이 있으면 그 칸과
+    // 그날 처음 여는 칸이면 지금 휴대폰 시간대의 다음 새벽 5시에 끝나고, 이미 연 칸이 있으면 그 칸과
     // 함께 끝난다 (세 칸이 같이 초기화).
     const { localDate, toIso } = computeLocalDayRangeUtc(Date.now(), tzOffsetMinutes);
     const day = today[0]?.day ?? localDate;
@@ -1276,7 +1282,7 @@ router.post(
       return;
     }
     // 오늘 탐색 플레이리스트에 든 사람은 받은 인사 탭에서 숨겨진다 — 갱신 전 화면에서 열면 연
-    // 카드가 숨겨지고, 탐색에서 지나치면 자정에 넘김 처리돼 별사탕을 쓰고도 영영 못 본다. 차감 없이
+    // 카드가 숨겨지고, 탐색에서 지나치면 초기화 때 넘김 처리돼 별사탕을 쓰고도 영영 못 본다. 차감 없이
     // 거절한다 (앱은 목록을 다시 받는다). 이유는 말하지 않는다 — 플레이리스트의 그 사람이 나에게
     // 인사했다는 유료 정보가 드러나지 않게.
     const { data: inPlaylist, error: playlistErr } = await supabase
@@ -1387,7 +1393,7 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
   }
 
   // 탐색의 대화 신청은 플레이리스트가 곧 카드 한도다 — 오늘 내 플레이리스트에 든
-  // 상대인지 확인한다. 안 그러면 아무 후보에게나 보낼 수 있고, 자정이 지난 플레이리스트
+  // 상대인지 확인한다. 안 그러면 아무 후보에게나 보낼 수 있고, 초기화 시각이 지난 플레이리스트
   // (다음 조회 때 pass 처리될 카드)에도 보낼 수 있다.
   if (req.body.source === 'playlist') {
     const today = await getTodayPlaylists(req.userId!);

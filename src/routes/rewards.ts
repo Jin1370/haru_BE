@@ -17,7 +17,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // https://developers.google.com/admob/android/ssv
 // 구글이 GET 으로 호출. 서명 대상은 쿼리스트링 중 "&signature=" 앞부분 그대로.
 // user_id 는 앱이 광고 로드 시 ServerSideVerificationOptions 로 넣은 우리 userId,
-// custom_data 는 휴대폰 시간대(getTimezoneOffset) — 하루 한도를 사용자 자정에 초기화한다 (서명 대상).
+// custom_data 는 휴대폰 시간대(getTimezoneOffset) — 하루 한도를 사용자 현지 새벽 5시에 초기화한다 (서명 대상).
 const ADMOB_KEYS_URL = 'https://www.gstatic.com/admob/reward/verifier-keys.json';
 const KEY_CACHE_MS = 24 * 60 * 60 * 1000;
 let keyCache: { at: number; keys: Map<string, string> } | null = null;

@@ -783,7 +783,7 @@ export const swaggerDocument = {
             name: 'tz_offset_minutes',
             in: 'query',
             schema: { type: 'integer', minimum: -840, maximum: 840, default: 0 },
-            description: 'source=playlist 의 오늘 플레이리스트 판정용 로컬 자정 경계 (Date#getTimezoneOffset() 의미: UTC-local 분). 미전달 시 0(UTC).',
+            description: 'source=playlist 의 오늘 플레이리스트 판정용 로컬 하루(새벽 5시) 경계 (Date#getTimezoneOffset() 의미: UTC-local 분). 미전달 시 0(UTC).',
           },
         ],
         requestBody: {
@@ -813,7 +813,7 @@ export const swaggerDocument = {
               monetization_enabled: { type: 'boolean', description: 'MONETIZATION_ENABLED. true 일 때만 아래 필드가 온다.' },
               stars: { type: 'object', properties: { free: { type: 'integer' }, paid: { type: 'integer' }, total: { type: 'integer' } } },
               next_free_reveal_at: { type: 'string', format: 'date-time', nullable: true, description: 'null = 지금 무료 카드 사용 가능. 마지막 무료 카드를 본 시각 + 24시간' },
-              ads_remaining: { type: 'integer', description: '오늘(사용자 시간대 자정 기준, tz_offset_minutes 없으면 KST) 남은 광고 보상 횟수' },
+              ads_remaining: { type: 'integer', description: '오늘(사용자 시간대 새벽 5시 기준, tz_offset_minutes 없으면 KST) 남은 광고 보상 횟수' },
             }, required: ['monetization_enabled'] } } },
           },
         },
@@ -823,7 +823,7 @@ export const swaggerDocument = {
       get: {
         tags: ['Discover'],
         summary: '오늘의 탐색 플레이리스트 3칸',
-        description: '하루 3개(사용자 로컬 날짜). 처음 여는 1개 무료, 나머지는 장수 비례 별사탕 (유료화 OFF 면 1개만 — 고른 뒤엔 그 칸만 내려주고, 두 번째 열기는 409 playlist_limit). 끝난 플레이리스트(그날 처음 연 시각의 휴대폰 시간대 자정, resets_at)는 이 호출에서 남은 카드를 pass 로 기록하고 지운다. 안 연 칸의 price = 지금 열면 낼 별사탕 (0 = 무료). available_count = 지금 열면 담길 곡 수 (0~10). candidate_count = 자르지 않은 남은 후보 수 (보여줄 LP 수 계산용). 오늘 연 칸이 10명 미만이면 이 호출에서 새 후보로 먼저 채운다 (추가 차감 없음).',
+        description: '하루 3개(사용자 로컬 날짜). 처음 여는 1개 무료, 나머지는 장수 비례 별사탕 (유료화 OFF 면 1개만 — 고른 뒤엔 그 칸만 내려주고, 두 번째 열기는 409 playlist_limit). 끝난 플레이리스트(그날 처음 연 시각의 휴대폰 시간대 새벽 5시, resets_at)는 이 호출에서 남은 카드를 pass 로 기록하고 지운다. 안 연 칸의 price = 지금 열면 낼 별사탕 (0 = 무료). available_count = 지금 열면 담길 곡 수 (0~10). candidate_count = 자르지 않은 남은 후보 수 (보여줄 LP 수 계산용). 오늘 연 칸이 10명 미만이면 이 호출에서 새 후보로 먼저 채운다 (추가 차감 없음).',
         parameters: [{ name: 'tz_offset_minutes', in: 'query', required: true, schema: { type: 'integer' } }],
         responses: {
           200: { description: '플레이리스트 상태', content: { 'application/json': { schema: { type: 'object', properties: { available_count: { type: 'integer' }, candidate_count: { type: 'integer' }, resets_at: { type: 'string', format: 'date-time', description: '초기화 시각 — 연 칸이 끝나는 시각, 없으면 지금 열면 끝날 시각 (열 때 저장, 이후 시간대 변경 무관)' }, playlists: { type: 'array', items: { type: 'object', properties: { idx: { type: 'integer' }, opened: { type: 'boolean' }, count: { type: 'integer', description: '열린 칸의 곡 수' }, price: { type: 'integer', description: '안 연 칸의 가격' } } } } } } } } },
@@ -846,7 +846,7 @@ export const swaggerDocument = {
       post: {
         tags: ['Discover'],
         summary: '플레이리스트에서 처음 화면에 나온 카드 기록',
-        description: '자정 뒤 처음 조회할 때 본 카드 중 대화 신청 안 한 카드만 pass 로 기록하고, 안 본 카드의 사람은 다시 후보로 돌아간다. 같은 카드를 다시 보내도 결과가 같다.',
+        description: '초기화 뒤 처음 조회할 때 본 카드 중 대화 신청 안 한 카드만 pass 로 기록하고, 안 본 카드의 사람은 다시 후보로 돌아간다. 같은 카드를 다시 보내도 결과가 같다.',
         parameters: [
           { name: 'idx', in: 'path', required: true, schema: { type: 'integer', minimum: 0, maximum: 2 } },
           { name: 'tz_offset_minutes', in: 'query', required: true, schema: { type: 'integer' } },

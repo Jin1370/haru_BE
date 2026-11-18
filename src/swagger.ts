@@ -562,6 +562,7 @@ export const swaggerDocument = {
           200: { description: '성공', content: { 'application/json': { schema: { $ref: '#/components/schemas/Profile' } } } },
           400: { description: '유효성 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           403: { description: '계정 freeze (message-moderation-v1 PR2)', content: { 'application/json': { schema: { $ref: '#/components/schemas/AccountFrozenError' } } } },
+          402: { description: '별사탕 부족 — 유료화 ON 에서 닉네임 변경은 매번 별사탕 3개 (code: insufficient_stars)', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           409: {
             description: '닉네임 중복 (mig 053, code=display_name_taken)',
             content: {

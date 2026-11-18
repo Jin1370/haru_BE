@@ -22,6 +22,7 @@ import { checkOpenAiModeration } from '../services/openaiModeration';
 import { logModerationBlock } from '../utils/moderationAudit';
 import { sendAdminPush } from '../services/pushNotifications';
 import { AuthRequest, VoiceIntroTranslations } from '../types';
+import { NICKNAME_CHANGE_COST } from '../constants/stars';
 
 // photo-watercolor-pipeline sprint: 사진 최대 5장 (slot 0~4).
 // 기존 라우트가 6장까지 허용하던 drift 를 본 sprint 에서 5장으로 정정.
@@ -209,7 +210,7 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
   // 불필요한 ElevenLabs 호출을 막는다.
   const { data: prev } = await supabase
     .from('profiles')
-    .select('voice_intro, birth_date, gender, nationality')
+    .select('voice_intro, birth_date, gender, nationality, display_name')
     .eq('id', req.userId!)
     .maybeSingle();
 
@@ -296,6 +297,30 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
         error: 'Voice intro contains restricted expressions',
         code: 'message_blocked',
       });
+      return;
+    }
+  }
+
+  // 별사탕 유료화: 닉네임 변경은 매번 NICKNAME_CHANGE_COST 개. 차감+이름 변경을 한 RPC
+  // (mig 072) 로 묶어 이름이 이미 쓰이면(23505) 차감도 취소된다. 아래 upsert 는 같은 이름을
+  // 다시 쓰므로 무해 — 그 upsert 가 실패해도 이름은 이미 바뀐 상태라 차감과 어긋나지 않는다.
+  if (env.monetization.enabled && prev && prev.display_name !== display_name) {
+    const { error: renameErr } = await supabase.rpc('change_display_name', {
+      p_user: req.userId!,
+      p_name: display_name,
+      p_stars: NICKNAME_CHANGE_COST,
+    });
+    if (renameErr) {
+      if (renameErr.message.includes('insufficient_stars')) {
+        res.status(402).json({ error: 'Not enough stars', code: 'insufficient_stars' });
+        return;
+      }
+      if (renameErr.code === '23505') {
+        res.status(409).json({ error: 'Nickname already taken', code: 'display_name_taken' });
+        return;
+      }
+      console.error('[profile.change_display_name_failed]', renameErr.message);
+      res.status(500).json({ error: renameErr.message });
       return;
     }
   }

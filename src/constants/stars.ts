@@ -10,6 +10,8 @@ export function cardResetCost(cards: number): number {
 }
 
 export const REVEAL_STAR_COST = 2;
+// 닉네임 변경 (유료화 ON, 매번).
+export const NICKNAME_CHANGE_COST = 3;
 export const REVEAL_FREE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export const AD_REWARD_STARS = 1;

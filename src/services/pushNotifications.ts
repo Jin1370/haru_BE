@@ -28,6 +28,10 @@ export type PushPayload =
   // 시스템 리마인더 — 상대방이 없다 (차단/freeze 검증 대상 없음).
   | {
       type: 'voice_reminder';
+    }
+  // 플레이리스트 알림 — 그날 플레이리스트를 안 연 사람에게 현지 저녁 8시 (jobs/remindPlaylist).
+  | {
+      type: 'playlist';
     };
 
 interface DeviceTokenRow {
@@ -166,6 +170,9 @@ export async function sendPushToUser(
       }
       // mig 047 미적용 윈도우에서는 notify_likes 가 undefined → 전송 (기본 ON).
       if (payload.type === 'like' && prefs.notify_likes === false) {
+        return;
+      }
+      if (payload.type === 'playlist' && prefs.notify_playlist === false) {
         return;
       }
     }

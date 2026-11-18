@@ -53,6 +53,12 @@ const PUSH_MESSAGES = {
     ja: '声の登録をお忘れではありませんか？1分で登録して、自由に会話してみましょう。',
     en: 'Forgot to record your voice? Set it up in a minute and start talking freely.',
   },
+  // 플레이리스트 알림 — 그날 플레이리스트를 아직 안 연 사람에게 현지 저녁 8시.
+  playlist: {
+    ko: '오늘의 플레이리스트가 도착했어요!',
+    ja: '今日のプレイリストが届きました！',
+    en: "Today's playlist is here!",
+  },
 } as const;
 
 export type PushMessageType = keyof typeof PUSH_MESSAGES;

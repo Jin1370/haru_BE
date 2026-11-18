@@ -28,6 +28,7 @@ import { startPhotoExpiryScheduler } from './jobs/purgeExpiredPhotos';
 import { startAuditCleanupScheduler } from './jobs/cleanupAuditTables';
 import { startPhotoConversionRetryScheduler } from './jobs/retryFailedPhotoConversions';
 import { startVoiceReminderScheduler } from './jobs/remindVoiceSetup';
+import { startPlaylistReminderScheduler } from './jobs/remindPlaylist';
 import { inFlightCount } from './routes/message';
 
 export const app = express();
@@ -235,4 +236,6 @@ if (process.env.NODE_ENV !== 'test') {
   startPhotoConversionRetryScheduler();
   // 가입 24h 경과 + voice clone 미등록 사용자에게 1회 리마인더 푸시. 6h interval.
   startVoiceReminderScheduler();
+  // 그날 플레이리스트를 안 연 사용자에게 현지 저녁 8시 알림. 1h interval.
+  startPlaylistReminderScheduler();
 }

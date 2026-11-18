@@ -17,6 +17,7 @@ export const updatePreferencesSchema = z
     notify_messages: z.boolean().optional(),
     notify_matches: z.boolean().optional(),
     notify_likes: z.boolean().optional(),
+    notify_playlist: z.boolean().optional(),
   })
   .refine((v) => Object.values(v).some((x) => x !== undefined), {
     message: 'At least one field is required',

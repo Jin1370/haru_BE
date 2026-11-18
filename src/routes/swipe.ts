@@ -429,6 +429,13 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     }
   }
 
+  // 가장 최근에 인사한 사람 — 받은 인사 알림을 누르고 들어오면 앱이 이 카드에서 시작한다. 잠긴
+  // 카드여도 표시한다 (모자이크된 채로 그 카드에서 시작 — 잠긴 카드는 내용이 가짜라 새는 정보 없음).
+  const scoredIds = new Set(scored.map((r) => r.id as string));
+  const latestLikerId = (likesResult.data ?? [])
+    .map((l: any) => l.swiper_id as string)
+    .find((id) => scoredIds.has(id));
+
   // 6) 응답 가공 — discover 와 동일하게 사진 1장 / photo_access 잠금 / voice intro
   //    시청자 언어 슬롯 미러. FE SwipeCard 재사용을 보장하기 위해 shape 일치.
   // mig 034: photos[0] 은 profile_photos.converted_url(메인). (slot 은 visible
@@ -451,6 +458,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
         photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
         // 방금 무료로 열린 카드 — 앱이 이 카드에서 시작한다.
         ...(rest.id === justRevealedId ? { just_revealed: true } : {}),
+        ...(rest.id === latestLikerId ? { latest_like: true } : {}),
       };
     }),
   );
@@ -464,6 +472,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
         ...toLockedCard(row, blurred.get(row.id), row.id),
         // 다음 무료 카드 — 앱은 이 카드에만 "무료 오픈까지" 타이머를 붙인다.
         ...(i === 0 ? { free_next: true } : {}),
+        ...(row.id === latestLikerId ? { latest_like: true } : {}),
       });
     });
   }

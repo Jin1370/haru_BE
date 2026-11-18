@@ -73,6 +73,7 @@ router.get('/preferences', async (req: AuthRequest, res: Response) => {
     notify_messages: data?.notify_messages ?? true,
     notify_matches: data?.notify_matches ?? true,
     notify_likes: data?.notify_likes ?? true,
+    notify_playlist: data?.notify_playlist ?? true,
   });
 });
 
@@ -82,6 +83,7 @@ router.patch('/preferences', validateBody(updatePreferencesSchema), async (req: 
     notify_messages?: boolean;
     notify_matches?: boolean;
     notify_likes?: boolean;
+    notify_playlist?: boolean;
   };
 
   const { data, error } = await supabase
@@ -109,6 +111,7 @@ router.patch('/preferences', validateBody(updatePreferencesSchema), async (req: 
     notify_messages: data?.notify_messages ?? true,
     notify_matches: data?.notify_matches ?? true,
     notify_likes: data?.notify_likes ?? true,
+    notify_playlist: data?.notify_playlist ?? true,
   });
 });
 

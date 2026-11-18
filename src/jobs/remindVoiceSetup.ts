@@ -23,7 +23,7 @@ const SEND_LOCAL_HOUR = 21;
 // 어긋난다 (오후 8시 or 10시 발송) — 리마인더 1건에 tz 컬럼을 새로 파느니 감수.
 // ponytail: 국적 화이트리스트(schemas/profile.ts NATIONALITY_CODES)에 나라를
 // 추가하면 여기도 추가할 것. 없는 국적은 리마인더 대상에서 조용히 빠진다.
-const TZ_OFFSET_MINUTES: Record<string, number> = {
+export const TZ_OFFSET_MINUTES: Record<string, number> = {
   KR: 540,
   JP: 540,
   AU: 600,
@@ -36,12 +36,16 @@ const TZ_OFFSET_MINUTES: Record<string, number> = {
   US: -360,
 };
 
-// 지금 현지 시각이 저녁 9시대인 국적 목록. sweep 이 1시간 간격이라 각 국적은
-// 하루에 정확히 한 tick 만 여기에 걸린다.
-export function nationalitiesAtSendHour(now: number): string[] {
+// 지금 현지 시각이 hour 시대인 국적 목록. sweep 이 1시간 간격이라 각 국적은
+// 하루에 정확히 한 tick 만 여기에 걸린다. 플레이리스트 알림(remindPlaylist)도 쓴다.
+export function nationalitiesAtLocalHour(now: number, hour: number): string[] {
   return Object.entries(TZ_OFFSET_MINUTES)
-    .filter(([, offset]) => new Date(now + offset * 60_000).getUTCHours() === SEND_LOCAL_HOUR)
+    .filter(([, offset]) => new Date(now + offset * 60_000).getUTCHours() === hour)
     .map(([code]) => code);
+}
+
+export function nationalitiesAtSendHour(now: number): string[] {
+  return nationalitiesAtLocalHour(now, SEND_LOCAL_HOUR);
 }
 
 export async function remindVoiceSetup(): Promise<{ sent: number }> {

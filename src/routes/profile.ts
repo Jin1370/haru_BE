@@ -214,10 +214,9 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
     .eq('id', req.userId!)
     .maybeSingle();
 
-  // 별사탕 유료화: 생년월일·성별·국적은 가입 후 변경 불가. 성별·나이로 한도·매칭
+  // 생년월일·성별·국적은 가입 후 변경 불가 (유료화 여부 무관). 성별·나이로 한도·매칭
   // 조건을 바꿔 쓰는 우회를 막는다. FE 는 같은 값을 계속 보내므로 "바뀐 경우" 만 거부.
   if (
-    env.monetization.enabled &&
     prev &&
     (prev.birth_date !== birth_date || prev.gender !== gender || prev.nationality !== nationality)
   ) {

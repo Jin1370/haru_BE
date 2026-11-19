@@ -14,7 +14,7 @@ import waitlistRoutes from './routes/waitlist';
 import authRoutes from './routes/auth';
 import profileRoutes from './routes/profile';
 import voiceRoutes from './routes/voice';
-import swipeRoutes from './routes/swipe';
+import swipeRoutes, { startHeldLikePushScheduler } from './routes/swipe';
 import matchRoutes from './routes/match';
 import messageRoutes from './routes/message';
 import blockRoutes from './routes/block';
@@ -238,4 +238,6 @@ if (process.env.NODE_ENV !== 'test') {
   startVoiceReminderScheduler();
   // 그날 플레이리스트를 안 연 사용자에게 현지 저녁 8시 알림. 1h interval.
   if (env.monetization.playlistReminder) startPlaylistReminderScheduler();
+  // 플레이리스트에 든 사람의 인사(받은 인사 탭에서 숨겨짐)를 그 플레이리스트가 끝난 날 오전 9시에 알린다.
+  if (env.monetization.enabled) startHeldLikePushScheduler();
 }

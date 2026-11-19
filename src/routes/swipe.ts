@@ -253,7 +253,22 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  const openedIds = new Set((openedResult.data ?? []).map((r: any) => r.liker_id as string));
+  // 연 카드라도 그 사람의 인사가 지금 남아 있을 때만 — 인사가 없어졌으면 받은 인사가 아니다.
+  const revealedIds = (openedResult.data ?? []).map((r: any) => r.liker_id as string);
+  const { data: stillLiked, error: stillLikedErr } =
+    revealedIds.length > 0
+      ? await supabase
+          .from('swipes')
+          .select('swiper_id')
+          .eq('swiped_id', req.userId!)
+          .eq('direction', 'like')
+          .in('swiper_id', revealedIds)
+      : { data: [], error: null };
+  if (stillLikedErr) {
+    res.status(500).json({ error: stillLikedErr.message });
+    return;
+  }
+  const openedIds = new Set((stillLiked ?? []).map((r: any) => r.swiper_id as string));
   const likerIds = [
     ...new Set([...(likesResult.data ?? []).map((l: any) => l.swiper_id as string), ...openedIds]),
   ];
@@ -555,7 +570,22 @@ async function isLikeVisibleToReceiver(likerId: string, receiverId: string): Pro
       .limit(1),
   ]);
 
+  // 조회 오류는 "안 보임" 으로 넘기지 않고 던진다 — 호출처가 알림을 미뤄 다시 확인한다.
+  const lookupErr = receiverProfile.error ?? receiverSwipe.error;
+  if (lookupErr) throw new Error(`like visibility: ${lookupErr.message}`);
   if ((receiverSwipe.data ?? []).length > 0) return false;
+  // 유료화 ON 은 수신자의 오늘 플레이리스트에 든 사람을 받은 인사 탭에서 숨긴다 (GET /likes-received).
+  // 알림을 열었는데 탭에 없는 거짓 신호가 되지 않게 푸시도 보내지 않는다 — 플레이리스트에서 만난다.
+  if (env.monetization.enabled) {
+    const { data: inPlaylist, error: playlistErr } = await supabase
+      .from('discover_playlist_items')
+      .select('candidate_id')
+      .eq('user_id', receiverId)
+      .eq('candidate_id', likerId)
+      .limit(1);
+    if (playlistErr) throw new Error(`like visibility playlist: ${playlistErr.message}`);
+    if ((inPlaylist ?? []).length > 0) return false;
+  }
   // 섀도우 숨김 계정의 like 는 받은 좋아요 탭에 안 뜨므로 푸시도 보내지 않는다
   // (열었는데 탭이 그대로인 거짓 신호 방지).
   if (env.discover.hiddenUserIds.includes(likerId)) return false;
@@ -569,10 +599,7 @@ async function isLikeVisibleToReceiver(likerId: string, receiverId: string): Pro
     .eq('is_active', true)
     .is('frozen_at', null)
     .maybeSingle();
-  if (error) {
-    console.error('[isLikeVisibleToReceiver] liker select error:', error.message);
-    return false;
-  }
+  if (error) throw new Error(`like visibility liker: ${error.message}`);
   const row = liker as any;
   if (!row?.language) return false;
   if (viewerLanguage && row.language === viewerLanguage) return false;
@@ -584,6 +611,108 @@ async function isLikeVisibleToReceiver(likerId: string, receiverId: string): Pro
 
   const photos = await fetchReadyPhotosByUser([likerId], 'like-push');
   return (photos.get(likerId) ?? []).length > 0;
+}
+
+// ── 플레이리스트 때문에 미룬 받은 인사 알림 (mig 074) ──────────────────
+// 받는 사람의 플레이리스트에 든 사람의 인사는 받은 인사 탭에서 숨겨져 바로 알리지 않는다.
+// 그 플레이리스트가 끝나면(현지 새벽 5시) 안 본 카드의 사람은 받은 인사 탭에 들어가므로, 그날
+// 현지 오전 9시(끝나는 시각 + 4시간)에 알린다. 봤으면 초기화 때 넘김으로 기록돼 보내지 않는다.
+const HELD_LIKE_NOTIFY_DELAY_MS = 4 * 60 * 60 * 1000;
+const HELD_LIKE_RETRY_MS = 10 * 60 * 1000;
+
+// 받는 사람의 플레이리스트(끝났지만 아직 정리 전인 것 포함)에 그 사람이 들어 있으면 그 플레이리스트가
+// 끝나는 시각, 아니면 null.
+async function playlistHoldUntil(receiverId: string, likerId: string): Promise<string | null> {
+  const { data: items, error } = await supabase
+    .from('discover_playlist_items')
+    .select('playlist_id')
+    .eq('user_id', receiverId)
+    .eq('candidate_id', likerId);
+  if (error) throw new Error(`discover_playlist_items: ${error.message}`);
+  const ids = (items ?? []).map((i: any) => i.playlist_id as number);
+  if (ids.length === 0) return null;
+  const { data: lists, error: listErr } = await supabase
+    .from('discover_playlists')
+    .select('expires_at')
+    .in('id', ids)
+    .order('expires_at', { ascending: false })
+    .limit(1);
+  if (listErr) throw new Error(`discover_playlists: ${listErr.message}`);
+  return (lists ?? [])[0]?.expires_at ?? null;
+}
+
+// holdUntil = 그 사람이 든 플레이리스트가 끝나는 시각. null = 확인하다 오류가 났다 — 알림을 잃지 않게
+// 10분 뒤 다시 본다 (그때 다시 확인한다).
+async function scheduleHeldLikePush(likerId: string, receiverId: string, holdUntil: string | null): Promise<void> {
+  // 끝난 플레이리스트가 정리 실패로 남아 있으면 끝나는 시각이 이미 지났다 — 한 시간 뒤 다시 본다.
+  const at =
+    holdUntil === null
+      ? Date.now() + HELD_LIKE_RETRY_MS
+      : Math.max(new Date(holdUntil).getTime() + HELD_LIKE_NOTIFY_DELAY_MS, Date.now() + 60 * 60 * 1000);
+  const { error } = await supabase
+    .from('swipes')
+    .update({ like_notify_at: new Date(at).toISOString() })
+    .eq('swiper_id', likerId)
+    .eq('swiped_id', receiverId)
+    .eq('direction', 'like');
+  if (error) console.error('[heldLikePush] schedule failed:', error.message);
+}
+
+// 알릴 시각이 된 미룬 인사를 보낸다. 서버 여러 대가 같이 돌아도 시각을 먼저 지운 쪽만 보낸다.
+// ponytail: 한 번에 200건 — 넘치면 다음 차례에 이어서 보낸다.
+export async function sendHeldLikePushes(): Promise<{ sent: number }> {
+  const { data: due, error } = await supabase
+    .from('swipes')
+    .select('id, swiper_id, swiped_id')
+    .eq('direction', 'like')
+    .lte('like_notify_at', new Date().toISOString())
+    .limit(200);
+  if (error) {
+    console.error('[heldLikePush] lookup failed:', error.message);
+    return { sent: 0 };
+  }
+  let sent = 0;
+  for (const row of (due ?? []) as { id: string; swiper_id: string; swiped_id: string }[]) {
+    const { data: claimed, error: claimErr } = await supabase
+      .from('swipes')
+      .update({ like_notify_at: null })
+      .eq('id', row.id)
+      .not('like_notify_at', 'is', null)
+      .select('id');
+    if (claimErr) {
+      console.error('[heldLikePush] claim failed:', claimErr.message);
+      continue;
+    }
+    if ((claimed ?? []).length === 0) continue;
+    try {
+      // 끝난 플레이리스트를 정리해야 본 카드가 넘김으로 기록되고(그러면 보내지 않는다) 안 본 사람이
+      // 받은 인사 탭에 나타난다. 앱을 안 켰으면 정리 전이다.
+      await finalizePastPlaylists(row.swiped_id);
+      // 그사이 새 플레이리스트에 다시 뽑혔으면 그 플레이리스트가 끝난 날로 다시 미룬다.
+      const hold = await playlistHoldUntil(row.swiped_id, row.swiper_id);
+      if (hold) {
+        await scheduleHeldLikePush(row.swiper_id, row.swiped_id, hold);
+        continue;
+      }
+      if (await isLikeVisibleToReceiver(row.swiper_id, row.swiped_id)) {
+        await sendPushToUser(row.swiped_id, { type: 'like', liker_id: row.swiper_id });
+        sent++;
+      }
+    } catch (e) {
+      // 알림 시각을 이미 지웠다 — 다시 적어 두지 않으면 이 인사는 알림 없이 끝난다.
+      console.error('[heldLikePush] send failed, retrying later:', (e as Error).message);
+      await scheduleHeldLikePush(row.swiper_id, row.swiped_id, null);
+    }
+  }
+  return { sent };
+}
+
+export function startHeldLikePushScheduler(): void {
+  const run = () => {
+    sendHeldLikePushes().catch((e) => console.error('[heldLikePush] run failed:', (e as Error).message));
+  };
+  setTimeout(run, 60_000).unref();
+  setInterval(run, 10 * 60 * 1000).unref();
 }
 
 // 하루가 바뀌는 시각 (사용자 현지). 저녁~새벽 1시가 가장 활발해서 자정 대신 사용이 가장 적은
@@ -1190,18 +1319,19 @@ router.post(
         res.status(409).json({ error: 'Available cards changed', code: 'cards_changed' });
         return;
       }
-      // 그사이 다른 기기에서 오늘 첫 플레이리스트를 열었다 — 무료가 아니게 됐다.
-      if (error.message.includes('not_first')) {
-        res.status(409).json({ error: 'Playlist price changed', code: 'playlist_changed' });
-        return;
-      }
       // 같은 칸을 동시에 연 경합 — 먼저 열린 쪽을 돌려준다 (이쪽 차감은 함께 취소됨).
-      if (error.code === '23505') {
+      // 무료 칸을 동시에 두 번 열면 not_first 로 오므로 같은 칸이 열렸는지 먼저 본다.
+      if (error.code === '23505' || error.message.includes('not_first')) {
         const again = (await getTodayPlaylists(userId)).find((p) => p.idx === idx);
         if (again) {
           res.json({ idx, cards: await loadPlaylistCards(userId, again.id) });
           return;
         }
+      }
+      // 그사이 다른 기기에서 오늘 첫 플레이리스트(다른 칸)를 열었다 — 무료가 아니게 됐다.
+      if (error.message.includes('not_first')) {
+        res.status(409).json({ error: 'Playlist price changed', code: 'playlist_changed' });
+        return;
       }
       res.status(500).json({ error: error.message });
       return;
@@ -1310,14 +1440,29 @@ router.post(
     }
 
     if (free) {
-      // ponytail: 동시에 다른 카드 2장을 무료로 열면 2장이 나갈 수 있다 (락 없음).
-      if ((await getNextFreeRevealAt(me)) !== null) {
+      // 무료 카드는 고정된 다음 무료 카드(맨 앞 잠긴 카드)만 — 앱은 이 경로를 쓰지 않고 목록 조회가
+      // 자동으로 연다. 조작된 앱이 원하는 카드를 고르거나 동시에 여러 장을 열지 못하게 목록 조회와
+      // 같은 claimFreeReveal 로 한 장만 남긴다.
+      const { data: pin, error: pinErr } = await supabase
+        .from('like_card_pins')
+        .select('liker_id')
+        .eq('viewer_id', me)
+        .maybeSingle();
+      if (pinErr) {
+        res.status(500).json({ error: pinErr.message });
+        return;
+      }
+      if (pin?.liker_id !== liker_id || (await getNextFreeRevealAt(me)) !== null) {
         res.status(409).json({ error: 'No free card now', code: 'free_unavailable' });
         return;
       }
-      const { error } = await supabase.from('like_reveals').insert({ viewer_id: me, liker_id, paid: false });
-      if (error && error.code !== '23505') {
-        res.status(500).json({ error: error.message });
+      const won = await claimFreeReveal(me, liker_id);
+      if (won === null) {
+        res.status(500).json({ error: 'free reveal failed' });
+        return;
+      }
+      if (won !== liker_id) {
+        res.status(409).json({ error: 'No free card now', code: 'free_unavailable' });
         return;
       }
       res.json({ revealed: true });
@@ -1429,7 +1574,7 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
   //    그 외 기존 행은 이미 스와이프함 → 409.
   const { data: existing, error: existingErr } = await supabase
     .from('swipes')
-    .select('id, reset_at, direction')
+    .select('id, reset_at, direction, created_at')
     .eq('swiper_id', req.userId!)
     .eq('swiped_id', swiped_id)
     .maybeSingle();
@@ -1496,13 +1641,22 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
 
   // 3) 기록. 예전 다시보기 카드는 기존 행 갱신.
   const row = { direction, source };
-  const { error: swipeError } = recycled
+  // 기존 행 갱신은 읽은 상태 그대로일 때만 — 같은 카드에 동시에 두 번 인사하면 둘 다 갱신에
+  // 성공해 매치 알림이 두 번 갔다. 바뀐 행이 없으면 다른 요청이 먼저 처리한 것 (409).
+  const { data: updated, error: swipeError } = recycled
     ? await supabase
         .from('swipes')
         .update({ ...row, reset_at: null, created_at: new Date().toISOString() })
         .eq('id', existing!.id)
-    : await supabase.from('swipes').insert({ swiper_id: req.userId!, swiped_id, ...row });
+        .eq('direction', existing!.direction)
+        .eq('created_at', existing!.created_at)
+        .select('id')
+    : await supabase.from('swipes').insert({ swiper_id: req.userId!, swiped_id, ...row }).select('id');
 
+  if (!swipeError && recycled && (updated ?? []).length === 0) {
+    res.status(409).json({ error: 'Already swiped this user' });
+    return;
+  }
   if (swipeError) {
     if (swipeError.code === '23505') {
       res.status(409).json({ error: 'Already swiped this user' });
@@ -1556,30 +1710,19 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
         );
       }
 
-      // push-notifications sprint: 매치 성사 시 양쪽 사용자에게 푸시 발송.
-      // 능동 like 한 사람도 "상대도 좋아함" 알림을 받는 표준 데이팅앱 UX.
+      // push-notifications sprint: 매치 성사 시 상대에게 푸시 발송. 인사를 보내 연결시킨 본인은 앱 안의
+      // 대화 연결 모달로 이미 알기 때문에 보내지 않는다 (인사는 앱 안에서만 보내므로 본인 알림은 늘 중복).
       // unmatch 후 재match (소프트 삭제 후 23505 fallback) 케이스에도 발송 — 매치 부활도 알림 가치 있음.
       if (match) {
-        // 양쪽 display_name 조회 — 양쪽 모두에게 상대 이름이 들어간 푸시 발송.
         const matchId = match.id;
         supabase
           .from('profiles')
-          .select('id, display_name')
-          .in('id', [req.userId!, swiped_id])
-          .then(({ data: profiles }) => {
-            if (!profiles) return;
-            const me = profiles.find((p: any) => p.id === req.userId!);
-            const other = profiles.find((p: any) => p.id === swiped_id);
+          .select('display_name')
+          .eq('id', req.userId!)
+          .maybeSingle()
+          .then(({ data: me, error: meErr }) => {
+            if (meErr) console.error('[sendPushToUser match] name lookup failed:', meErr.message);
             const myName = (me?.display_name as string | null) ?? '';
-            const otherName = (other?.display_name as string | null) ?? '';
-
-            sendPushToUser(req.userId!, {
-              type: 'match',
-              match_id: matchId,
-              matched_user_id: swiped_id,
-              matched_name: otherName,
-            }).catch((err) => console.error('[sendPushToUser match→swiper]', err));
-
             sendPushToUser(swiped_id, {
               type: 'match',
               match_id: matchId,
@@ -1592,13 +1735,31 @@ router.post('/swipe', requireNotFrozen, validateQuery(swipeQuerySchema), validat
 
   // 5) 받은 좋아요 푸시 — 매치가 성사되지 않은 like 에만 (성사된 경우는 위 match
   //    푸시가 커버). 익명 문구 + fire-and-forget.
+  //    받는 사람의 플레이리스트에 든 사람이면 받은 인사 탭에서 숨겨지므로 지금은 보내지 않고,
+  //    그 플레이리스트가 끝난 날 오전 9시로 미뤄 둔다 (sendHeldLikePushes).
   if (direction === 'like' && !reciprocal) {
     const likerId = req.userId!;
-    isLikeVisibleToReceiver(likerId, swiped_id)
-      .then((visible) =>
-        visible ? sendPushToUser(swiped_id, { type: 'like', liker_id: likerId }) : undefined,
-      )
-      .catch((err) => console.error('[sendPushToUser like]', err));
+    (async () => {
+      let hold: string | null = null;
+      if (env.monetization.enabled) {
+        try {
+          hold = await playlistHoldUntil(swiped_id, likerId);
+        } catch (e) {
+          // 플레이리스트 확인 실패 — 바로 보내면 탭에 없는 거짓 알림일 수 있어 미뤄서 다시 본다.
+          console.error('[sendPushToUser like] playlist check failed, deferring:', (e as Error).message);
+          return scheduleHeldLikePush(likerId, swiped_id, null);
+        }
+      }
+      if (hold) return scheduleHeldLikePush(likerId, swiped_id, hold);
+      let visible: boolean;
+      try {
+        visible = await isLikeVisibleToReceiver(likerId, swiped_id);
+      } catch (e) {
+        console.error('[sendPushToUser like] visibility check failed, deferring:', (e as Error).message);
+        return scheduleHeldLikePush(likerId, swiped_id, null);
+      }
+      if (visible) await sendPushToUser(swiped_id, { type: 'like', liker_id: likerId });
+    })().catch((err) => console.error('[sendPushToUser like]', err));
   }
 
   res.json({ direction, match });

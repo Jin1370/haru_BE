@@ -104,6 +104,8 @@ const captured = vi.hoisted(() => ({
   member: { data: [{ candidate_id: '22222222-2222-4222-8222-222222222222' }] as Array<{ candidate_id: string }>, error: null as null | { message: string } },
   reveal: { data: null as null | { liker_id: string }, error: null as null | { message: string } },
   lastFree: { data: [] as Array<{ revealed_at: string }>, error: null as null | { message: string } }, // 마지막 무료 카드 사용
+  updatedRows: [{ id: 'updated' }] as Array<{ id: string }>, // 다시 보기 행 갱신 결과
+  pin: null as null | { liker_id: string }, // 받은 인사 다음 무료 카드 (like_card_pins)
   revealInsertPayload: null as null | Record<string, unknown>,
   pinUpsertPayload: null as null | Record<string, unknown>,
   target: { is_active: true, frozen_at: null } as null | { is_active: boolean; frozen_at: string | null }, // 스와이프 상대
@@ -132,6 +134,7 @@ vi.mock('../src/config/supabase', () => {
   function resolveTerminal(b: any): any {
     const t = b._table;
     if (t === 'blocks') return captured.blocks;
+    if (t === 'like_card_pins') return { data: captured.pin, error: null };
     if (t === 'discover_playlists') return captured.todayPlaylists;
     if (t === 'discover_playlist_items') return captured.member;
     if (t === 'profiles') {
@@ -148,7 +151,9 @@ vi.mock('../src/config/supabase', () => {
     }
     if (t === 'swipes') {
       if (b._op === 'insert') return { error: captured.insertError };
-      if (b._op === 'delete' || b._op === 'update') return captured.deleteResult;
+      if (b._op === 'delete') return captured.deleteResult;
+      // 다시 보기 행 갱신 — 바뀐 행을 돌려준다 (0행이면 다른 요청이 먼저 처리한 것으로 409).
+      if (b._op === 'update') return { ...captured.deleteResult, data: captured.updatedRows };
       // select
       const hasCount = b._selectOpts && b._selectOpts.count;
       if (hasCount) {
@@ -160,7 +165,7 @@ vi.mock('../src/config/supabase', () => {
         return captured.budgetCount;
       }
       // 기존 스와이프 조회 (POST /swipe 0단계 — 다시보기 판정)
-      if (b._cols === 'id, reset_at, direction') return captured.existing;
+      if (b._cols === 'id, reset_at, direction, created_at') return captured.existing;
       // count 없는 select+single = reciprocal 조회
       return captured.reciprocal;
     }
@@ -184,7 +189,7 @@ vi.mock('../src/config/supabase', () => {
       _eqs: [] as Array<{ col: string; val: unknown }>,
       _hasIn: false,
       select(_cols?: string, opts?: unknown) {
-        if (b._op !== 'insert' && b._op !== 'delete') b._op = 'select';
+        if (b._op !== 'insert' && b._op !== 'delete' && b._op !== 'update') b._op = 'select';
         b._cols = _cols;
         if (opts !== undefined) b._selectOpts = opts;
         return b;
@@ -299,6 +304,8 @@ beforeEach(() => {
   captured.reveal = { data: null, error: null };
   captured.lastFree = { data: [], error: null };
   captured.revealInsertPayload = null;
+  captured.pin = null;
+  captured.updatedRows = [{ id: 'updated' }];
   captured.pinUpsertPayload = null;
   captured.target = { is_active: true, frozen_at: null };
   captured.blocks = { data: [], error: null };
@@ -459,6 +466,15 @@ describe('POST /api/discover/swipe — 별사탕 유료화 ON (mig 059)', () => 
     expect(captured.swipeInsertPayload).toBeNull();
     expect(captured.swipeUpdatePayload).toMatchObject({ direction: 'like', source: 'playlist' });
   });
+
+  it('다시 보기 카드에 동시에 두 번 인사 — 늦은 쪽은 바뀐 행이 없어 409 (매치 알림 중복 방지)', async () => {
+    captured.existing = { data: { id: 'row-1', reset_at: null, direction: 'pass' }, error: null };
+    captured.updatedRows = [];
+
+    const res = await swipe({ direction: 'like' });
+
+    expect(res.status).toBe(409);
+  });
 });
 
 describe('POST /api/discover/likes-received/reveal — 무료 카드', () => {
@@ -486,12 +502,23 @@ describe('POST /api/discover/likes-received/reveal — 무료 카드', () => {
   });
 
   it('무료 기회가 있으면 차감 없이 paid=false 로 공개 기록', async () => {
+    captured.pin = { liker_id: SWIPED };
     const res = await reveal({ free: true });
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ revealed: true });
     expect(captured.revealInsertPayload).toEqual({ viewer_id: VIEWER, liker_id: SWIPED, paid: false });
     expect(captured.rpcCalls.some((c) => c.name === 'reveal_like')).toBe(false);
+  });
+
+  it('고정된 다음 무료 카드가 아니면 409 free_unavailable, 기록 없음 (조작 앱이 카드를 고르는 우회)', async () => {
+    captured.pin = { liker_id: '99999999-9999-4999-8999-999999999999' };
+
+    const res = await reveal({ free: true });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('free_unavailable');
+    expect(captured.revealInsertPayload).toBeNull();
   });
 
   it('24시간 안에 무료 카드를 이미 봤으면 409 free_unavailable, 기록 없음', async () => {

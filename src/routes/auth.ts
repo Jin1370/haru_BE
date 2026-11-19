@@ -699,7 +699,8 @@ router.delete('/account', authMiddleware, async (req: AuthRequest, res: Response
     .from('star_ledger')
     .delete()
     .eq('user_id', userId)
-    .neq('kind', 'purchase');
+    // 구매와 그 환불 회수 줄은 전자상거래법 5 년 보존 (cleanupAuditTables 가 정리).
+    .not('kind', 'in', '(purchase,purchase_refund)');
   if (ledgerErr) {
     res.status(500).json({ error: ledgerErr.message });
     return;

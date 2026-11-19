@@ -118,6 +118,32 @@ export async function grantStars(
   return true;
 }
 
+// 스토어 환불 — 그 거래로 지급한 개수만큼 회수한다. 개수·사용자는 웹훅이 아니라 지급 기록에서 읽는다.
+// 이미 써 버린 만큼은 유료 잔액이 마이너스가 되어 다시 충전할 때 먼저 메워진다.
+// 'revoked' 회수함 / 'duplicate' 이미 회수함 / 'not_found' 지급 기록 없음.
+export async function revokePurchase(transactionId: string): Promise<'revoked' | 'duplicate' | 'not_found'> {
+  const { data: purchase, error } = await supabase
+    .from('star_ledger')
+    .select('user_id, delta')
+    .eq('kind', 'purchase')
+    .eq('ref', transactionId)
+    .maybeSingle();
+  if (error) throw new Error(`star purchase lookup: ${error.message}`);
+  if (!purchase) return 'not_found';
+  const { error: insErr } = await supabase.from('star_ledger').insert({
+    user_id: purchase.user_id,
+    delta: -purchase.delta,
+    paid: true,
+    kind: 'purchase_refund',
+    ref: transactionId,
+  });
+  if (insErr) {
+    if (insErr.code === '23505') return 'duplicate';
+    throw new Error(`star revoke: ${insErr.message}`);
+  }
+  return 'revoked';
+}
+
 // fromIso 이후 kind 로 오간 별사탕 개수 (광고 하루 횟수 = 합/1, 오늘 카드 리셋 = 합/4).
 // spend_stars 가 한 번에 최대 2줄(무료+유료)을 써서 줄 수가 아니라 개수 합으로 센다.
 export async function sumLedger(userId: string, kind: string, fromIso: string): Promise<number> {

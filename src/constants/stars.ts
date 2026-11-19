@@ -17,8 +17,10 @@ export const REVEAL_FREE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const AD_REWARD_STARS = 1;
 export const AD_REWARD_DAILY_MAX = 2;
 
-// 스토어 상품 ID → 지급 개수. 양 스토어 동일 ID.
+// 스토어 상품 ID → 지급 개수. 양 스토어 동일 ID. star_80 은 판매 중단 (2026-11-18) — 이미 산
+// 사람의 웹훅 재전송·환불 회수를 처리하려고 남긴다.
 export const STAR_PRODUCTS: Record<string, number> = {
+  star_10: 10,
   star_30: 30,
   star_80: 80,
 };

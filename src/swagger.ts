@@ -897,7 +897,7 @@ export const swaggerDocument = {
       post: {
         tags: ['Rewards'],
         summary: '[별사탕] RevenueCat 웹훅 — 소모성 구매 지급',
-        description: 'Authorization 헤더 = REVENUECAT_WEBHOOK_AUTH. NON_RENEWING_PURCHASE 만 처리 (star_30=30, star_80=80). transaction_id 중복 지급 없음. 환불 회수는 미구현.',
+        description: 'Authorization 헤더 = REVENUECAT_WEBHOOK_AUTH. NON_RENEWING_PURCHASE 는 지급 (star_10=10, star_30=30, star_80=80 판매 중단), CANCELLATION + cancel_reason=CUSTOMER_SUPPORT 는 지급 개수만큼 회수 (이미 쓴 만큼 잔액 마이너스). transaction_id 로 지급·회수 각 1회.',
         responses: { 200: { description: '처리됨' }, 401: { description: '헤더 불일치' } },
       },
     },

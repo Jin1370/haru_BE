@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { createVerify } from 'crypto';
 import { env } from '../config/env';
-import { grantStars } from '../services/stars';
+import { grantStars, revokePurchase } from '../services/stars';
 import { adStarsRemainingToday, adTzOffset } from './swipe';
 import { AD_REWARD_STARS, STAR_PRODUCTS } from '../constants/stars';
 
@@ -98,6 +98,19 @@ router.post('/revenuecat', async (req: Request, res: Response) => {
   }
 
   const event = req.body?.event ?? {};
+  // 스토어 환불 = CANCELLATION + cancel_reason CUSTOMER_SUPPORT. 지급한 개수만큼 회수한다
+  // (이미 써 버린 만큼은 유료 잔액이 마이너스). 지급 기록이 없는 거래(별사탕 외 상품)는 무시.
+  if (event.type === 'CANCELLATION' && event.cancel_reason === 'CUSTOMER_SUPPORT') {
+    const tx = event.transaction_id as string | undefined;
+    if (!tx || !STAR_PRODUCTS[event.product_id as string]) {
+      res.json({ ok: true, ignored: 'refund_not_stars' });
+      return;
+    }
+    const result = await revokePurchase(tx);
+    if (result === 'not_found') console.error('[rewards.revenuecat] refund for unknown purchase', { tx });
+    res.json({ ok: true, revoked: result });
+    return;
+  }
   if (event.type !== 'NON_RENEWING_PURCHASE') {
     res.json({ ok: true, ignored: event.type ?? null });
     return;
@@ -117,7 +130,6 @@ router.post('/revenuecat', async (req: Request, res: Response) => {
     return;
   }
 
-  // ponytail: 환불(CANCELLATION)은 별사탕을 회수하지 않는다. 규모가 커지면 추가.
   const granted = await grantStars(userId, amount, true, 'purchase', transactionId);
   if (event.environment === 'SANDBOX') console.log('[rewards.revenuecat] sandbox purchase', { userId, amount });
   res.json({ ok: true, granted });

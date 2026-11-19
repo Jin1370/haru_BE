@@ -444,6 +444,20 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
     }
   }
 
+  // 미뤄 둔 인사 알림(mig 074) 중 지금 화면에 나간 카드 몫은 취소한다 — 이미 본 인사를 오전 9시에 또
+  // 알리지 않게. 다시 플레이리스트에 뽑혀 숨겨진 사람은 scored 에 없어 그대로 남는다.
+  if (scored.length > 0) {
+    supabase
+      .from('swipes')
+      .update({ like_notify_at: null })
+      .eq('swiped_id', req.userId!)
+      .in('swiper_id', scored.map((r) => r.id as string))
+      .not('like_notify_at', 'is', null)
+      .then(({ error: clearErr }) => {
+        if (clearErr) console.error('[likes-received] held push cancel failed:', clearErr.message);
+      });
+  }
+
   // 가장 최근에 인사한 사람 — 받은 인사 알림을 누르고 들어오면 앱이 이 카드에서 시작한다. 잠긴
   // 카드여도 표시한다 (모자이크된 채로 그 카드에서 시작 — 잠긴 카드는 내용이 가짜라 새는 정보 없음).
   const scoredIds = new Set(scored.map((r) => r.id as string));

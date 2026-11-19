@@ -204,6 +204,16 @@ router.post('/clone', requireNotFrozen, upload.single('audio'), async (req: Auth
       return;
     }
 
+    // 원본 녹음 보관 (mig 071 private 버킷) — 나중에 클론을 다시 만들어야 할 때(제공사
+    // 교체·모델 갱신) 재녹음 없이 쓰기 위해. 클론이 성공한 녹음만 남긴다. 경로 고정이라
+    // 재등록 시 덮어써 사람당 1개. 실패해도 등록 자체는 성공 — 보관은 부가 기능이라
+    // 사용자를 막지 않는다 (console.error 는 instrument.ts 가 Sentry 로 보낸다).
+    try {
+      await uploadFile('voice-samples', `${req.userId}/sample`, req.file.buffer, req.file.mimetype);
+    } catch (e) {
+      console.error('[voice.clone.sample_store_failed]', req.userId, e);
+    }
+
     // 옛 voice 정리 (fire-and-forget) — 새 voice 가 이미 profile 에 set 됐으므로
     // 실패해도 ElevenLabs storage 누적 외 사용자 영향 없음.
     if (prevVoiceId && prevVoiceId !== voiceId) {

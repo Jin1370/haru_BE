@@ -60,6 +60,7 @@ const USER_FOLDERS: Array<[bucket: string, folder: (u: string) => string]> = [
   ['photos', (u) => `${u}/converted`], // 워터컬러 변환본
   ['photos', (u) => `${u}/blurred`], // 잠긴 카드용 블러본 (mig 059)
   ['voice-intro-audio', (u) => u],
+  ['voice-samples', (u) => u], // 목소리 등록 원본 녹음 (mig 071, private)
 ];
 
 async function removeFolder(bucket: string, folder: string): Promise<number> {
@@ -73,7 +74,7 @@ async function removeFolder(bucket: string, folder: string): Promise<number> {
   return paths.length;
 }
 
-// 사진 + 보이스 한마디. userId 로 경로가 결정되므로 계정 삭제 전후 아무 때나 호출 가능.
+// 사진 + 보이스 한마디 + 원본 녹음. userId 로 경로가 결정되므로 계정 삭제 전후 아무 때나 호출 가능.
 export async function purgeUserFolders(userId: string): Promise<number> {
   const counts = await Promise.all(USER_FOLDERS.map(([b, f]) => removeFolder(b, f(userId))));
   return counts.reduce((a, b) => a + b, 0);

@@ -29,6 +29,8 @@ router.post('/token', validateBody(registerTokenSchema), async (req: AuthRequest
         expo_push_token,
         platform,
         last_seen_at: new Date().toISOString(),
+        // 이 서버에 등록한 기기 = 새 앱이 설치되고 열린 기기 (mig 075, 플레이리스트 알림 대상).
+        supports_playlist: true,
       },
       { onConflict: 'expo_push_token' },
     )

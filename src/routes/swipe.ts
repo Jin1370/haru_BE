@@ -220,6 +220,7 @@ async function toDiscoverCard(
 // 일일 50장 한도와는 무관하게 GET 은 무료(조회는 카운트 안 함). 실제 스와이프
 // 행위(POST /swipe)는 디스커버 swipe 와 동일 엔드포인트를 공유하므로 quota 도 함께 적용됨.
 router.get('/likes-received', async (req: AuthRequest, res: Response) => {
+  await openPriorLikes(req.userId!);
   // 돌려받은 무료 카드(mig 069 — 무료로 연 카드의 상대가 사라져 인사가 안 들어간 경우). 인사 직후
   // 앱이 바로 받는 이 조회에서 가져가며 지운다 — 아래에서 열 카드가 없으면 그대로 사라진다
   // (나중에 새 인사가 와서 저절로 열리지 않게, 사용자 결정).
@@ -758,6 +759,15 @@ function computeLocalDayRangeUtc(nowMs: number, tzOffset: number): {
 
 // ── 별사탕 유료화 헬퍼 (env.monetization.enabled 일 때만 호출) ──────────
 
+// 옛 앱(옛 서버, 유료화 OFF)에서 무료로 보던 받은 인사가 새 앱으로 넘어오는 순간 잠기지 않게,
+// 사람마다 처음 한 번 열어 둔다 (mig 075). 이미 했으면 DB 가 바로 돌아온다.
+// 연 사람은 탐색 후보에서도 빠지므로 플레이리스트 조회에서도 먼저 부른다.
+async function openPriorLikes(userId: string): Promise<void> {
+  if (!env.monetization.enabled) return;
+  const { error } = await supabase.rpc('open_prior_likes', { p_viewer: userId });
+  if (error) console.error('[openPriorLikes]', error.message);
+}
+
 // 다음 무료 카드 시각. null = 지금 무료 카드 사용 가능.
 async function getNextFreeRevealAt(userId: string): Promise<string | null> {
   const { data, error } = await supabase
@@ -1117,7 +1127,7 @@ export function allocatePlaylistTopUp(
 
 // 오늘의 플레이리스트 3칸. 안 연 칸의 price 는 지금 열면 낼 별사탕 (0 = 무료).
 router.get('/playlists', validateQuery(quotaQuerySchema), async (req: AuthRequest, res: Response) => {
-  await finalizePastPlaylists(req.userId!);
+  await Promise.all([finalizePastPlaylists(req.userId!), openPriorLikes(req.userId!)]);
 
   const [today, pool] = await Promise.all([
     getTodayPlaylists(req.userId!),

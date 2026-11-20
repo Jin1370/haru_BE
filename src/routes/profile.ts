@@ -347,6 +347,8 @@ router.put('/me', requireNotFrozen, validateBody(profileUpsertSchema), async (re
   if (!prev && referral_code) {
     upsertPayload.referral_code = referral_code;
   }
+  // 이 서버(새 앱)에서 가입한 사람은 옛 앱에서 받은 인사가 없다 — 열어 둘 것 없음 표시 (mig 075).
+  if (!prev) upsertPayload.likes_backfilled_at = new Date().toISOString();
 
   const { data, error } = await supabase
     .from('profiles')

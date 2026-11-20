@@ -109,8 +109,8 @@ export const env = {
     enabled: process.env.MONETIZATION_ENABLED === 'true',
     // RevenueCat 대시보드 → Webhooks 의 Authorization 헤더 값. 미설정이면 웹훅 거부.
     revenuecatWebhookAuth: process.env.REVENUECAT_WEBHOOK_AUTH ?? '',
-    // 플레이리스트 알림 (현지 20시). 옛 앱(플레이리스트 없음)이 남아 있는 동안은 끄고,
-    // MIN_APP_VERSION 을 올린 뒤 켠다.
+    // 플레이리스트 알림 (현지 20시). 새 앱이 등록한 기기에만 가므로(mig 075 supports_playlist)
+    // 옛 앱이 남아 있어도 켜도 된다. 끄는 스위치로만 남겨 둔다.
     playlistReminder: process.env.PLAYLIST_REMINDER_ENABLED === 'true',
   },
 

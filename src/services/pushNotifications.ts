@@ -195,10 +195,13 @@ export async function sendPushToUser(
     }
 
     // 3) 토큰 조회 — 다기기 허용 (배열). 실유저 일반 토큰은 label 없음.
-    const { data: tokens } = await supabase
+    let tokenQuery = supabase
       .from('device_tokens')
       .select('expo_push_token')
       .eq('user_id', receiverId);
+    // 플레이리스트 알림은 새 앱이 등록한 기기에만 (mig 075) — 강제 업데이트 전 옛 앱 기기 제외.
+    if (payload.type === 'playlist') tokenQuery = tokenQuery.eq('supports_playlist', true);
+    const { data: tokens } = await tokenQuery;
 
     const tokenList: { expo_push_token: string; label: string | null }[] = (
       (tokens as DeviceTokenRow[] | null) ?? []

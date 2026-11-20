@@ -71,6 +71,7 @@ router.get('/admob', async (req: Request, res: Response) => {
   const transactionId = params.get('transaction_id');
   // AdMob 콘솔의 "확인 URL" 테스트는 user_id 없이 온다 — 서명만 통과하면 200.
   if (!UUID_RE.test(userId) || !transactionId) {
+    console.log('[rewards.admob] verified without user (console URL check)');
     res.json({ ok: true, granted: false });
     return;
   }
@@ -78,10 +79,12 @@ router.get('/admob', async (req: Request, res: Response) => {
   // ponytail: 한도 확인→지급이 원자적이지 않아 동시 콜백 2개가 한도를 1 넘길 수 있다.
   // 하루 광고 2회 한도라 허용.
   if ((await adStarsRemainingToday(userId, adTzOffset(params.get('custom_data')))) <= 0) {
+    console.log('[rewards.admob] daily limit', { userId });
     res.json({ ok: true, granted: false, reason: 'daily_limit' });
     return;
   }
   const granted = await grantStars(userId, AD_REWARD_STARS, false, 'ad', transactionId);
+  console.log('[rewards.admob] ad reward', { userId, granted });
   res.json({ ok: true, granted });
 });
 
@@ -98,6 +101,12 @@ router.post('/revenuecat', async (req: Request, res: Response) => {
   }
 
   const event = req.body?.event ?? {};
+  console.log('[rewards.revenuecat] event', {
+    type: event.type,
+    cancelReason: event.cancel_reason,
+    product: event.product_id,
+    env: event.environment,
+  });
   // 스토어 환불 = CANCELLATION + cancel_reason CUSTOMER_SUPPORT. 지급한 개수만큼 회수한다
   // (이미 써 버린 만큼은 유료 잔액이 마이너스). 지급 기록이 없는 거래(별사탕 외 상품)는 무시.
   if (event.type === 'CANCELLATION' && event.cancel_reason === 'CUSTOMER_SUPPORT') {

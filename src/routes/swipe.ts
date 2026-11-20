@@ -326,9 +326,7 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   // 3) 프로필 일괄 조회 — discover hot path 와 동일한 컬럼 집합.
   const query = supabase
     .from('profiles')
-    .select(
-      'id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, created_at',
-    )
+    .select(LIKE_CARD_COLUMNS)
     .in('id', eligibleIds)
     .eq('is_active', true)
     .is('frozen_at', null);
@@ -473,24 +471,12 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   // LAUNCH_CHECKLIST #3: discover 와 동일 — private 버킷 전환에 맞춰 응답 직전
   // voice intro slot URL 을 짧은 TTL 서명 URL 로 변환.
   const results: Record<string, unknown>[] = await Promise.all(
-    visibleRows.map(async ({ _intra, voice_intro_audio_urls, created_at, ...rest }) => {
-      const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<
-        Record<VoiceIntroSlotLanguage, string | null>
-      >;
-      const photoUrls: string[] = (readyPhotosByUser.get(rest.id as string) ?? []).slice(0, 1);
-      return {
-        ...rest,
-        voice_intro_audio_url: await createSignedUrlFromStored(
-          VOICE_INTRO_BUCKET,
-          slotUrls[slot] as string | null | undefined,
-        ),
-        photos: photoUrls,
-        photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
-        // 방금 무료로 열린 카드 — 앱이 이 카드에서 시작한다.
-        ...(rest.id === justRevealedId ? { just_revealed: true } : {}),
-        ...(rest.id === latestLikerId ? { latest_like: true } : {}),
-      };
-    }),
+    visibleRows.map(async (row) => ({
+      ...(await toLikeCard(row, readyPhotosByUser, slot)),
+      // 방금 무료로 열린 카드 — 앱이 이 카드에서 시작한다.
+      ...(row.id === justRevealedId ? { just_revealed: true } : {}),
+      ...(row.id === latestLikerId ? { latest_like: true } : {}),
+    })),
   );
 
   // 잠긴 카드의 id 는 실제 liker id — 공개 요청(POST /likes-received/reveal)에 쓴다.
@@ -509,6 +495,44 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
 
   res.json(results);
 });
+
+// 받은 인사 탭의 열린 카드 한 장 — 목록(GET /likes-received)과 공개 응답(POST reveal)이 같이 쓴다.
+// 두 곳이 따로 만들면 카드 모양이 어긋난다.
+const LIKE_CARD_COLUMNS =
+  'id, display_name, birth_date, gender, nationality, language, voice_intro, voice_intro_audio_urls, interests, created_at';
+
+async function toLikeCard(
+  row: Record<string, any>,
+  readyPhotosByUser: Map<string, string[]>,
+  slot: VoiceIntroSlotLanguage,
+): Promise<Record<string, unknown>> {
+  const { _intra, voice_intro_audio_urls, created_at, ...rest } = row;
+  const slotUrls = (voice_intro_audio_urls ?? {}) as Partial<Record<VoiceIntroSlotLanguage, string | null>>;
+  return {
+    ...rest,
+    voice_intro_audio_url: await createSignedUrlFromStored(VOICE_INTRO_BUCKET, slotUrls[slot] ?? null),
+    photos: (readyPhotosByUser.get(rest.id as string) ?? []).slice(0, 1),
+    photo_access: { main_photo_unlocked: false, all_photos_unlocked: false },
+  };
+}
+
+// 공개 직후 응답에 실을 카드 — 앱이 목록을 다시 받기 전에 바로 보여 준다. 목록에 안 나올 카드(사진·
+// 보이스 한마디 없음)거나 조회가 실패하면 null — 앱은 예전처럼 목록을 기다린다.
+async function loadRevealedCard(viewerId: string, likerId: string): Promise<Record<string, unknown> | null> {
+  const [profileResult, viewerResult, photos] = await Promise.all([
+    supabase.from('profiles').select(LIKE_CARD_COLUMNS).eq('id', likerId).eq('is_active', true).is('frozen_at', null).maybeSingle(),
+    supabase.from('profiles').select('language').eq('id', viewerId).single(),
+    fetchReadyPhotosByUser([likerId], 'likes-reveal'),
+  ]);
+  if (profileResult.error || viewerResult.error) {
+    console.error('[likes-reveal] card load failed:', (profileResult.error ?? viewerResult.error)!.message);
+    return null;
+  }
+  const row = profileResult.data as Record<string, any> | null;
+  const slot = pickViewerSlot((viewerResult.data?.language as string | null) ?? '');
+  if (!row || (photos.get(likerId) ?? []).length === 0 || !row.voice_intro_audio_urls?.[slot]) return null;
+  return toLikeCard(row, photos, slot);
+}
 
 // 무료 카드 한 장 열기 — 받은 인사 탭에 들어갈 때 목록 요청이 거의 동시에 두 번 나가면,
 // 둘 다 "무료 카드 있음" 을 보고 각자 다른 카드를 열 수 있다. 일단 넣은 뒤 24시간 안의 무료
@@ -1504,7 +1528,9 @@ router.post(
       throw e;
     }
 
-    res.json({ revealed: true });
+    // 열린 카드를 함께 보낸다 — 앱이 목록 재조회(받은 인사 중 가장 무거운 조회)를 기다리지 않게.
+    const card = await loadRevealedCard(me, liker_id);
+    res.json(card ? { revealed: true, card } : { revealed: true });
   },
 );
 

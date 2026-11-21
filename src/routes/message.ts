@@ -508,7 +508,7 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
 
   // 언매치 확인
   if (match.unmatched_at) {
-    res.status(403).json({ error: 'This match has been unmatched' });
+    res.status(403).json({ error: 'This match has been unmatched', code: 'match_ended' });
     return;
   }
 
@@ -809,7 +809,7 @@ router.post(
       return;
     }
     if (match.unmatched_at) {
-      res.status(403).json({ error: 'This match has ended' });
+      res.status(403).json({ error: 'This match has ended', code: 'match_ended' });
       return;
     }
 

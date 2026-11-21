@@ -48,6 +48,9 @@ const router = Router();
 // 트레이드오프: 최신 N 개를 모두 이미 응답(스와이프)한 사용자는 그보다 오래된
 // 미응답 좋아요가 있어도 노출 안 됨 (A1 과 동일한 freshness 편향, 후속 페이지네이션 대상).
 export const LIKES_RECEIVED_MAX = 300;
+// 받은 인사는 상대가 인사한 시각과 내가 연 시각 중 늦은 쪽에서 이 기간이 지나면 목록에서 뺀다
+// (기록은 지우지 않는다). prod 맞인사 97% 가 첫 인사 후 30일 안 — 2026-11-21 사용자 결정.
+export const LIKES_RECEIVED_TTL_DAYS = 30;
 
 router.use(authMiddleware);
 
@@ -234,18 +237,22 @@ router.get('/likes-received', async (req: AuthRequest, res: Response) => {
   // 1) 나를 like 한 사람들 (시간 역순, 최신 LIKES_RECEIVED_MAX 개로 바운드).
   //    (E) UNIQUE(swiper_id, swiped_id) 라 distinct liker. 인기 사용자가 수천 명에게
   //    좋아요를 받아도 다운스트림(프로필/사진 IN 페치)이 최신 N 명으로 묶인다.
+  //    LIKES_RECEIVED_TTL_DAYS 지난 인사는 빠진다 — 다만 그 안에 연 카드는 아래 열린 카드로 남는다.
+  const ttlCutoff = new Date(Date.now() - LIKES_RECEIVED_TTL_DAYS * 86_400_000).toISOString();
   const [likesResult, openedResult] = await Promise.all([
     supabase
       .from('swipes')
       .select('swiper_id, created_at')
       .eq('swiped_id', req.userId!)
       .eq('direction', 'like')
+      .gte('created_at', ttlCutoff)
       .order('created_at', { ascending: false })
       .limit(LIKES_RECEIVED_MAX),
     // 열어 둔 카드(무료·별사탕) — 최신 N 개 밖으로 밀려나도, 플레이리스트에 함께 들어가도 빠지지
-    // 않게 따로 받는다. 공개 기록은 그 사람이 나를 like 했을 때만 생긴다.
+    // 않게 따로 받는다. 공개 기록은 그 사람이 나를 like 했을 때만 생긴다. 연 지 기간이 지난 카드는
+    // (인사도 기간이 지났으면) 함께 빠진다.
     env.monetization.enabled
-      ? supabase.from('like_reveals').select('liker_id').eq('viewer_id', req.userId!)
+      ? supabase.from('like_reveals').select('liker_id').eq('viewer_id', req.userId!).gte('revealed_at', ttlCutoff)
       : Promise.resolve({ data: [], error: null }),
   ]);
   const likesError = likesResult.error ?? openedResult.error;

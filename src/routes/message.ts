@@ -473,6 +473,26 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   const storedEmotion: Exclude<Emotion, 'neutral'> | null =
     emotion && emotion !== 'neutral' ? emotion : null;
 
+  // 지연 단축: 다른 결과를 기다릴 필요 없는 OpenAI 모더레이션과 중복 확인은 처음부터
+  // 같이 돌리고, 결과는 원래 순서 자리에서 꺼낸다 (응답·검증 순서 불변 — 매치 없는
+  // 사용자는 여전히 403 이 먼저). 둘 다 reject 하지 않는다 (모더레이션은 fail-open,
+  // supabase 는 error 로 반환) — 앞에서 return 해도 unhandled rejection 없음.
+  const messageId = client_message_id ?? randomUUID();
+  const openaiPromise = checkOpenAiModeration(text);
+  // idempotent-send pre-check (아래 1)·2) 주석). 클라이언트 키가 없으면 새 UUID 라 확인 불필요.
+  const precheckPromise = client_message_id
+    ? Promise.all([
+        supabase
+          .from('messages')
+          .select('*')
+          .eq('id', messageId)
+          .eq('match_id', matchId)
+          .eq('sender_id', req.userId!)
+          .maybeSingle(),
+        supabase.from('messages').select('id').eq('id', messageId).maybeSingle(),
+      ])
+    : null;
+
   // 매치 확인 + 상대방 정보 조회
   const { data: match } = await supabase
     .from('matches')
@@ -595,7 +615,7 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   // + category 미노출) — FE 핸들러 무변경. audit log 도 같은 테이블 (layer 컬럼은
   // moderation_blocks v1 스키마에 없으므로 console 로그에만 layer='openai' 가시화).
   // fail-open: 키 미설정 / OpenAI 다운 시 통과 (사전 차단이 1차 방어선).
-  const openaiResult = await checkOpenAiModeration(text);
+  const openaiResult = await openaiPromise;
   if (openaiResult.blocked) {
     // OpenAI 는 multi-lingual 모델이라 language 단정 어려움 — 송신자
     // profiles.language 를 fallback (omni-moderation-latest 는 language 미명시).
@@ -644,7 +664,6 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
     }
   }
 
-  const messageId = client_message_id ?? randomUUID();
   const queuedAt = new Date().toISOString();
   const voiceId = sender.elevenlabs_voice_id ?? null;
 
@@ -665,13 +684,10 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
   //
   // 1) retry-after-commit 감지 — 이미 INSERT 된 (내 소유) row 면 재합성 없이 그대로
   //    반환. scoped(id+match+sender) 라 위조 id 는 여기서 안 걸리고 아래로 흘러 409.
-  const { data: committed, error: committedError } = await supabase
-    .from('messages')
-    .select('*')
-    .eq('id', messageId)
-    .eq('match_id', matchId)
-    .eq('sender_id', req.userId!)
-    .maybeSingle();
+  const [committedResult, foreignResult] = precheckPromise
+    ? await precheckPromise
+    : [{ data: null, error: null }, { data: null, error: null }];
+  const { data: committed, error: committedError } = committedResult;
   if (committedError) {
     // pre-check 실패는 correctness 를 깨지 않는다 (최종 upsert 의 ON CONFLICT 가
     // 보장) — 가시화만 하고 정상 전송 흐름으로 통과시켜 핫패스 회복력 유지.
@@ -684,11 +700,7 @@ router.post('/:matchId/messages', requireNotFrozen, validateBody(sendMessageSche
 
   // 2) 위조 id 조기 차단 — 내 소유 아닌 기존 id 로 in-flight 시작/재합성 방지.
   //    (전역 id 존재하나 scoped 로 안 잡히면 → 409, 파이프라인 미발화)
-  const { data: foreign, error: foreignError } = await supabase
-    .from('messages')
-    .select('id')
-    .eq('id', messageId)
-    .maybeSingle();
+  const { data: foreign, error: foreignError } = foreignResult;
   if (foreignError) {
     console.error(`[POST messages] foreign pre-check failed id=${messageId}:`, foreignError.message);
   }
